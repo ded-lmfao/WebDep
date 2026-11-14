@@ -119,16 +119,60 @@ impl ClusterManager {
         .await
         .map_err(|e| format!("Failed creating enrollment token: {e}"))?;
 
-        let base_url = core_public_url.trim().trim_end_matches('/');
-        let mut join_command = format!("webdep --node --join {base_url} --token {raw_token}");
+        let base_url = core_public_url
+            .trim()
+            .trim_end_matches('/')
+            .chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '`' | '$' | ';' | '&' | '|' | '<' | '>'))
+            .collect::<String>();
+        let clean_target_ip = input
+            .target_public_ip
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-'))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let clean_slug = input
+            .repo_slug
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+                    .collect::<String>()
+            })
+            .filter(|s| s.contains('/'))
+            .unwrap_or_else(|| "ded-lmfao/WebDep".to_string());
+
+        let sanitize_quoted = |val: &str| -> String {
+            val.chars()
+                .filter(|c| !matches!(c, '"' | '\'' | '`' | '$' | ';' | '&' | '|' | '\n' | '\r' | '<' | '>'))
+                .collect()
+        };
+
+        let mut args = format!("--node --join {base_url} --token {raw_token}");
         if !label.is_empty() {
-            let safe_name = label.replace('"', "");
-            join_command.push_str(&format!(" --name \"{safe_name}\""));
+            let safe_name = sanitize_quoted(&label);
+            args.push_str(&format!(" --name \"{safe_name}\""));
         }
         if region != "default" {
-            let safe_region = region.replace('"', "");
-            join_command.push_str(&format!(" --region \"{safe_region}\""));
+            let safe_region = sanitize_quoted(&region);
+            args.push_str(&format!(" --region \"{safe_region}\""));
         }
+        if !clean_target_ip.is_empty() {
+            args.push_str(&format!(" --public-ip \"{clean_target_ip}\""));
+        }
+
+        let join_command = format!("webdep {args}");
+        let service_command = format!("sudo ./start.sh --service {args}");
+        let fresh_vps_command = format!(
+            "git clone https://github.com/{clean_slug}.git webdep && cd webdep && {service_command}"
+        );
 
         Ok(CreateEnrollTokenResponse {
             id,
@@ -136,7 +180,11 @@ impl ClusterManager {
             label,
             region,
             expires_at,
+            core_url: base_url,
+            target_public_ip: clean_target_ip,
             join_command,
+            service_command,
+            fresh_vps_command,
         })
     }
 
@@ -1324,6 +1372,7 @@ mod tests {
                     region: Some("eu-central".to_string()),
                     tags: Some(vec!["gpu".to_string()]),
                     ttl_seconds: Some(600),
+                    ..Default::default()
                 },
                 "https://panel.example.com",
             )

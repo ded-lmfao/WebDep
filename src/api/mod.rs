@@ -173,6 +173,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/cluster/enroll", post(enroll_node_handler))
         .route("/api/cluster/node-ws", get(node_ws_handler))
         .route("/api/cluster/nodes", get(list_cluster_nodes_handler))
+        .route("/api/cluster/panel-info", get(cluster_panel_info_handler))
         .route(
             "/api/cluster/enroll-tokens",
             get(list_enroll_tokens_handler).post(create_enroll_token_handler),

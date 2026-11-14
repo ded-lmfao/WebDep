@@ -284,35 +284,96 @@ export function setGlobalNodeFilter(nodeId) {
   }
 }
 
-export function openAddNodeModal() {
+export function setAddNodeTargetIp(ip) {
+  const el = document.getElementById('add-node-target-ip');
+  if (el) el.value = ip;
+}
+
+export async function openAddNodeModal() {
   const labelEl = document.getElementById('add-node-label');
   const regionEl = document.getElementById('add-node-region');
+  const targetIpEl = document.getElementById('add-node-target-ip');
+  const coreUrlEl = document.getElementById('add-node-core-url');
+  const sugEl = document.getElementById('add-node-ip-suggestions');
   const outEl = document.getElementById('add-node-result-box');
-  if (labelEl) labelEl.value = '';
-  if (regionEl) regionEl.value = 'eu-central';
+
+  const nextNum = Math.max(2, (state.nodes || []).length + 1);
+  if (labelEl) labelEl.value = `VPS-${nextNum}`;
+  if (regionEl && !regionEl.value.trim()) regionEl.value = 'mumbai-IND';
+  if (targetIpEl) targetIpEl.value = '';
+  if (coreUrlEl) coreUrlEl.value = window.location.origin;
+  if (sugEl) sugEl.innerHTML = '<span>Detecting panel IP...</span>';
   if (outEl) outEl.style.display = 'none';
   openModal('modal-add-node');
+
+  try {
+    const info = await api('/api/cluster/panel-info', { noCache: true });
+    if (coreUrlEl && info.suggestedPanelUrl) {
+      coreUrlEl.value = info.suggestedPanelUrl;
+    }
+    if (sugEl) {
+      sugEl.innerHTML = '';
+      const addChip = (labelText, url) => {
+        if (!url) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-secondary btn-sm';
+        btn.style.cssText = 'padding: 2px 8px; font-size: 10.5px;';
+        btn.textContent = labelText;
+        btn.addEventListener('click', () => {
+          if (coreUrlEl) coreUrlEl.value = url;
+        });
+        sugEl.appendChild(btn);
+      };
+
+      const portSuffix = info.port ? `:${info.port}` : '';
+      const proto = info.requestUrl && info.requestUrl.startsWith('https://') ? 'https' : 'http';
+      if (info.publicIp) addChip(`Public IP (${info.publicIp})`, `${proto}://${info.publicIp}${portSuffix}`);
+      if (info.lanIp && info.lanIp !== info.publicIp) addChip(`LAN IP (${info.lanIp})`, `${proto}://${info.lanIp}${portSuffix}`);
+      if (info.requestUrl) addChip(`Current Browser (${info.requestUrl})`, info.requestUrl);
+    }
+  } catch (_) {
+    if (sugEl) sugEl.innerHTML = '';
+  }
 }
 
 export async function generateNodeEnrollToken() {
   const label = (document.getElementById('add-node-label')?.value || '').trim();
   const region = (document.getElementById('add-node-region')?.value || 'default').trim();
+  const targetPublicIp = (document.getElementById('add-node-target-ip')?.value || '').trim();
+  const coreUrl = (document.getElementById('add-node-core-url')?.value || '').trim();
   const ttlSeconds = Number(document.getElementById('add-node-ttl')?.value || 900);
   const btn = document.getElementById('generate-node-token-btn');
+
+  if (!label) {
+    toast('Please enter a VPS / Node Name (e.g. VPS-2)', 'warning');
+    document.getElementById('add-node-label')?.focus();
+    return;
+  }
 
   if (btn) btn.disabled = true;
   try {
     const res = await api('/api/cluster/enroll-tokens', {
       method: 'POST',
-      body: { label, region, ttlSeconds },
+      body: {
+        label,
+        region,
+        ttlSeconds,
+        coreUrl: coreUrl || undefined,
+        targetPublicIp: targetPublicIp || undefined,
+      },
     });
     const outEl = document.getElementById('add-node-result-box');
+    const freshEl = document.getElementById('add-node-fresh-cmd');
+    const svcEl = document.getElementById('add-node-service-cmd');
     const cmdEl = document.getElementById('add-node-join-cmd');
     const tokEl = document.getElementById('add-node-raw-token');
+    if (freshEl) freshEl.value = res.freshVpsCommand || '';
+    if (svcEl) svcEl.value = res.serviceCommand || '';
     if (cmdEl) cmdEl.value = res.joinCommand || '';
     if (tokEl) tokEl.textContent = res.token || '';
     if (outEl) outEl.style.display = 'block';
-    toast('Single-use node enrollment token generated', 'success');
+    toast('Complete VPS join command generated', 'success');
     await loadNodesView(true);
   } catch (err) {
     toast(`Failed generating join token: ${err.message}`, 'error');
@@ -321,16 +382,16 @@ export async function generateNodeEnrollToken() {
   }
 }
 
-export async function copyNodeJoinCommand() {
-  const cmdEl = document.getElementById('add-node-join-cmd');
+export async function copyNodeJoinCommand(targetInputId = 'add-node-fresh-cmd') {
+  const cmdEl = document.getElementById(targetInputId);
   if (!cmdEl || !cmdEl.value) return;
   try {
     await navigator.clipboard.writeText(cmdEl.value);
-    toast('Join command copied to clipboard', 'success');
+    toast('Command copied to clipboard', 'success');
   } catch {
     cmdEl.select();
     document.execCommand('copy');
-    toast('Join command copied', 'success');
+    toast('Command copied', 'success');
   }
 }
 
@@ -589,6 +650,7 @@ window.loadNodesView = loadNodesView;
 window.renderNodesView = renderNodesView;
 window.setGlobalNodeFilter = setGlobalNodeFilter;
 window.openAddNodeModal = openAddNodeModal;
+window.setAddNodeTargetIp = setAddNodeTargetIp;
 window.generateNodeEnrollToken = generateNodeEnrollToken;
 window.copyNodeJoinCommand = copyNodeJoinCommand;
 window.toggleNodeDrain = toggleNodeDrain;

@@ -105,13 +105,154 @@ pub(crate) async fn list_enroll_tokens_handler(
     Ok(Json(tokens))
 }
 
+fn extract_host_and_port(headers: &HeaderMap) -> (String, String, u16) {
+    let raw = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("127.0.0.1:4600");
+
+    let env_port = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(4600);
+
+    if let Some(rest) = raw.strip_prefix('[') {
+        if let Some((ip6, after)) = rest.split_once(']') {
+            let p = after
+                .strip_prefix(':')
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(env_port);
+            return (raw.to_string(), ip6.to_string(), p);
+        }
+    }
+    if let Some((h, p_str)) = raw.rsplit_once(':') {
+        if let Ok(p) = p_str.parse::<u16>() {
+            return (raw.to_string(), h.to_string(), p);
+        }
+    }
+    (raw.to_string(), raw.to_string(), env_port)
+}
+
+fn is_loopback_host(h: &str) -> bool {
+    let lower = h.trim().to_ascii_lowercase();
+    lower == "127.0.0.1" || lower == "localhost" || lower == "::1" || lower == "0.0.0.0"
+}
+
+fn detect_lan_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    if !ip.is_loopback() && !ip.is_unspecified() {
+        Some(ip.to_string())
+    } else {
+        None
+    }
+}
+
+async fn detect_public_ip_cached() -> Option<String> {
+    static PUBLIC_IP_CACHE: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+    PUBLIC_IP_CACHE
+        .get_or_init(|| async {
+            if let Ok(env_ip) = std::env::var("PUBLIC_IP") {
+                let t = env_ip.trim().to_string();
+                if !t.is_empty() && !is_loopback_host(&t) {
+                    return Some(t);
+                }
+            }
+            tokio::task::spawn_blocking(|| {
+                for svc in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
+                    let out = std::process::Command::new("curl")
+                        .args(["-fsS", "--max-time", "2", svc])
+                        .output()
+                        .ok();
+                    if let Some(o) = out {
+                        if o.status.success() {
+                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if !s.is_empty()
+                                && s.len() <= 64
+                                && !s.contains(char::is_whitespace)
+                                && !is_loopback_host(&s)
+                            {
+                                return Some(s);
+                            }
+                        }
+                    }
+                }
+                None
+            })
+            .await
+            .ok()
+            .flatten()
+        })
+        .await
+        .clone()
+}
+
+pub(crate) async fn cluster_panel_info_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _admin = verify_main_admin(&state, &headers).await?;
+    let (request_url, _) = infer_core_urls(&headers, &state);
+    let (_, req_host, port) = extract_host_and_port(&headers);
+    let proto = if is_https_request(&headers, state.auth.force_secure_cookies) {
+        "https"
+    } else {
+        "http"
+    };
+
+    let lan_ip = detect_lan_ip().unwrap_or_default();
+    let mut public_ip = detect_public_ip_cached().await.unwrap_or_default();
+    if public_ip.is_empty() && !is_loopback_host(&req_host) {
+        public_ip = req_host.clone();
+    }
+
+    let suggested_panel_url = if !is_loopback_host(&req_host) {
+        request_url.clone()
+    } else if !public_ip.is_empty() {
+        format!("{proto}://{public_ip}:{port}")
+    } else if !lan_ip.is_empty() {
+        format!("{proto}://{lan_ip}:{port}")
+    } else {
+        request_url.clone()
+    };
+
+    let (repo_slug, _) = state.updater.get_repo_and_token().await;
+
+    Ok(Json(serde_json::json!({
+        "suggestedPanelUrl": suggested_panel_url,
+        "requestUrl": request_url,
+        "publicIp": public_ip,
+        "lanIp": lan_ip,
+        "port": port,
+        "repoSlug": repo_slug,
+    })))
+}
+
 pub(crate) async fn create_enroll_token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(input): Json<CreateEnrollTokenInput>,
+    Json(mut input): Json<CreateEnrollTokenInput>,
 ) -> Result<(StatusCode, Json<CreateEnrollTokenResponse>), (StatusCode, String)> {
     let admin = verify_main_admin(&state, &headers).await?;
-    let (core_http_url, _) = infer_core_urls(&headers, &state);
+    let (inferred_http_url, _) = infer_core_urls(&headers, &state);
+    let core_http_url = input
+        .core_url
+        .as_deref()
+        .map(|s| s.trim().trim_end_matches('/'))
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .map(|s| s.to_string())
+        .unwrap_or(inferred_http_url);
+
+    if input.repo_slug.as_deref().map(|s| s.trim()).unwrap_or("").is_empty() {
+        let (slug, _) = state.updater.get_repo_and_token().await;
+        input.repo_slug = Some(slug);
+    }
+
     let created = state
         .cluster
         .create_enroll_token(Some(admin.id), input, &core_http_url)
@@ -631,7 +772,60 @@ mod tests {
             .await
             .unwrap();
         let tok_json: CreateEnrollTokenResponse = serde_json::from_slice(&tok_body).unwrap();
-        assert!(tok_json.join_command.contains("--join http://panel.test:8080"));
+        assert!(tok_json.join_command.contains("--node --join http://panel.test:8080"));
+        assert!(tok_json.fresh_vps_command.contains("git clone https://github.com/"));
+        assert!(tok_json.service_command.contains("sudo ./start.sh --service --node"));
+
+        // Panel info + full join command with detected/custom Core URL & VPS 2 IP
+        let info_res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/cluster/panel-info")
+                    .header("Cookie", format!("nd_session={admin_sid}"))
+                    .header(header::HOST, "203.0.113.10:4600")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(info_res.status(), StatusCode::OK);
+        let info_body = axum::body::to_bytes(info_res.into_body(), 1024 * 64).await.unwrap();
+        let info_json: serde_json::Value = serde_json::from_slice(&info_body).unwrap();
+        assert_eq!(info_json["suggestedPanelUrl"], "http://203.0.113.10:4600");
+
+        let full_tok_res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/cluster/enroll-tokens")
+                    .header("Cookie", format!("nd_session={admin_sid}"))
+                    .header("X-CSRF-Token", &admin_csrf)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "label": "vps-2",
+                            "region": "mumbai-IND",
+                            "coreUrl": "http://203.0.113.10:4600",
+                            "targetPublicIp": "198.51.100.77"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(full_tok_res.status(), StatusCode::CREATED);
+        let full_tok: CreateEnrollTokenResponse = serde_json::from_slice(
+            &axum::body::to_bytes(full_tok_res.into_body(), 64 * 1024).await.unwrap(),
+        )
+        .unwrap();
+        assert!(full_tok.fresh_vps_command.contains("--join http://203.0.113.10:4600"));
+        assert!(full_tok.fresh_vps_command.contains("--public-ip \"198.51.100.77\""));
+        assert!(full_tok.fresh_vps_command.contains("--name \"vps-2\""));
+        assert!(full_tok.fresh_vps_command.contains("--region \"mumbai-IND\""));
 
         // Node enrolls with single-use token (no cookie needed)
         let enroll_payload = serde_json::json!({

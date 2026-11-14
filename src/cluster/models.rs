@@ -271,7 +271,7 @@ pub enum ClusterWsMessage {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateEnrollTokenInput {
     #[serde(default)]
@@ -282,6 +282,12 @@ pub struct CreateEnrollTokenInput {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub ttl_seconds: Option<i64>,
+    #[serde(default)]
+    pub core_url: Option<String>,
+    #[serde(default)]
+    pub target_public_ip: Option<String>,
+    #[serde(default)]
+    pub repo_slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,7 +298,15 @@ pub struct CreateEnrollTokenResponse {
     pub label: String,
     pub region: String,
     pub expires_at: i64,
+    #[serde(default)]
+    pub core_url: String,
+    #[serde(default)]
+    pub target_public_ip: String,
     pub join_command: String,
+    #[serde(default)]
+    pub service_command: String,
+    #[serde(default)]
+    pub fresh_vps_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

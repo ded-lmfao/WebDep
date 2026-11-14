@@ -3371,7 +3371,7 @@
         <div>
           <h3 class="modal-title">Add Worker Web-Node</h3>
           <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
-            Generate a single-use enrollment token and run the join command on your target VPS
+            Enter your target VPS details to generate a ready-to-paste setup command
           </div>
         </div>
         <button class="modal-close" data-close-modal>&times;</button>
@@ -3379,31 +3379,65 @@
       <div class="modal-body">
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label" for="add-node-label">Node Name (optional)</label>
-            <input type="text" class="form-control" id="add-node-label" placeholder="e.g. eu-worker-1">
+            <label class="form-label" for="add-node-label">VPS / Node Name</label>
+            <input type="text" class="form-control" id="add-node-label" value="VPS-2" placeholder="e.g. VPS-2">
           </div>
           <div class="form-group">
             <label class="form-label" for="add-node-region">Region</label>
-            <input type="text" class="form-control" id="add-node-region" value="eu-central" placeholder="eu-central / us-east">
+            <input type="text" class="form-control" id="add-node-region" value="mumbai-IND" placeholder="e.g. mumbai-IND / eu-central">
           </div>
         </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="add-node-target-ip">Target VPS 2 Public IP</label>
+            <input type="text" class="form-control" id="add-node-target-ip" placeholder="e.g. 203.0.113.25 (or 127.0.0.1 for local test)">
+            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 5px; font-size: 11px; color: var(--text-dim);">
+              <span>Used for P2P mesh &amp; DNS cards.</span>
+              <button type="button" class="btn btn-secondary btn-sm" style="padding: 1px 7px; font-size: 10.5px;" onclick="setAddNodeTargetIp('127.0.0.1')">Use 127.0.0.1 (Local)</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="add-node-ttl">Token Expiration</label>
+            <select class="form-control" id="add-node-ttl">
+              <option value="900" selected>15 minutes (recommended)</option>
+              <option value="1800">30 minutes</option>
+              <option value="3600">1 hour</option>
+            </select>
+          </div>
+        </div>
+
         <div class="form-group">
-          <label class="form-label" for="add-node-ttl">Token Expiration</label>
-          <select class="form-control" id="add-node-ttl">
-            <option value="900" selected>15 minutes (recommended)</option>
-            <option value="1800">30 minutes</option>
-            <option value="3600">1 hour</option>
-          </select>
+          <label class="form-label" for="add-node-core-url">Current Web-Core Panel URL (auto-detected)</label>
+          <input type="text" class="form-control" id="add-node-core-url" placeholder="Detecting panel IP..." style="font-family: var(--font-mono); font-size: 12px;">
+          <div id="add-node-ip-suggestions" style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 6px; font-size: 11px; color: var(--text-dim);"></div>
         </div>
 
         <div id="add-node-result-box" style="display: none; margin-top: 14px; padding: 14px; background: var(--bg-input); border-radius: var(--radius-md); border: 1px solid var(--border-subtle);">
           <div style="font-size: 12px; font-weight: 600; color: var(--text-main); margin-bottom: 6px;">
-            Run on the new VPS (after installing the webdep binary):
+            1. Fresh Linux VPS 2 — Copy &amp; Paste Whole Command (Clones, Installs Service &amp; Joins):
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
+            <input type="text" class="form-control" id="add-node-fresh-cmd" readonly style="font-family: var(--font-mono); font-size: 11.5px;">
+            <button type="button" class="btn btn-primary btn-sm" onclick="copyNodeJoinCommand('add-node-fresh-cmd')">Copy</button>
+          </div>
+
+          <div style="font-size: 11.5px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px;">
+            2. Already Cloned on VPS 2 (<code>start.sh --service</code>):
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
+            <input type="text" class="form-control" id="add-node-service-cmd" readonly style="font-family: var(--font-mono); font-size: 11px;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-service-cmd')">Copy</button>
+          </div>
+
+          <div style="font-size: 11.5px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px;">
+            3. Direct Binary (<code>webdep --node</code>):
           </div>
           <div style="display: flex; gap: 8px; align-items: center;">
-            <input type="text" class="form-control" id="add-node-join-cmd" readonly style="font-family: var(--font-mono); font-size: 11.5px;">
-            <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand()">Copy</button>
+            <input type="text" class="form-control" id="add-node-join-cmd" readonly style="font-family: var(--font-mono); font-size: 11px;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-join-cmd')">Copy</button>
           </div>
+
           <div style="font-size: 11px; color: var(--text-dim); margin-top: 8px;">
             Raw Token (shown once): <code id="add-node-raw-token" style="word-break: break-all;"></code>
           </div>

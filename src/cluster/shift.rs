@@ -1180,6 +1180,7 @@ mod tests {
                     region: Some("eu-central".to_string()),
                     tags: None,
                     ttl_seconds: Some(600),
+                    ..Default::default()
                 },
                 "http://127.0.0.1:8080",
             )
