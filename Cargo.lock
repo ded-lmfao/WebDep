@@ -2461,12 +2461,17 @@ dependencies = [
  "flate2",
  "futures-util",
  "hex",
+ "hyper",
+ "hyper-util",
  "libc",
  "rand",
  "rusqlite",
  "rust-embed",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
  "sqlx",
  "sysinfo",
@@ -2476,6 +2481,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 1.0.12",
 ]
 
 [[package]]

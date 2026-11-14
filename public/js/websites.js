@@ -8,6 +8,7 @@ import {
   state,
   getSelectedProject,
   setHtmlIfChanged,
+  matchesNodeFilter,
   escapeHtml,
   formatRelativeTime,
   openModal,
@@ -108,6 +109,7 @@ function renderProjectsList() {
 
   const search = (document.getElementById('projects-search-input')?.value || '').toLowerCase();
   const filtered = websites.filter((p) => {
+    if (!matchesNodeFilter(p)) return false;
     const resItem = resByProjId.get(p.id);
     const isOnline = isProjectOnline(p, resItem);
     if (state.projectStatusFilter === 'running' && !isOnline) return false;

@@ -34,6 +34,7 @@ pub struct AppState {
     pub cache: Arc<AppCache>,
     pub databases: Arc<crate::databases::Databases>,
     pub updater: Arc<crate::updater::Updater>,
+    pub cluster: Arc<crate::cluster::ClusterManager>,
 }
 
 
@@ -117,7 +118,9 @@ pub(crate) async fn security_middleware(
                 || path == "/api/auth/passkeys/login/start"
                 || path == "/api/auth/passkeys/login/finish"
                 || (path == "/api/theme" && *req.method() == Method::GET)
-                || path.starts_with("/api/webhooks/github/");
+                || path.starts_with("/api/webhooks/github/")
+                || (path == "/api/cluster/enroll" && *req.method() == Method::POST)
+                || (path == "/api/cluster/node-ws" && *req.method() == Method::GET);
 
             if !is_public_auth {
                 let sid_opt = extract_session_id(req.headers());

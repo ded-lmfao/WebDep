@@ -704,6 +704,7 @@ mod tests {
             data_dir: "/tmp/db".to_string(),
             linked_project_id: Some(7),
             linked_project_name: Some("web".to_string()),
+            node_id: None,
             internal_url: build_postgres_url("webdep", &test_val, "127.0.0.1", 5432, "app", false),
             external_url: build_postgres_url("webdep", &test_val, "db.example.com", 5432, "app", true),
             psql_command: "psql -h db.example.com -p 5432 -U webdep -d app".to_string(),
@@ -844,6 +845,7 @@ mod tests {
             cache: Arc::new(crate::cache::AppCache::new()),
             databases,
             updater: Arc::new(crate::updater::Updater::with_db(db.clone())),
+            cluster: Arc::new(crate::cluster::ClusterManager::new(db.clone(), tmp.clone())),
         };
 
         let admin_id: i64 = {

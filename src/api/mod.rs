@@ -1,6 +1,7 @@
 pub mod common;
 pub mod auth;
 pub mod access;
+pub mod cluster;
 pub mod projects;
 pub mod files;
 pub mod deployments;
@@ -49,6 +50,7 @@ async fn healthz_handler() -> (StatusCode, [(&'static str, &'static str); 3], &'
 
 use self::auth::*;
 use self::access::*;
+use self::cluster::*;
 use self::projects::*;
 use self::files::*;
 use self::deployments::*;
@@ -167,6 +169,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/access/grants/:id", delete(delete_grant_handler))
         .route("/api/access/users/:id/revoke-sessions", post(revoke_user_sessions_handler))
         .route("/api/access/audit", get(access_audit_handler))
+        // Multi-Node Cluster Mesh & Enrollment
+        .route("/api/cluster/enroll", post(enroll_node_handler))
+        .route("/api/cluster/node-ws", get(node_ws_handler))
+        .route("/api/cluster/nodes", get(list_cluster_nodes_handler))
+        .route(
+            "/api/cluster/enroll-tokens",
+            get(list_enroll_tokens_handler).post(create_enroll_token_handler),
+        )
+        .route("/api/cluster/nodes/:id/drain", post(drain_cluster_node_handler))
+        .route("/api/cluster/nodes/:id", delete(delete_cluster_node_handler))
         // Managed Databases (PostgreSQL)
         .route("/api/databases", get(list_databases_handler).post(create_database_handler))
         .route("/api/databases/:id", get(get_database_handler).delete(delete_database_handler))

@@ -87,7 +87,15 @@ pub struct Project {
     pub access_mode: String,
     #[serde(default)]
     pub allowed_ips: String,
+    #[serde(default)]
+    pub node_id: Option<i64>,
+    #[serde(default = "default_placement_version")]
+    pub placement_version: i64,
+    #[serde(default)]
+    pub assigned_port: Option<u16>,
 }
+
+pub fn default_placement_version() -> i64 { 1 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct EnvVarView {
@@ -112,7 +120,8 @@ pub const SELECT_PROJECT_FIELDS: &str = "\
     stability_s, auto_deploy, webhook_secret, \
     current_release_id, deployed_sha, last_poll_at, app_status, \
     app_pid, app_started_at, domains, ssl_email, \
-    created_at, updated_at, project_kind, access_mode, allowed_ips";
+    created_at, updated_at, project_kind, access_mode, allowed_ips, \
+    node_id, placement_version, assigned_port";
 
 pub fn pg_row_to_project(r: &sqlx::postgres::PgRow) -> Result<Project, sqlx::Error> {
     use sqlx::Row;
@@ -150,6 +159,9 @@ pub fn pg_row_to_project(r: &sqlx::postgres::PgRow) -> Result<Project, sqlx::Err
         project_kind: r.try_get::<Option<String>, _>(27)?.unwrap_or_else(default_project_kind),
         access_mode: r.try_get::<Option<String>, _>(28)?.unwrap_or_else(default_access_mode),
         allowed_ips: r.try_get::<Option<String>, _>(29)?.unwrap_or_default(),
+        node_id: r.try_get(30)?,
+        placement_version: r.try_get::<Option<i64>, _>(31)?.unwrap_or(1),
+        assigned_port: r.try_get::<Option<i32>, _>(32)?.and_then(|p| u16::try_from(p).ok()),
     })
 }
 

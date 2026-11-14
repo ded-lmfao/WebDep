@@ -366,6 +366,8 @@ export async function onAuthenticated(isFreshLogin = false) {
   if (addSvcBtn) addSvcBtn.style.display = hasPower('services_manage') ? '' : 'none';
   const addDbBtn = document.getElementById('add-database-header-btn');
   if (addDbBtn) addDbBtn.style.display = hasPower('databases_manage') ? '' : 'none';
+  const addNodeBtn = document.getElementById('add-node-header-btn');
+  if (addNodeBtn) addNodeBtn.style.display = state.user.isMainAdmin ? '' : 'none';
 
   const shouldLoadDbs = hasAnyPower(['databases', 'databases_manage']);
   await Promise.all([
@@ -373,6 +375,7 @@ export async function onAuthenticated(isFreshLogin = false) {
     shouldLoadDbs
       ? (typeof loadDatabases === 'function' ? loadDatabases() : (window.loadDatabases ? window.loadDatabases() : Promise.resolve()))
       : Promise.resolve(),
+    window.loadNodes ? window.loadNodes() : Promise.resolve(),
   ]).catch((err) => {
     console.warn('Initial project/db load warning:', err);
   });

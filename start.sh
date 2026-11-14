@@ -10,12 +10,39 @@ echo "==================================================="
 echo ""
 
 MODE="${1:-foreground}"
+ROLE_MODE="standalone"
+INSTALL_SERVICE=0
+DAEMON_MODE=0
+JOIN_URL=""
+JOIN_TOKEN=""
+NODE_NAME=""
+NODE_REGION=""
+NODE_PUBLIC_IP=""
+
+for ((i=1; i<=$#; i++)); do
+    arg="${!i}"
+    case "$arg" in
+        --core) ROLE_MODE="core" ;;
+        --node) ROLE_MODE="node" ;;
+        --service|service) INSTALL_SERVICE=1 ;;
+        --daemon|-d|daemon|start) DAEMON_MODE=1 ;;
+        --join) next=$((i+1)); JOIN_URL="${!next:-}"; i=$next ;;
+        --token) next=$((i+1)); JOIN_TOKEN="${!next:-}"; i=$next ;;
+        --name) next=$((i+1)); NODE_NAME="${!next:-}"; i=$next ;;
+        --region) next=$((i+1)); NODE_REGION="${!next:-}"; i=$next ;;
+        --public-ip) next=$((i+1)); NODE_PUBLIC_IP="${!next:-}"; i=$next ;;
+    esac
+done
 
 if [[ "$MODE" == "--stop" || "$MODE" == "stop" ]]; then
     echo "[*] Stopping WebDep..."
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet webdep 2>/dev/null; then
-        sudo systemctl stop webdep
-        echo "[+] Stopped systemd service 'webdep'."
+    if command -v systemctl >/dev/null 2>&1; then
+        for svc in webdep-node webdep-core webdep; do
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                sudo systemctl stop "$svc"
+                echo "[+] Stopped systemd service '${svc}'."
+            fi
+        done
     fi
     pkill -f "target/release/webdep" 2>/dev/null || true
     echo "[+] WebDep stopped."
@@ -130,13 +157,22 @@ if [[ "$MODE" == "--update" || "$MODE" == "update" ]]; then
     fi
     rm -f .env.update-bak 2>/dev/null || true
 
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet webdep 2>/dev/null; then
-        if [[ -f "/etc/systemd/system/webdep.service" ]] && ! grep -q "KillMode=process" /etc/systemd/system/webdep.service 2>/dev/null; then
-            sudo sed -i '/RestartSec=/a KillMode=process' /etc/systemd/system/webdep.service 2>/dev/null || true
-            sudo systemctl daemon-reload 2>/dev/null || true
-        fi
-        echo "[*] Restarting systemd service 'webdep'..."
-        sudo systemctl restart webdep || systemctl restart webdep
+    restarted_any=0
+    if command -v systemctl >/dev/null 2>&1; then
+        for svc in webdep-core webdep-node webdep; do
+            unit="/etc/systemd/system/${svc}.service"
+            if [[ -f "$unit" ]] && ! grep -q "KillMode=process" "$unit" 2>/dev/null; then
+                sudo sed -i '/RestartSec=/a KillMode=process' "$unit" 2>/dev/null || true
+                sudo systemctl daemon-reload 2>/dev/null || true
+            fi
+            if systemctl is-active --quiet "$svc" 2>/dev/null || systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+                echo "[*] Restarting systemd service '${svc}'..."
+                sudo systemctl restart "$svc" || systemctl restart "$svc"
+                restarted_any=1
+            fi
+        done
+    fi
+    if [[ "$restarted_any" == "1" ]]; then
         echo "[+] WebDep successfully updated and restarted!"
     else
         echo "[+] WebDep updated to latest release. Run './start.sh' or './start.sh --service' to start."
@@ -206,8 +242,13 @@ if command -v sudo >/dev/null 2>&1; then
         sudo ufw allow OpenSSH >/dev/null 2>&1 || sudo ufw allow 22/tcp >/dev/null 2>&1 || true
         sudo ufw allow 80/tcp >/dev/null 2>&1 || true
         sudo ufw allow 443/tcp >/dev/null 2>&1 || true
+        sudo ufw allow 51820/udp >/dev/null 2>&1 || true
         sudo ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
         sudo ufw --force enable >/dev/null 2>&1 || true
+    fi
+    if ! command -v wg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+        echo "[*] Installing wireguard-tools for encrypted multi-node P2P mesh..."
+        sudo apt-get update -y >/dev/null 2>&1 && sudo apt-get install -y wireguard-tools >/dev/null 2>&1 || true
     fi
     if command -v iptables >/dev/null 2>&1; then
         for p in 80 443 "${PORT}"; do
@@ -215,27 +256,37 @@ if command -v sudo >/dev/null 2>&1; then
                 sudo iptables -I INPUT 1 -p tcp --dport "$p" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || true
         done
     fi
-    # Allow WebDep service user to automatically open ports in UFW/iptables, reload Caddy & restart WebDep
+    # Allow WebDep service user to automatically open ports in UFW/iptables, manage WireGuard mesh, reload Caddy & restart WebDep
     if [[ -d "/etc/sudoers.d" ]]; then
-        echo "${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/sbin/ufw, /usr/sbin/iptables, /usr/bin/systemctl reload caddy, /usr/bin/systemctl restart webdep, /bin/systemctl restart webdep" | sudo tee /etc/sudoers.d/webdep-firewall >/dev/null 2>&1 || true
+        echo "${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/sbin/ufw, /usr/sbin/iptables, /usr/bin/wg, /usr/bin/wg-quick, /usr/bin/systemctl reload caddy, /usr/bin/systemctl restart webdep, /bin/systemctl restart webdep, /usr/bin/systemctl restart webdep-core, /bin/systemctl restart webdep-core, /usr/bin/systemctl restart webdep-node, /bin/systemctl restart webdep-node" | sudo tee /etc/sudoers.d/webdep-firewall >/dev/null 2>&1 || true
         sudo chmod 0440 /etc/sudoers.d/webdep-firewall 2>/dev/null || true
     fi
 fi
 
-if [[ "$MODE" == "--service" || "$MODE" == "service" ]]; then
-    echo "[*] Installing systemd service (/etc/systemd/system/webdep.service)..."
-    SERVICE_USER="${SUDO_USER:-$(whoami)}"
-    USER_HOME=$(eval echo "~${SERVICE_USER}")
-    sudo tee /etc/systemd/system/webdep.service >/dev/null <<EOF
+if [[ "$ROLE_MODE" == "node" ]]; then
+    if [[ -n "$JOIN_URL" ]]; then
+        echo "[*] Enrolling Web-Node into Web-Core (${JOIN_URL})..."
+        ENROLL_ARGS=(--node --join "$JOIN_URL" --token "$JOIN_TOKEN" --enroll-only)
+        [[ -n "$NODE_NAME" ]] && ENROLL_ARGS+=(--name "$NODE_NAME")
+        [[ -n "$NODE_REGION" ]] && ENROLL_ARGS+=(--region "$NODE_REGION")
+        [[ -n "$NODE_PUBLIC_IP" ]] && ENROLL_ARGS+=(--public-ip "$NODE_PUBLIC_IP")
+        ./target/release/webdep "${ENROLL_ARGS[@]}"
+    fi
+    if [[ "$INSTALL_SERVICE" == "1" ]]; then
+        echo "[*] Installing systemd service (/etc/systemd/system/webdep-node.service)..."
+        SERVICE_USER="${SUDO_USER:-$(whoami)}"
+        USER_HOME=$(eval echo "~${SERVICE_USER}")
+        sudo tee /etc/systemd/system/webdep-node.service >/dev/null <<EOF
 [Unit]
-Description=WebDep Multi-Website Deployment & Hosting Platform
-After=network.target
+Description=WebDep Web-Node Execution & Mesh Agent
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=${SERVICE_USER}
 WorkingDirectory=${APP_DIR}
-ExecStart=${APP_DIR}/target/release/webdep
+ExecStart=${APP_DIR}/target/release/webdep --node
 Restart=always
 RestartSec=3
 KillMode=process
@@ -247,25 +298,97 @@ Environment="MALLOC_TRIM_THRESHOLD_=65536"
 [Install]
 WantedBy=multi-user.target
 EOF
+        sudo systemctl daemon-reload
+        sudo systemctl enable webdep-node
+        sudo systemctl restart webdep-node
+        echo "[+] Web-Node agent active via systemd ('webdep-node'). Logs: sudo journalctl -u webdep-node -f"
+        exit 0
+    fi
+    exec ./target/release/webdep --node
+fi
+
+if [[ "$INSTALL_SERVICE" == "1" ]]; then
+    echo "[*] Installing Web-Core + paired local Web-Node systemd services..."
+    SERVICE_USER="${SUDO_USER:-$(whoami)}"
+    USER_HOME=$(eval echo "~${SERVICE_USER}")
+
+    # Disable legacy single-unit webdep.service if upgrading
+    if systemctl is-active --quiet webdep 2>/dev/null || systemctl is-enabled --quiet webdep 2>/dev/null; then
+        sudo systemctl stop webdep 2>/dev/null || true
+        sudo systemctl disable webdep 2>/dev/null || true
+    fi
+
+    ./target/release/webdep --pair-local
+
+    sudo tee /etc/systemd/system/webdep-core.service >/dev/null <<EOF
+[Unit]
+Description=WebDep Web-Core Control Plane
+After=network.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+WorkingDirectory=${APP_DIR}
+ExecStart=${APP_DIR}/target/release/webdep --core
+Restart=always
+RestartSec=3
+KillMode=process
+Environment=RUST_LOG=webdep=info
+Environment="PATH=${USER_HOME}/.cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="MALLOC_ARENA_MAX=2"
+Environment="MALLOC_TRIM_THRESHOLD_=65536"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo tee /etc/systemd/system/webdep-node.service >/dev/null <<EOF
+[Unit]
+Description=WebDep Local Web-Node Execution & Mesh Agent
+After=network.target webdep-core.service
+Wants=webdep-core.service
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+WorkingDirectory=${APP_DIR}
+ExecStart=${APP_DIR}/target/release/webdep --node
+Restart=always
+RestartSec=3
+KillMode=process
+Environment=RUST_LOG=webdep=info
+Environment="PATH=${USER_HOME}/.cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="MALLOC_ARENA_MAX=2"
+Environment="MALLOC_TRIM_THRESHOLD_=65536"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
     sudo systemctl daemon-reload
-    sudo systemctl enable webdep
-    sudo systemctl restart webdep
+    sudo systemctl enable webdep-core webdep-node
+    sudo systemctl restart webdep-core
+    sleep 1
+    sudo systemctl restart webdep-node
     echo ""
-    echo "[+] WebDep is now running 24/7 as a systemd service!"
+    echo "[+] Web-Core & Web-Node are now running 24/7 via systemd!"
     echo "    - Panel Address:       ${PUBLIC_IP}:${PORT}"
     echo "    - Localhost:           127.0.0.1:${PORT}"
     if [[ "${PUBLIC_IP}" != "127.0.0.1" ]]; then
         echo "    - Secure SSH Tunnel:   ssh -N -L ${PORT}:127.0.0.1:${PORT} ${SERVICE_USER}@${PUBLIC_IP}"
         echo "                           (Recommended: enables encrypted transit & browser Passkey authentication)"
     fi
-    echo "    - Status:              sudo systemctl status webdep"
-    echo "    - Logs:                sudo journalctl -u webdep -f"
+    echo "    - Core Status / Logs:  sudo systemctl status webdep-core  |  sudo journalctl -u webdep-core -f"
+    echo "    - Node Status / Logs:  sudo systemctl status webdep-node  |  sudo journalctl -u webdep-node -f"
     exit 0
 fi
 
-if [[ "$MODE" == "--daemon" || "$MODE" == "-d" || "$MODE" == "daemon" || "$MODE" == "start" ]]; then
+CORE_FLAG=()
+[[ "$ROLE_MODE" == "core" ]] && CORE_FLAG=(--core)
+
+if [[ "$DAEMON_MODE" == "1" ]]; then
     pkill -f "target/release/webdep" 2>/dev/null || true
-    nohup ./target/release/webdep > data/logs/webdep-server.log 2>&1 &
+    nohup ./target/release/webdep "${CORE_FLAG[@]}" > data/logs/webdep-server.log 2>&1 &
     PID=$!
     echo "[+] WebDep started in background (PID: ${PID})"
     echo "    - Panel Address:       ${PUBLIC_IP}:${PORT}"
@@ -290,4 +413,4 @@ echo "[*] PostgreSQL Control DB: data/control-pg/ (override via DATABASE_URL)"
 echo "[*] Tip: Run './start.sh -d' for background mode or './start.sh --service' for 24/7 systemd auto-start."
 echo ""
 
-exec ./target/release/webdep
+exec ./target/release/webdep "${CORE_FLAG[@]}"

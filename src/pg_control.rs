@@ -31,6 +31,13 @@ fn build_migrator() -> sqlx::migrate::Migrator {
                 Cow::Borrowed(include_str!("../migrations/0002_access_grants.sql")),
                 false,
             ),
+            Migration::new(
+                3,
+                Cow::Borrowed("cluster_nodes"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../migrations/0003_cluster_nodes.sql")),
+                false,
+            ),
         ]),
         ignore_missing: false,
         locking: true,

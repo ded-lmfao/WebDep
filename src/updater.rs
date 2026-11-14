@@ -961,6 +961,21 @@ pub fn restart_service_delayed(delay_ms: u64) {
 
         #[cfg(unix)]
         {
+            let is_core_systemd = tokio::process::Command::new("systemctl")
+                .args(["is-active", "--quiet", "webdep-core"])
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if is_core_systemd {
+                info!("Restarting WebDep cluster services via systemd ('webdep-core' + 'webdep-node')...");
+                let _ = tokio::process::Command::new("sh")
+                    .args(["-c", "(sleep 0.5 && (sudo systemctl restart webdep-core || systemctl restart webdep-core) && (systemctl is-enabled --quiet webdep-node 2>/dev/null && (sudo systemctl restart webdep-node || systemctl restart webdep-node) || true)) >/dev/null 2>&1 &"])
+                    .spawn();
+                return;
+            }
+
             let is_systemd = tokio::process::Command::new("systemctl")
                 .args(["is-active", "--quiet", "webdep"])
                 .status()

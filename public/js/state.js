@@ -20,6 +20,8 @@ const state = {
   selectedDatabaseId: null,
   projects: [],
   databases: [],
+  nodes: [],
+  selectedNodeFilter: 'all',
   overview: null,
   activeDeployment: null,
   activeDepPollTimer: null,
@@ -662,10 +664,27 @@ window.getSelectedProject = getSelectedProject;
 window.getSelectedDatabase = getSelectedDatabase;
 window.getFilesEntityContext = getFilesEntityContext;
 
+function matchesNodeFilter(item) {
+  const filter = String(state.selectedNodeFilter || 'all');
+  if (filter === 'all') return true;
+  if (!item) return false;
+  const itemNodeId = item.nodeId ?? item.node_id;
+  if (itemNodeId === null || itemNodeId === undefined) return false;
+  return String(itemNodeId) === filter;
+}
+
+function getNodeDisplayName(nodeId) {
+  if (nodeId === null || nodeId === undefined) return '';
+  const found = (state.nodes || []).find((n) => String(n.id) === String(nodeId));
+  return found ? found.name : `Node #${nodeId}`;
+}
+
 export {
   PAGE_SIZE,
   state,
   setHtmlIfChanged,
+  matchesNodeFilter,
+  getNodeDisplayName,
   paginateAndRender,
   goToTablePage,
   PIPELINE_STAGES,

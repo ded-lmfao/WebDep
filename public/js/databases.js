@@ -4,7 +4,7 @@
  */
 
 import { icon } from './icons.js';
-import { state, escapeHtml, DB_PIPELINE_STAGES, syncOverviewResourceStatus, formatRelativeTime, setHtmlIfChanged } from './state.js';
+import { state, escapeHtml, DB_PIPELINE_STAGES, syncOverviewResourceStatus, formatRelativeTime, setHtmlIfChanged, matchesNodeFilter } from './state.js';
 import { api, toast } from './api.js';
 import { renderPipelineStages } from './deployments.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
@@ -140,6 +140,7 @@ export function renderDatabasesList() {
   const filter = state.databaseStatusFilter || 'all';
 
   const filtered = list.filter((d) => {
+    if (!matchesNodeFilter(d)) return false;
     const isOnline = d.status === 'running';
     if (filter === 'running' && !isOnline) return false;
     if (filter === 'stopped' && isOnline) return false;

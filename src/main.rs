@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod cache;
 mod caddy;
+mod cluster;
 mod config;
 mod databases;
 mod db;
@@ -27,6 +28,9 @@ use crate::api::{create_router, AppState};
 use crate::auth::Auth;
 use crate::cache::AppCache;
 use crate::caddy::Caddy;
+use crate::cluster::{
+    detect_hostname, enroll_with_core, run_node_agent, ClusterManager, JoinOptions,
+};
 use crate::config::Config;
 use crate::db::open_db;
 use crate::deployer::Deployer;
@@ -36,6 +40,57 @@ use crate::projects::Projects;
 use crate::runtime::Runtime;
 use crate::updater::Updater;
 use crate::vault::Vault;
+
+#[derive(Default)]
+struct CliOptions {
+    core_only: bool,
+    node_mode: bool,
+    pair_local: bool,
+    enroll_only: bool,
+    join_url: Option<String>,
+    token: Option<String>,
+    name: Option<String>,
+    region: Option<String>,
+    public_ip: Option<String>,
+    wg_port: u16,
+}
+
+fn parse_cli_options() -> Result<CliOptions, String> {
+    let mut opts = CliOptions::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--core" => opts.core_only = true,
+            "--node" => opts.node_mode = true,
+            "--pair-local" => opts.pair_local = true,
+            "--enroll-only" => opts.enroll_only = true,
+            "--join" => {
+                opts.join_url = Some(args.next().ok_or("--join requires a Core URL")?);
+            }
+            "--token" => {
+                opts.token = Some(args.next().ok_or("--token requires an enrollment token")?);
+            }
+            "--name" => {
+                opts.name = Some(args.next().ok_or("--name requires a node name")?);
+            }
+            "--region" => {
+                opts.region = Some(args.next().ok_or("--region requires a region")?);
+            }
+            "--public-ip" => {
+                opts.public_ip = Some(args.next().ok_or("--public-ip requires an IP/host")?);
+            }
+            "--wg-port" => {
+                let raw = args.next().ok_or("--wg-port requires a UDP port")?;
+                opts.wg_port = raw.parse::<u16>().map_err(|_| format!("Invalid --wg-port '{raw}'"))?;
+            }
+            _ => {}
+        }
+    }
+    if opts.core_only && opts.node_mode {
+        return Err("Cannot specify both --core and --node in the same process".to_string());
+    }
+    Ok(opts)
+}
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -71,6 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = Config::from_env();
+    let cli = parse_cli_options().map_err(|e| format!("CLI error: {e}"))?;
+
     if std::env::args().nth(1).as_deref() == Some("--import-sqlite") {
         let sqlite_path = std::env::args()
             .nth(2)
@@ -84,6 +141,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Some(h) = handle {
             h.stop().await;
         }
+        return Ok(());
+    }
+
+    // Pure Web-Node worker mode: zero PostgreSQL dependency, stores state in data/node-state.json
+    if cli.node_mode {
+        info!("Starting WebDep in Web-Node worker mode");
+        info!("Data directory: {}", config.data_dir.display());
+        if let Some(join_url) = cli.join_url.clone() {
+            let token = cli
+                .token
+                .clone()
+                .ok_or("--node --join requires --token <ENROLL_TOKEN>")?;
+            let manifest = enroll_with_core(
+                &config.data_dir,
+                JoinOptions {
+                    core_url: join_url,
+                    token,
+                    name: cli.name.clone(),
+                    region: cli.region.clone(),
+                    public_ip: cli.public_ip.clone(),
+                    wg_port: cli.wg_port,
+                },
+            )
+            .await?;
+            println!(
+                "Enrolled Web-Node '{}' (#{}, region '{}', mesh {}) into Core ({})",
+                manifest.name, manifest.node_id, manifest.region, manifest.mesh_ip, manifest.core_url
+            );
+            if cli.enroll_only {
+                return Ok(());
+            }
+        }
+        run_node_agent(config.data_dir.clone()).await;
         return Ok(());
     }
 
@@ -131,6 +221,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &config.data_dir,
     ));
     let updater = Arc::new(Updater::with_db(db.clone()));
+    let cluster = Arc::new(ClusterManager::new(db.clone(), config.data_dir.clone()));
+
+    let local_core_http = format!("http://127.0.0.1:{}", config.port);
+    let local_core_ws = format!("ws://127.0.0.1:{}/api/cluster/node-ws", config.port);
+    let local_hostname = cli.name.clone().unwrap_or_else(detect_hostname);
+
+    if cli.pair_local {
+        let manifest = cluster
+            .pair_local_node(&local_core_http, &local_core_ws, &local_hostname)
+            .await?;
+        println!(
+            "Paired local control node '{}' (#{}, mesh {}) -> {}/node-state.json",
+            manifest.name,
+            manifest.node_id,
+            manifest.mesh_ip,
+            config.data_dir.display()
+        );
+        if let Some(h) = control_pg_handle {
+            h.stop().await;
+        }
+        return Ok(());
+    }
+
+    cluster.start_staleness_reaper();
+    if !cli.core_only {
+        match cluster
+            .pair_local_node(&local_core_http, &local_core_ws, &local_hostname)
+            .await
+        {
+            Ok(_) => {
+                let node_data_dir = config.data_dir.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                    run_node_agent(node_data_dir).await;
+                });
+            }
+            Err(e) => {
+                tracing::warn!("Could not auto-pair local Web-Node: {}", e);
+            }
+        }
+    }
 
     // Periodic memory maintenance: prunes expired cache, purges expired sessions, trims old logs, and trims Linux heap
     {
@@ -227,6 +358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cache,
         databases,
         updater,
+        cluster,
     };
 
     let app = create_router(state);

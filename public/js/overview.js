@@ -4,7 +4,7 @@
  */
 
 import { icon } from './icons.js';
-import { state, setHtmlIfChanged, escapeHtml } from './state.js';
+import { state, setHtmlIfChanged, escapeHtml, matchesNodeFilter } from './state.js';
 import { api } from './api.js';
 import {
   consumePendingViewStagger,
@@ -468,7 +468,8 @@ function renderResourceBreakdown(resources) {
   if (!tbody) return;
   const list = resources || state.overview?.resources || [];
   const filter = state.resourceFilter || 'all';
-  const filtered = filter === 'all' ? list.filter((r) => r.kind !== 'panel') : list.filter((r) => r.kind === filter);
+  const nodeScoped = list.filter((r) => matchesNodeFilter(r));
+  const filtered = filter === 'all' ? nodeScoped.filter((r) => r.kind !== 'panel') : nodeScoped.filter((r) => r.kind === filter);
 
   if (!filtered.length) {
     let emptyMsg = 'No active workloads found.';

@@ -27,6 +27,7 @@ import { loadMonitorView } from './js/settings.js';
 import './js/files.js';
 import './js/logs.js';
 import './js/access.js';
+import './js/cluster.js';
 
 // ============================================================================
 // Global Polling & Live Updates (Low Resource & Page Visibility Aware)
@@ -42,13 +43,16 @@ async function pollTick() {
       return;
     }
 
-    // Keep sidebar badges (databases & projects & services) up-to-date on non-overview tabs
+    // Keep sidebar badges (databases, projects, services & nodes) up-to-date on non-overview tabs
     await Promise.all([
       loadProjects().catch(() => {}),
-      loadDatabases().catch(() => {})
+      loadDatabases().catch(() => {}),
+      window.loadNodes ? window.loadNodes().catch(() => {}) : Promise.resolve()
     ]);
 
-    if (state.currentView === 'services') {
+    if (state.currentView === 'nodes') {
+      if (window.loadNodesView) await window.loadNodesView();
+    } else if (state.currentView === 'services') {
       renderServicesList();
     } else if (state.currentView === 'projects') {
       renderProjectsList();

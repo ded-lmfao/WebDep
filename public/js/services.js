@@ -4,7 +4,7 @@
  */
 
 import { icon } from './icons.js';
-import { state, escapeHtml, formatRelativeTime, setHtmlIfChanged } from './state.js';
+import { state, escapeHtml, formatRelativeTime, setHtmlIfChanged, matchesNodeFilter } from './state.js';
 import { loadProjects } from './websites.js';
 import { openWebsiteWorkspace } from './workspace.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
@@ -118,6 +118,7 @@ export function renderServicesList() {
   const filter = state.serviceStatusFilter || 'all';
 
   const filtered = services.filter((s) => {
+    if (!matchesNodeFilter(s)) return false;
     const isOnline = s.app_status === 'running' || s.status?.running;
     if (filter === 'running' && !isOnline) return false;
     if (filter === 'stopped' && isOnline) return false;

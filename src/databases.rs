@@ -35,6 +35,7 @@ pub struct ManagedDatabase {
     pub data_dir: String,
     pub linked_project_id: Option<i64>,
     pub linked_project_name: Option<String>,
+    pub node_id: Option<i64>,
     pub internal_url: String,
     pub external_url: String,
     pub psql_command: String,
@@ -52,6 +53,7 @@ pub struct DatabaseOverviewSummary {
     pub container_id: Option<String>,
     pub data_dir: String,
     pub linked_project_id: Option<i64>,
+    pub node_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +145,7 @@ struct RawDatabaseRow {
     created_at: i64,
     updated_at: i64,
     started_at_db: Option<i64>,
+    node_id: Option<i64>,
 }
 
 impl Databases {
@@ -187,6 +190,7 @@ impl Databases {
             created_at: r.try_get(16)?,
             updated_at: r.try_get(17)?,
             started_at_db: r.try_get(18)?,
+            node_id: r.try_get(19)?,
         })
     }
 
@@ -233,6 +237,7 @@ impl Databases {
             data_dir: row.data_dir,
             linked_project_id: row.linked_project_id,
             linked_project_name: row.linked_project_name,
+            node_id: row.node_id,
             internal_url,
             external_url,
             psql_command,
@@ -252,7 +257,7 @@ impl Databases {
 
     pub async fn list_overview_summaries(&self) -> Result<Vec<DatabaseOverviewSummary>, String> {
         let rows = sqlx::query(
-            "SELECT d.id, d.name, d.port, d.domain, d.status, d.container_id, d.data_dir, d.linked_project_id \
+            "SELECT d.id, d.name, d.port, d.domain, d.status, d.container_id, d.data_dir, d.linked_project_id, d.node_id \
              FROM databases d ORDER BY d.id DESC",
         )
         .fetch_all(&self.db)
@@ -270,6 +275,7 @@ impl Databases {
                     container_id: r.try_get(5).map_err(|e| e.to_string())?,
                     data_dir: r.try_get(6).map_err(|e| e.to_string())?,
                     linked_project_id: r.try_get(7).map_err(|e| e.to_string())?,
+                    node_id: r.try_get(8).map_err(|e| e.to_string())?,
                 })
             })
             .collect()
@@ -287,7 +293,7 @@ impl Databases {
         let base_sql = "SELECT d.id, d.name, d.engine, d.db_name, d.db_user, d.db_password, d.port, \
                                d.is_superuser, d.access_mode, d.allowed_ips, d.status, d.container_id, \
                                d.data_dir, d.linked_project_id, p.name, d.domain, d.created_at, d.updated_at, \
-                               d.started_at \
+                               d.started_at, d.node_id \
                         FROM databases d \
                         LEFT JOIN projects p ON p.id = d.linked_project_id";
 

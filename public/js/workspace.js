@@ -207,6 +207,7 @@ function updateBreadcrumbs() {
       projects: 'Hosted Websites',
       services: 'Backend Services',
       databases: 'Managed Databases',
+      nodes: 'Cluster Nodes',
       settings: 'Platform Settings',
     };
     secEl.textContent = globalLabels[state.currentView] || state.currentView;
@@ -826,6 +827,7 @@ function renderCurrentView() {
       break;
     case 'audit': void loadAuditView(); break;
     case 'access': void loadAccessView(); break;
+    case 'nodes': if (window.loadNodesView) void window.loadNodesView(); break;
   }
 }
 

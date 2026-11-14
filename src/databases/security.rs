@@ -33,6 +33,8 @@ pub fn generate_pg_hba(access_mode: &str, allowed_ips: &str) -> String {
     }
     hba.push_str("host    all             all             127.0.0.1/32            scram-sha-256\n");
     hba.push_str("host    all             all             ::1/128                 scram-sha-256\n");
+    // Allow encrypted Web-Node WireGuard P2P mesh subnet for cross-node DB connections
+    hba.push_str("host    all             all             10.200.0.0/16           scram-sha-256\n");
 
     if access_mode == "public" {
         hba.push_str("host    all             all             0.0.0.0/0               scram-sha-256\n");

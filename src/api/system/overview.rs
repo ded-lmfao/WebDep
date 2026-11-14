@@ -63,6 +63,8 @@ pub struct ResourceItem {
     pub project_id: Option<i64>,
     #[serde(rename = "databaseId")]
     pub database_id: Option<i64>,
+    #[serde(rename = "nodeId")]
+    pub node_id: Option<i64>,
     #[serde(rename = "commitSha")]
     pub commit_sha: Option<String>,
     pub domain: Option<String>,
@@ -451,6 +453,7 @@ fn compute_overview_bytes_sync(
         disk_pct: panel_disk_pct,
         project_id: None,
         database_id: None,
+        node_id: Some(1),
         commit_sha: None,
         domain: None,
         project_type: Some("panel".to_string()),
@@ -479,6 +482,7 @@ fn compute_overview_bytes_sync(
 
         let kind = if p.project_kind == "service" { "service" } else { "website" };
         let res_status = if is_running { "running".to_string() } else { p.app_status.clone() };
+        let p_node_id = p.node_id;
         resources.push(ResourceItem {
             id: format!("{}-{}", kind, p.id),
             name: p.name.clone(),
@@ -495,6 +499,7 @@ fn compute_overview_bytes_sync(
             disk_pct,
             project_id: Some(p.id),
             database_id: None,
+            node_id: p_node_id,
             commit_sha: p.deployed_sha.clone(),
             domain: p.domains.first().cloned(),
             project_type: Some(p.project_type.clone()),
@@ -549,6 +554,7 @@ fn compute_overview_bytes_sync(
             disk_pct: db_disk_pct,
             project_id: None,
             database_id: Some(db.id),
+            node_id: db.node_id,
             commit_sha: None,
             domain: if db.domain.is_empty() { None } else { Some(db.domain) },
             project_type: Some("postgres".to_string()),

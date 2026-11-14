@@ -239,6 +239,16 @@
           <span>Databases</span>
           <span class="nav-badge" id="badge-databases-count">0</span>
         </a>
+        <a class="nav-item" data-view="nodes">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <rect x="2" y="3" width="20" height="7" rx="2"></rect>
+            <rect x="2" y="14" width="20" height="7" rx="2"></rect>
+            <line x1="6" y1="6.5" x2="6.01" y2="6.5"></line>
+            <line x1="6" y1="17.5" x2="6.01" y2="17.5"></line>
+          </svg>
+          <span>Nodes</span>
+          <span class="nav-badge" id="badge-nodes-count">0</span>
+        </a>
 
         <div class="nav-section-title">Administration</div>
         <a class="nav-item" data-view="access" id="nav-access-item" style="display: none;">
@@ -305,7 +315,10 @@
           </nav>
         </div>
 
-        <div class="header-right">
+        <div class="header-right" style="display: flex; align-items: center; gap: 10px;">
+          <select id="global-node-filter" class="form-control" style="width: auto; min-width: 155px; max-width: 240px; padding: 5px 10px; font-size: 12px; height: 30px;" aria-label="Filter cluster node">
+            <option value="all">All Nodes</option>
+          </select>
           <div class="server-pill">
             <span class="status-dot online" id="server-status-dot"></span>
             <span id="server-status-text">Server Online</span>
@@ -1965,6 +1978,55 @@
           <div id="access-content-panel"></div>
         </section>
 
+        <!-- ==================== 11C. CLUSTER NODES VIEW ==================== -->
+        <section id="view-nodes" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Cluster Nodes &amp; Mesh Topology</h1>
+              <p>Connected Web-Node execution agents across private WireGuard mesh (10.200.0.0/16)</p>
+            </div>
+            <div class="view-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button class="btn btn-secondary btn-sm" onclick="window.loadNodesView && window.loadNodesView(true)">Refresh</button>
+              <button class="btn btn-primary btn-sm" id="add-node-header-btn" onclick="openAddNodeModal()" style="display: none;">+ Add Node</button>
+            </div>
+          </div>
+
+          <div class="stats-grid" style="margin-bottom: 16px;">
+            <div class="stat-card">
+              <div class="stat-label">Cluster Nodes</div>
+              <div class="stat-value" id="nodes-stat-total">0</div>
+              <div class="stat-meta">Registered Web-Core &amp; Workers</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Online Mesh</div>
+              <div class="stat-value" id="nodes-stat-online">0</div>
+              <div class="stat-meta">Active heartbeat peers</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Placed Workloads</div>
+              <div class="stat-value" id="nodes-stat-workloads">0</div>
+              <div class="stat-meta">Apps, services &amp; databases</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Cluster RAM</div>
+              <div class="stat-value" id="nodes-stat-ram">--</div>
+              <div class="stat-meta">Aggregate reported memory</div>
+            </div>
+          </div>
+
+          <div class="projects-grid" id="nodes-cards-container" style="margin-bottom: 24px;"></div>
+
+          <div class="overview-section">
+            <div class="overview-section-header">
+              <div>
+                <h2 class="section-title">Single-Use Join Tokens</h2>
+                <p class="section-subtitle">15-minute SHA-256 hashed enrollment secrets (one node per token)</p>
+              </div>
+            </div>
+            <div id="nodes-tokens-panel"></div>
+          </div>
+        </section>
+
         <!-- ==================== 12. ACTIVITY VIEW ==================== -->
         <section id="view-audit" class="view-section">
           <div class="view-header">
@@ -3248,6 +3310,58 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" id="dialog-cancel-btn">Cancel</button>
         <button class="btn btn-primary" id="dialog-confirm-btn">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: ADD WORKER NODE -->
+  <div class="modal-overlay" id="modal-add-node">
+    <div class="modal-container" style="max-width: 560px;">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title">Add Worker Web-Node</h3>
+          <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
+            Generate a single-use enrollment token and run the join command on your target VPS
+          </div>
+        </div>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="add-node-label">Node Name (optional)</label>
+            <input type="text" class="form-control" id="add-node-label" placeholder="e.g. eu-worker-1">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="add-node-region">Region</label>
+            <input type="text" class="form-control" id="add-node-region" value="eu-central" placeholder="eu-central / us-east">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="add-node-ttl">Token Expiration</label>
+          <select class="form-control" id="add-node-ttl">
+            <option value="900" selected>15 minutes (recommended)</option>
+            <option value="1800">30 minutes</option>
+            <option value="3600">1 hour</option>
+          </select>
+        </div>
+
+        <div id="add-node-result-box" style="display: none; margin-top: 14px; padding: 14px; background: var(--bg-input); border-radius: var(--radius-md); border: 1px solid var(--border-subtle);">
+          <div style="font-size: 12px; font-weight: 600; color: var(--text-main); margin-bottom: 6px;">
+            Run on the new VPS (after installing the webdep binary):
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <input type="text" class="form-control" id="add-node-join-cmd" readonly style="font-family: var(--font-mono); font-size: 11.5px;">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand()">Copy</button>
+          </div>
+          <div style="font-size: 11px; color: var(--text-dim); margin-top: 8px;">
+            Raw Token (shown once): <code id="add-node-raw-token" style="word-break: break-all;"></code>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button type="button" class="btn btn-secondary" data-close-modal>Close</button>
+        <button type="button" class="btn btn-primary" id="generate-node-token-btn" onclick="generateNodeEnrollToken()">Generate Join Command</button>
       </div>
     </div>
   </div>

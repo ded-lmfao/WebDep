@@ -157,12 +157,28 @@ pub(crate) async fn access_overview_handler(
         })
         .collect();
 
+    let live_nodes = state.cluster.list_nodes().await.unwrap_or_default();
+    let access_nodes = if live_nodes.is_empty() {
+        vec![local_node_option()]
+    } else {
+        live_nodes
+            .into_iter()
+            .map(|n| AccessNodeOption {
+                id: n.id,
+                name: n.name,
+                slug: n.mesh_ip,
+                status: n.status,
+                is_local: n.is_local,
+            })
+            .collect()
+    };
+
     Ok(Json(AccessOverviewResponse {
         users,
         grants,
         projects,
         databases,
-        nodes: vec![local_node_option()],
+        nodes: access_nodes,
         templates: ROLE_TEMPLATES,
         known_powers: KNOWN_POWERS,
         server_time: now(),
@@ -405,13 +421,18 @@ pub(crate) async fn access_audit_handler(
 }
 
 #[cfg(test)]
+pub(crate) async fn tests_state_helper() -> AppState {
+    tests::test_app_state().await
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    async fn test_app_state() -> AppState {
+    pub(super) async fn test_app_state() -> AppState {
         let base = std::env::temp_dir().join(format!(
             "webdep_api_access_{}_{}",
             std::process::id(),
@@ -447,6 +468,7 @@ mod tests {
             &base,
         ));
         let updater = Arc::new(crate::updater::Updater::with_db(db.clone()));
+        let cluster = Arc::new(crate::cluster::ClusterManager::new(db.clone(), base.clone()));
 
         AppState {
             db,
@@ -460,6 +482,7 @@ mod tests {
             deployer,
             databases,
             updater,
+            cluster,
         }
     }
 
