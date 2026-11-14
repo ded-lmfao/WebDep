@@ -78,6 +78,9 @@ export function openAddServiceModal() {
   }
 
   applyServicePreset('lavalink');
+  if (window.populateTargetNodeSelect) {
+    window.populateTargetNodeSelect('service-node-id', 'service-node-group', null, false);
+  }
   openModal('modal-service');
 }
 
@@ -201,6 +204,9 @@ export function openEditServiceModal(id) {
     c.classList.toggle('active', c.getAttribute('data-service-preset') === pt);
   });
 
+  if (window.populateTargetNodeSelect) {
+    window.populateTargetNodeSelect('service-node-id', 'service-node-group', p.node_id, true);
+  }
   openModal('modal-service');
 }
 
@@ -303,6 +309,7 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
   const domainVal = document.getElementById('service-domain')?.value.trim();
   const accessMode = document.getElementById('service-access-mode')?.value || 'local';
   const allowedIps = document.getElementById('service-allowed-ips')?.value.trim() || '';
+  const selectedNodeVal = document.getElementById('service-node-id')?.value;
 
   const payload = {
     name,
@@ -323,6 +330,9 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
     allowed_ips: allowedIps,
     auto_deploy: false,
   };
+  if (!id && selectedNodeVal) {
+    payload.node_id = Number(selectedNodeVal);
+  }
 
   try {
     let targetId = id;

@@ -82,14 +82,32 @@ pub(crate) async fn apply_caddy_handler(
         }
     }
 
-    let all_projects = state.projects.list().await.unwrap_or_default();
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let node_projects = state.projects.list_for_node(nid).await.unwrap_or_default();
+        state
+            .cluster
+            .call_node(
+                nid,
+                "caddy.apply",
+                serde_json::json!({ "projects": node_projects }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+    } else {
+        let all_projects = state.projects.list().await.unwrap_or_default();
 
-    state
-        .caddy
-        .write_config(&p, &all_projects)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        state
+            .caddy
+            .write_config(&p, &all_projects)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let _ = state.caddy.reload();
+        let _ = state.caddy.reload();
+    }
     state.cache.invalidate_all();
 
     log_audit_project(

@@ -48,6 +48,28 @@ pub(crate) fn to_project_response(mut p: Project, cwd: &std::path::Path) -> Proj
     }
 }
 
+pub(crate) fn to_remote_project_response(
+    p: Project,
+    remote_disk_bytes: Option<u64>,
+) -> ProjectResponse {
+    let disk_formatted = crate::api::system::format_resource_bytes(remote_disk_bytes.unwrap_or(0));
+    ProjectResponse {
+        project: p,
+        disk_formatted,
+    }
+}
+
+async fn resolve_remote_node(
+    state: &AppState,
+    node_id: Option<i64>,
+) -> Result<Option<i64>, (StatusCode, String)> {
+    state
+        .cluster
+        .should_proxy_to_node(node_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
 static CACHED_CWD: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 fn cached_cwd() -> &'static std::path::Path {
@@ -72,12 +94,37 @@ pub(crate) async fn list_projects_handler(
             .list()
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let remote_node_ids: std::collections::HashSet<i64> = state
+            .cluster
+            .list_nodes()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| !n.is_local)
+            .map(|n| n.id)
+            .collect();
+        let filtered: Vec<Project> = all
+            .into_iter()
+            .filter(|p| crate::auth::access::evaluate_project_access(&user, &grants, p.id, now_s))
+            .collect();
+        let mut disk_map = std::collections::HashMap::new();
+        for p in &filtered {
+            if p.node_id.map(|nid| remote_node_ids.contains(&nid)).unwrap_or(false) {
+                disk_map.insert(p.id, state.cluster.get_remote_disk_bytes(p.id).await);
+            }
+        }
         tokio::task::spawn_blocking(move || {
             let cwd = cached_cwd();
-            let list: Vec<ProjectResponse> = all
+            let list: Vec<ProjectResponse> = filtered
                 .into_iter()
-                .filter(|p| crate::auth::access::evaluate_project_access(&user, &grants, p.id, now_s))
-                .map(|p| to_project_response(p, cwd))
+                .map(|p| {
+                    if p.node_id.map(|nid| remote_node_ids.contains(&nid)).unwrap_or(false) {
+                        let d = disk_map.get(&p.id).copied().flatten();
+                        to_remote_project_response(p, d)
+                    } else {
+                        to_project_response(p, cwd)
+                    }
+                })
                 .collect();
             let json = serde_json::to_string(&list).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             Ok(axum::body::Bytes::from(json))
@@ -104,7 +151,12 @@ pub(crate) async fn get_project_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(to_project_response(p, cached_cwd())))
+    if resolve_remote_node(&state, p.node_id).await.ok().flatten().is_some() {
+        let d = state.cluster.get_remote_disk_bytes(p.id).await;
+        Ok(Json(to_remote_project_response(p, d)))
+    } else {
+        Ok(Json(to_project_response(p, cached_cwd())))
+    }
 }
 
 fn manage_power_for_kind(kind: &str) -> &'static str {
@@ -161,6 +213,10 @@ pub(crate) async fn create_project_handler(
     }
     p.port = Some(allocated_port);
 
+    if p.node_id.is_none() {
+        p.node_id = state.cluster.default_local_node_id().await;
+    }
+
     let id = state
         .projects
         .create(&p)
@@ -190,16 +246,33 @@ pub(crate) async fn create_project_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
 
-    let _ = state.runtime.ensure_container(&created).await;
-
-    if !is_service || !created.domains.is_empty() {
-        if let Ok(all) = state.projects.list().await {
-            let _ = state.caddy.write_config(&created, &all);
-            let _ = state.caddy.reload();
+    if let Some(node_id) = resolve_remote_node(&state, created.node_id).await? {
+        state.cluster.broadcast_peer_sync().await;
+        let ctx = state.cluster.build_remote_context(&state.projects, created.id).await;
+        state
+            .cluster
+            .call_node(
+                node_id,
+                "project.ensure",
+                serde_json::json!({ "project": &created, "context": ctx }),
+                std::time::Duration::from_secs(15),
+            )
+            .await?;
+        if !is_service || !created.domains.is_empty() {
+            state.cluster.sync_remote_caddy(&state.projects, node_id).await;
         }
-    }
-    if let Some(port) = created.port {
-        crate::databases::Databases::sync_firewall_rules(port, &created.access_mode, &created.allowed_ips).await;
+    } else {
+        let _ = state.runtime.ensure_container(&created).await;
+
+        if !is_service || !created.domains.is_empty() {
+            if let Ok(all) = state.projects.list().await {
+                let _ = state.caddy.write_config(&created, &all);
+                let _ = state.caddy.reload();
+            }
+        }
+        if let Some(port) = created.port {
+            crate::databases::Databases::sync_firewall_rules(port, &created.access_mode, &created.allowed_ips).await;
+        }
     }
     state.cache.invalidate_all();
 
@@ -302,29 +375,47 @@ pub(crate) async fn update_project_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
 
-    let _ = state.runtime.ensure_container(&updated).await;
-
-    if updated.project_kind != "service" || !updated.domains.is_empty() {
-        if let Ok(all) = state.projects.list().await {
-            let _ = state.caddy.write_config(&updated, &all);
-            let _ = state.caddy.reload();
-        }
-    }
-
-    // Clean up old firewall rules if port, access mode, or allowed IPs changed
-    if let Some(ref old_p) = prev {
-        if let Some(old_port) = old_p.port {
-            if Some(old_port) != updated.port
-                || old_p.access_mode != updated.access_mode
-                || old_p.allowed_ips != updated.allowed_ips
-            {
-                crate::databases::Databases::remove_firewall_rules(old_port, &old_p.allowed_ips).await;
+    if let Some(node_id) = resolve_remote_node(&state, updated.node_id).await? {
+        if state.cluster.is_node_connected(node_id).await {
+            let ctx = state.cluster.build_remote_context(&state.projects, updated.id).await;
+            let _ = state
+                .cluster
+                .call_node(
+                    node_id,
+                    "project.ensure",
+                    serde_json::json!({ "project": &updated, "context": ctx }),
+                    std::time::Duration::from_secs(15),
+                )
+                .await;
+            if updated.project_kind != "service" || !updated.domains.is_empty() {
+                state.cluster.sync_remote_caddy(&state.projects, node_id).await;
             }
         }
-    }
+    } else {
+        let _ = state.runtime.ensure_container(&updated).await;
 
-    if let Some(port) = updated.port {
-        crate::databases::Databases::sync_firewall_rules(port, &updated.access_mode, &updated.allowed_ips).await;
+        if updated.project_kind != "service" || !updated.domains.is_empty() {
+            if let Ok(all) = state.projects.list().await {
+                let _ = state.caddy.write_config(&updated, &all);
+                let _ = state.caddy.reload();
+            }
+        }
+
+        // Clean up old firewall rules if port, access mode, or allowed IPs changed
+        if let Some(ref old_p) = prev {
+            if let Some(old_port) = old_p.port {
+                if Some(old_port) != updated.port
+                    || old_p.access_mode != updated.access_mode
+                    || old_p.allowed_ips != updated.allowed_ips
+                {
+                    crate::databases::Databases::remove_firewall_rules(old_port, &old_p.allowed_ips).await;
+                }
+            }
+        }
+
+        if let Some(port) = updated.port {
+            crate::databases::Databases::sync_firewall_rules(port, &updated.access_mode, &updated.allowed_ips).await;
+        }
     }
     state.cache.invalidate_all();
 
@@ -356,8 +447,23 @@ pub(crate) async fn delete_project_handler(
             )),
         )
         .await;
-        let _ = state.runtime.stop_project(p).await;
-        state.runtime.stop_maintenance_server(id);
+        if let Some(node_id) = resolve_remote_node(&state, p.node_id).await? {
+            if state.cluster.is_node_connected(node_id).await {
+                let remaining = state.projects.list_for_node(node_id).await.unwrap_or_default();
+                let _ = state
+                    .cluster
+                    .call_node(
+                        node_id,
+                        "project.delete",
+                        serde_json::json!({ "project": p, "remainingProjects": remaining }),
+                        std::time::Duration::from_secs(20),
+                    )
+                    .await;
+            }
+        } else {
+            let _ = state.runtime.stop_project(p).await;
+            state.runtime.stop_maintenance_server(id);
+        }
     }
     state
         .projects
@@ -366,12 +472,16 @@ pub(crate) async fn delete_project_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if let Some(ref p) = deleted_proj {
-        if let Some(port) = p.port {
-            crate::databases::Databases::remove_firewall_rules(port, &p.allowed_ips).await;
-        }
-        if let Ok(remaining) = state.projects.list().await {
-            state.runtime.cleanup_project_files(p, &remaining);
-            state.caddy.remove_project_config(&p.slug, &remaining);
+        if resolve_remote_node(&state, p.node_id).await?.is_some() {
+            state.cluster.broadcast_peer_sync().await;
+        } else {
+            if let Some(port) = p.port {
+                crate::databases::Databases::remove_firewall_rules(port, &p.allowed_ips).await;
+            }
+            if let Ok(remaining) = state.projects.list().await {
+                state.runtime.cleanup_project_files(p, &remaining);
+                state.caddy.remove_project_config(&p.slug, &remaining);
+            }
         }
     }
     state.cache.invalidate_project(id);
@@ -392,31 +502,65 @@ pub(crate) async fn start_project_with_audit(
     action: &str,
     action_label: &str,
 ) -> Result<u32, (StatusCode, String)> {
-    let env = state.projects.get_env_map(p.id).await;
-    match state.runtime.start_project(p, env, None).await {
-        Ok(pid) => {
-            state.cache.invalidate_all();
-            log_audit_project(
-                state,
-                Some(p.id),
-                &actor.username,
-                action,
-                Some(&p.name),
-                Some(&if p.project_kind == "service" {
-                format!("{} backend service (PID {})", action_label, pid)
-            } else {
-                format!("{} website container (PID {}, Port {})", action_label, pid, p.port.unwrap_or(3000))
-            }),
+    let start_res = if let Some(node_id) = resolve_remote_node(state, p.node_id).await? {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let val = state
+            .cluster
+            .call_node(
+                node_id,
+                "project.start",
+                serde_json::json!({ "project": p, "context": ctx }),
+                std::time::Duration::from_secs(30),
             )
-            .await;
-            Ok(pid)
-        }
-        Err(e) if e == "NOT_DEPLOYED_YET" => Err((
-            StatusCode::BAD_REQUEST,
-            format!("'{}' has not been deployed yet. Please click 'Deploy' to build and deploy it first.", p.name),
-        )),
-        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
-    }
+            .await?;
+        let pid = val["pid"].as_u64().unwrap_or(0) as u32;
+        let _ = sqlx::query(
+            "UPDATE projects SET app_status='running', app_pid=$1, app_started_at=$2 WHERE id=$3",
+        )
+        .bind(pid as i64)
+        .bind(now())
+        .bind(p.id)
+        .execute(&state.db)
+        .await;
+        Ok(pid)
+    } else {
+        let env = state.projects.get_env_map(p.id).await;
+        state.runtime.start_project(p, env, None).await.map_err(|e| {
+            if e == "NOT_DEPLOYED_YET" {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "'{}' has not been deployed yet. Please click 'Deploy' to build and deploy it first.",
+                        p.name
+                    ),
+                )
+            } else {
+                (StatusCode::BAD_REQUEST, e)
+            }
+        })
+    };
+
+    let pid = start_res?;
+    state.cache.invalidate_all();
+    log_audit_project(
+        state,
+        Some(p.id),
+        &actor.username,
+        action,
+        Some(&p.name),
+        Some(&if p.project_kind == "service" {
+            format!("{} backend service (PID {})", action_label, pid)
+        } else {
+            format!(
+                "{} website container (PID {}, Port {})",
+                action_label,
+                pid,
+                p.port.unwrap_or(3000)
+            )
+        }),
+    )
+    .await;
+    Ok(pid)
 }
 
 pub(crate) async fn start_project_handler(
@@ -439,11 +583,29 @@ pub(crate) async fn stop_project_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "process", id).await?;
 
-    state
-        .runtime
-        .stop_project(&p)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if let Some(node_id) = resolve_remote_node(&state, p.node_id).await? {
+        state
+            .cluster
+            .call_node(
+                node_id,
+                "project.stop",
+                serde_json::json!({ "project": &p }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        let _ = sqlx::query(
+            "UPDATE projects SET app_status='stopped', app_pid=NULL, app_started_at=NULL WHERE id=$1",
+        )
+        .bind(p.id)
+        .execute(&state.db)
+        .await;
+    } else {
+        state
+            .runtime
+            .stop_project(&p)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
 
     state.cache.invalidate_all();
     log_audit_project(
@@ -470,6 +632,39 @@ pub(crate) async fn restart_project_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "process", id).await?;
 
+    if let Some(node_id) = resolve_remote_node(&state, p.node_id).await? {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let val = state
+            .cluster
+            .call_node(
+                node_id,
+                "project.restart",
+                serde_json::json!({ "project": &p, "context": ctx }),
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+        let pid = val["pid"].as_u64().unwrap_or(0) as u32;
+        let _ = sqlx::query(
+            "UPDATE projects SET app_status='running', app_pid=$1, app_started_at=$2 WHERE id=$3",
+        )
+        .bind(pid as i64)
+        .bind(now())
+        .bind(p.id)
+        .execute(&state.db)
+        .await;
+        state.cache.invalidate_all();
+        log_audit_project(
+            &state,
+            Some(p.id),
+            &actor.username,
+            "container.restart",
+            Some(&p.name),
+            Some(&format!("Restarted remote workload (PID {pid})")),
+        )
+        .await;
+        return Ok(Json(serde_json::json!({ "started": true, "pid": pid })));
+    }
+
     let _ = state.runtime.stop_project(&p).await;
     let pid = start_project_with_audit(&state, &actor, &p, "container.restart", "Restarted").await?;
     Ok(Json(serde_json::json!({ "started": true, "pid": pid })))
@@ -491,6 +686,51 @@ pub(crate) async fn toggle_maintenance_handler(
     let target_enabled = payload
         .and_then(|Json(b)| b.enabled)
         .unwrap_or(p.app_status != "maintenance");
+
+    if let Some(node_id) = resolve_remote_node(&state, p.node_id).await? {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let val = state
+            .cluster
+            .call_node(
+                node_id,
+                "project.maintenance",
+                serde_json::json!({ "project": &p, "enabled": target_enabled, "context": ctx }),
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+        let final_status = val["appStatus"]
+            .as_str()
+            .unwrap_or(if target_enabled { "maintenance" } else { "stopped" })
+            .to_string();
+        let _ = sqlx::query(
+            "UPDATE projects SET app_status=$1, app_pid=NULL, updated_at=$2 WHERE id=$3",
+        )
+        .bind(&final_status)
+        .bind(now())
+        .bind(p.id)
+        .execute(&state.db)
+        .await;
+        state.cluster.sync_remote_caddy(&state.projects, node_id).await;
+        log_audit_project(
+            &state,
+            Some(p.id),
+            &actor.username,
+            if target_enabled {
+                "website.maintenance_on"
+            } else {
+                "website.maintenance_off"
+            },
+            Some(&p.name),
+            Some(&format!("Set remote maintenance={target_enabled} (status {final_status})")),
+        )
+        .await;
+        state.cache.invalidate_all();
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "maintenance": target_enabled,
+            "app_status": final_status,
+        })));
+    }
 
     if target_enabled {
         state

@@ -51,7 +51,38 @@ pub(crate) async fn deploy_project_handler(
         Some(&format!("Triggered deployment #{} on branch '{}'", dep_id, p.branch)),
     )
     .await;
-    trigger_background_deploy(state.deployer.clone(), p.id, dep_id);
+
+    if let Some(node_id) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        if let Err(err) = state
+            .cluster
+            .call_node(
+                node_id,
+                "project.deploy",
+                serde_json::json!({
+                    "project": &p,
+                    "deploymentId": dep_id,
+                    "sha": target_sha,
+                    "context": ctx,
+                }),
+                std::time::Duration::from_secs(20),
+            )
+            .await
+        {
+            state
+                .deployer
+                .finish_deployment(dep_id, "failed", Some(&err.1))
+                .await;
+            return Err(err);
+        }
+    } else {
+        trigger_background_deploy(state.deployer.clone(), p.id, dep_id);
+    }
 
     Ok(Json(ActionResponse { deployment_id: dep_id }))
 }
@@ -84,9 +115,51 @@ pub(crate) async fn rollback_project_handler(
     )
     .await;
 
-    tokio::spawn(async move {
-        deployer.run_rollback(p.id, dep_id, target_rel).await;
-    });
+    if let Some(node_id) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        let rel_row: Option<(String, String)> = sqlx::query_as(
+            "SELECT dir, sha FROM releases WHERE id = $1 AND project_id = $2",
+        )
+        .bind(target_rel)
+        .bind(p.id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        let (rel_dir, rel_sha) = rel_row.unwrap_or_default();
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        if let Err(err) = state
+            .cluster
+            .call_node(
+                node_id,
+                "project.rollback",
+                serde_json::json!({
+                    "project": &p,
+                    "deploymentId": dep_id,
+                    "releaseId": target_rel,
+                    "releaseDir": rel_dir,
+                    "sha": rel_sha,
+                    "context": ctx,
+                }),
+                std::time::Duration::from_secs(20),
+            )
+            .await
+        {
+            state
+                .deployer
+                .finish_deployment(dep_id, "failed", Some(&err.1))
+                .await;
+            return Err(err);
+        }
+    } else {
+        tokio::spawn(async move {
+            deployer.run_rollback(p.id, dep_id, target_rel).await;
+        });
+    }
 
     Ok(Json(ActionResponse { deployment_id: dep_id }))
 }
@@ -121,19 +194,46 @@ pub(crate) async fn create_release_handler(
 
     if source == "snapshot" {
         let ts = now();
-        let base_dir = std::path::PathBuf::from(&p.deploy_dir);
-        let rel_dir = base_dir.join("releases").join(format!("rel-snap-{}", ts));
-        tokio::fs::create_dir_all(&rel_dir).await.ok();
-
-        let src_dir = if base_dir.join("current").exists() {
-            base_dir.join("current")
+        let rel_dir_str = if let Some(node_id) = state
+            .cluster
+            .should_proxy_to_node(p.node_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        {
+            let raw_env = state.projects.export_raw_env(id).await.unwrap_or_default();
+            let snap = state
+                .cluster
+                .call_node(
+                    node_id,
+                    "project.create_snapshot",
+                    serde_json::json!({
+                        "project": &p,
+                        "kind": "full-snapshot",
+                        "rawEnv": raw_env,
+                    }),
+                    std::time::Duration::from_secs(60),
+                )
+                .await?;
+            snap["releaseFilesDir"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
         } else {
-            base_dir.clone()
-        };
+            let base_dir = std::path::PathBuf::from(&p.deploy_dir);
+            let rel_dir = base_dir.join("releases").join(format!("rel-snap-{}", ts));
+            tokio::fs::create_dir_all(&rel_dir).await.ok();
 
-        if src_dir.exists() {
-            copy_backup_files(&src_dir, &rel_dir);
-        }
+            let src_dir = if base_dir.join("current").exists() {
+                base_dir.join("current")
+            } else {
+                base_dir.clone()
+            };
+
+            if src_dir.exists() {
+                copy_backup_files(&src_dir, &rel_dir);
+            }
+            rel_dir.to_string_lossy().to_string()
+        };
 
         let sha = p.deployed_sha.clone().unwrap_or_else(|| format!("{:x}", ts));
         let short_sha = sha[..7.min(sha.len())].to_string();
@@ -145,21 +245,20 @@ pub(crate) async fn create_release_handler(
             &short_sha,
             &format!("Release: {}", note),
             &actor.username,
-            rel_dir.to_str().unwrap_or(""),
+            &rel_dir_str,
             ts,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         // Also record in backups so it appears in Backups tab
-        let p_str = rel_dir.to_string_lossy().to_string();
         let _ = sqlx::query(
             "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at) \
              VALUES($1, $2, 'release-snapshot', $3, 5242880, $4, $5)",
         )
         .bind(id)
         .bind(rel_id)
-        .bind(&p_str)
+        .bind(&rel_dir_str)
         .bind(format!("Release #{} ({})", rel_id, note))
         .bind(ts)
         .execute(&state.db)
@@ -176,7 +275,37 @@ pub(crate) async fn create_release_handler(
     } else {
         // Trigger a new deployment which builds and creates a live release
         let dep_id = state.deployer.create_deployment(&p, "deploy", &actor.username, "manual").await;
-        trigger_background_deploy(state.deployer.clone(), p.id, dep_id);
+        if let Some(node_id) = state
+            .cluster
+            .should_proxy_to_node(p.node_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        {
+            let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+            if let Err(err) = state
+                .cluster
+                .call_node(
+                    node_id,
+                    "project.deploy",
+                    serde_json::json!({
+                        "project": &p,
+                        "deploymentId": dep_id,
+                        "sha": Option::<String>::None,
+                        "context": ctx,
+                    }),
+                    std::time::Duration::from_secs(20),
+                )
+                .await
+            {
+                state
+                    .deployer
+                    .finish_deployment(dep_id, "failed", Some(&err.1))
+                    .await;
+                return Err(err);
+            }
+        } else {
+            trigger_background_deploy(state.deployer.clone(), p.id, dep_id);
+        }
 
         Ok(Json(serde_json::json!({
             "ok": true,
@@ -288,10 +417,30 @@ pub(crate) async fn delete_release_handler(
     .ok()
     .flatten();
 
+    let remote_node_id = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+
     if let Some(d_str) = rel_dir {
-        let path = std::path::Path::new(&d_str);
-        if p.project_kind != "service" && path.exists() && (d_str.contains("releases") || d_str.contains("rel-")) {
-            let _ = tokio::fs::remove_dir_all(path).await;
+        if let Some(nid) = remote_node_id {
+            if p.project_kind != "service" && (d_str.contains("releases") || d_str.contains("rel-")) {
+                let _ = state
+                    .cluster
+                    .call_node(
+                        nid,
+                        "project.delete_path",
+                        serde_json::json!({ "path": d_str }),
+                        std::time::Duration::from_secs(15),
+                    )
+                    .await;
+            }
+        } else {
+            let path = std::path::Path::new(&d_str);
+            if p.project_kind != "service" && path.exists() && (d_str.contains("releases") || d_str.contains("rel-")) {
+                let _ = tokio::fs::remove_dir_all(path).await;
+            }
         }
     }
 

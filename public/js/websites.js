@@ -273,6 +273,52 @@ document.querySelectorAll('#projects-status-filters .pill').forEach((btn) => {
 // ============================================================================
 // Add Website Workflow Modal
 // ============================================================================
+async function populateTargetNodeSelect(selectId, groupId, selectedNodeId = null, isEdit = false) {
+  const select = document.getElementById(selectId);
+  const group = document.getElementById(groupId);
+  if (!select || !group) return;
+
+  let nodes = Array.isArray(state.nodes) ? state.nodes : [];
+  if (!nodes.length) {
+    try {
+      const list = await api('/api/cluster/nodes');
+      if (Array.isArray(list)) {
+        state.nodes = list;
+        nodes = list;
+      }
+    } catch {
+      nodes = [];
+    }
+  }
+
+  const eligible = nodes.filter((n) => n.isLocal || n.status !== 'offline' || String(n.id) === String(selectedNodeId));
+  if (!eligible.length) {
+    group.style.display = 'none';
+    select.innerHTML = '';
+    return;
+  }
+
+  group.style.display = 'block';
+  const localNode = eligible.find((n) => n.isLocal);
+  const defaultId = selectedNodeId != null && selectedNodeId !== ''
+    ? String(selectedNodeId)
+    : (state.selectedNodeFilter && state.selectedNodeFilter !== 'all'
+      ? String(state.selectedNodeFilter)
+      : String(localNode ? localNode.id : eligible[0].id));
+
+  select.innerHTML = eligible
+    .map((n) => {
+      const roleTag = n.isLocal ? 'Local Core' : (n.meshIp || n.region || 'Remote Node');
+      const statusTag = n.status && n.status !== 'online' ? ` · ${n.status}` : '';
+      return `<option value="${escapeHtml(String(n.id))}">${escapeHtml(n.name)} (${escapeHtml(roleTag)}${escapeHtml(statusTag)})</option>`;
+    })
+    .join('');
+
+  select.value = eligible.some((n) => String(n.id) === defaultId) ? defaultId : String(eligible[0].id);
+  select.disabled = Boolean(isEdit);
+}
+window.populateTargetNodeSelect = populateTargetNodeSelect;
+
 function openAddWebsiteModal() {
   const form = document.getElementById('website-form');
   if (form) form.reset();
@@ -311,6 +357,7 @@ function openAddWebsiteModal() {
   const portInput = document.getElementById('website-port');
   if (portInput) portInput.value = getNextAvailablePort(3000);
 
+  populateTargetNodeSelect('website-node-id', 'website-node-group', null, false);
   openModal('modal-website');
 }
 window.openAddWebsiteModal = openAddWebsiteModal;
@@ -361,6 +408,7 @@ async function openEditWebsiteModal(projectId) {
     c.classList.toggle('active', c.getAttribute('data-type') === p.project_type);
   });
 
+  populateTargetNodeSelect('website-node-id', 'website-node-group', p.node_id, true);
   openModal('modal-website');
 }
 window.openEditWebsiteModal = openEditWebsiteModal;
@@ -525,6 +573,7 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
   const domains = cleanDomainList(domainsStr);
   const accessMode = document.getElementById('website-access-mode')?.value || 'local';
   const allowedIps = document.getElementById('website-allowed-ips')?.value.trim() || '';
+  const selectedNodeVal = document.getElementById('website-node-id')?.value;
 
   const payload = {
     name,
@@ -544,6 +593,9 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
     auto_deploy: Boolean(document.getElementById('website-auto-deploy')?.checked),
     auto_backup: Boolean(document.getElementById('website-auto-backup')?.checked),
   };
+  if (!id && selectedNodeVal) {
+    payload.node_id = Number(selectedNodeVal);
+  }
 
   const submitBtn = document.getElementById('save-website-submit-btn');
   const oldText = submitBtn ? submitBtn.textContent : '';

@@ -284,6 +284,8 @@ pub(crate) async fn node_ws_handler(
         .map_err(|code| (code, "WebSocket upgrade required".to_string()))?;
 
     let cluster = state.cluster.clone();
+    let logs = state.logs.clone();
+    let cache = state.cache.clone();
     tokio::spawn(async move {
         let Ok(ws) = rx.await else {
             return;
@@ -316,7 +318,7 @@ pub(crate) async fn node_ws_handler(
                                 wg_endpoint,
                                 public_ip,
                                 capabilities,
-                                ..
+                                workloads,
                             } => {
                                 let resolved_ip = if public_ip.trim().is_empty() {
                                     peer_ip.as_str()
@@ -333,10 +335,34 @@ pub(crate) async fn node_ws_handler(
                                         &capabilities,
                                     )
                                     .await;
+                                cluster.apply_remote_workloads_heartbeat(node_id, &workloads).await;
                                 cluster.broadcast_peer_sync().await;
                             }
-                            ClusterWsMessage::Heartbeat { metrics, .. } => {
+                            ClusterWsMessage::Heartbeat { metrics, workloads, .. } => {
                                 let _ = cluster.update_node_metrics(node_id, &metrics).await;
+                                cluster.apply_remote_workloads_heartbeat(node_id, &workloads).await;
+                            }
+                            ClusterWsMessage::RpcResponse {
+                                req_id,
+                                ok,
+                                status,
+                                result,
+                                error,
+                            } => {
+                                cluster.resolve_rpc(&req_id, ok, status, result, error).await;
+                            }
+                            ClusterWsMessage::LogChunk {
+                                project_id,
+                                deployment_id,
+                                channel,
+                                level,
+                                message,
+                                ..
+                            } => {
+                                logs.add(project_id, deployment_id, &channel, &level, &message);
+                            }
+                            ClusterWsMessage::DeployStateUpdate { update } => {
+                                cluster.apply_remote_deploy_update(&logs, &cache, update).await;
                             }
                             ClusterWsMessage::Ping { ts } => {
                                 let _ = cluster.send_peer_sync_to(node_id).await;
@@ -361,6 +387,8 @@ pub(crate) async fn node_ws_handler(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use axum::body::Body;
     use axum::http::Method;
@@ -519,5 +547,432 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ws_denied.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn phase4_ws_rpc_streaming_and_remote_http_proxy() {
+        let state = crate::api::access::tests_state_helper().await;
+        let users = state.auth.list_users().await.unwrap();
+        let admin = users.into_iter().find(|u| u.is_main_admin).unwrap();
+        let admin_sess = state.auth.create_session(admin.id).await.unwrap();
+        let admin_sid = admin_sess.id;
+        let admin_csrf = admin_sess.csrf_token;
+        let router = crate::api::create_router(state.clone());
+
+        // Create restricted file-only user (no "env" power) to verify Core RBAC before remote proxy
+        let file_user_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users(username, password_hash, permissions, allowed_projects, created_at)
+             VALUES('remote_file_user', 'hash', '[\"files\",\"files_write\"]', '[\"*\"]', 1700000000)
+             RETURNING id",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        let file_sess = state.auth.create_session(file_user_id).await.unwrap();
+
+        // 1. Enroll remote node
+        let tok_res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/cluster/enroll-tokens")
+                    .header(header::COOKIE, format!("nd_session={admin_sid}"))
+                    .header("x-csrf-token", &admin_csrf)
+                    .header(header::HOST, "panel.test:8080")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"label":"phase4-worker","region":"eu-central"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tok_res.status(), StatusCode::CREATED);
+        let tok_body = axum::body::to_bytes(tok_res.into_body(), 64 * 1024).await.unwrap();
+        let tok_json: CreateEnrollTokenResponse = serde_json::from_slice(&tok_body).unwrap();
+
+        let enroll_res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/cluster/enroll")
+                    .header(header::HOST, "panel.test:8080")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "token": tok_json.token,
+                            "name": "phase4-worker",
+                            "wgPubkey": "pubKeyPhase4==",
+                            "nodeVersion": "0.2.3"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enroll_res.status(), StatusCode::OK);
+        let enroll_body = axum::body::to_bytes(enroll_res.into_body(), 64 * 1024).await.unwrap();
+        let enrolled: EnrollNodeResponse = serde_json::from_slice(&enroll_body).unwrap();
+
+        // 2. Offline node RPC fails with 503 Service Unavailable
+        let offline_err = state
+            .cluster
+            .call_node(
+                enrolled.node_id,
+                "files.list",
+                serde_json::json!({}),
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+        assert!(matches!(offline_err, Err((StatusCode::SERVICE_UNAVAILABLE, _))));
+
+        // Deterministic RPC timeout test via synthetic unresponsive peer channel
+        let (dead_tx, _dead_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.cluster.register_peer_sender(999_999, dead_tx).await;
+        let timeout_err = state
+            .cluster
+            .call_node(
+                999_999,
+                "slow.op",
+                serde_json::json!({}),
+                std::time::Duration::from_millis(50),
+            )
+            .await;
+        state.cluster.unregister_peer_sender(999_999).await;
+        assert!(matches!(timeout_err, Err((StatusCode::GATEWAY_TIMEOUT, _))));
+
+        // 3. Serve router & connect real Web-Node WebSocket + NodeExecState executor
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let temp_root = std::env::temp_dir().join(format!("webdep-phase4-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        let worker_data_dir = temp_root.join("worker-data");
+        let remote_site_dir = temp_root.join("remote-site");
+        std::fs::create_dir_all(&worker_data_dir).unwrap();
+
+        let ws_url = format!("ws://{addr}/api/cluster/node-ws");
+        let ws = crate::cluster::ws::connect_ws(&ws_url, Some(&enrolled.node_token))
+            .await
+            .expect("WS connect_ws should succeed");
+        let (mut ws_reader, mut ws_writer) = ws.into_split();
+
+        let reg = ClusterWsMessage::Register {
+            node_version: "0.2.3".to_string(),
+            wg_pubkey: "pubKeyPhase4==".to_string(),
+            wg_endpoint: String::new(),
+            public_ip: "127.0.0.1".to_string(),
+            capabilities: crate::cluster::models::NodeCapabilities::default(),
+            workloads: Vec::new(),
+        };
+        ws_writer
+            .send_text(&serde_json::to_string(&reg).unwrap())
+            .await
+            .unwrap();
+
+        let manifest = crate::cluster::models::NodeStateManifest {
+            node_id: enrolled.node_id,
+            name: "phase4-worker".to_string(),
+            region: "eu-central".to_string(),
+            core_url: format!("http://{addr}"),
+            core_ws_url: format!("ws://{addr}/api/cluster/node-ws"),
+            mesh_ip: enrolled.mesh_ip.clone(),
+            public_ip: "127.0.0.1".to_string(),
+            wg_private_key: String::new(),
+            wg_pubkey: "pubKeyPhase4==".to_string(),
+            wg_listen_port: 51820,
+            node_token: enrolled.node_token.clone(),
+            peers: Vec::new(),
+            workloads: Vec::new(),
+            updated_at: 0,
+        };
+        let exec_state = Arc::new(crate::cluster::node_exec::NodeExecState::new(
+            worker_data_dir.clone(),
+            manifest,
+        ));
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<ClusterWsMessage>();
+
+        let exec_c = exec_state.clone();
+        let out_tx_c = out_tx.clone();
+        let agent_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(msg) = out_rx.recv() => {
+                        if let Ok(txt) = serde_json::to_string(&msg) {
+                            if ws_writer.send_text(&txt).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    frame = ws_reader.recv() => {
+                        match frame {
+                            Ok(crate::cluster::ws::WsMessage::Text(txt)) => {
+                                if let Ok(parsed) = serde_json::from_str::<ClusterWsMessage>(&txt) {
+                                    match parsed {
+                                        ClusterWsMessage::PeerSync { placement_versions, .. } => {
+                                            let _ = crate::cluster::node_exec::reconcile_placements(
+                                                &exec_c,
+                                                &placement_versions,
+                                                Some(&out_tx_c),
+                                            ).await;
+                                        }
+                                        ClusterWsMessage::RpcRequest { req_id, op, params } => {
+                                            let ec = exec_c.clone();
+                                            let tx = out_tx_c.clone();
+                                            tokio::spawn(async move {
+                                                let reply = crate::cluster::node_exec::execute_rpc(
+                                                    ec, req_id, op, params, tx.clone()
+                                                ).await;
+                                                let _ = tx.send(reply);
+                                            });
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            Ok(crate::cluster::ws::WsMessage::Close) | Err(_) => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+
+        // Wait up to 2s for Core to register the peer sender
+        for _ in 0..40 {
+            if state.cluster.is_node_connected(enrolled.node_id).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(state.cluster.is_node_connected(enrolled.node_id).await);
+
+        // 4. Create project assigned to remote node -> triggers PeerSync + project.ensure RPC
+        let unique_slug = format!("phase4-remote-{}", crate::db::now());
+        let create_body = serde_json::json!({
+            "name": "Phase 4 Remote App",
+            "slug": unique_slug,
+            "repo_url": "local",
+            "branch": "main",
+            "deploy_dir": remote_site_dir.to_string_lossy().to_string(),
+            "start_cmd": "node server.js",
+            "port": 49123,
+            "node_id": enrolled.node_id
+        });
+        let app_router = crate::api::create_router(state.clone());
+        let cr = app_router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/projects")
+                    .header(header::COOKIE, format!("nd_session={admin_sid}"))
+                    .header("x-csrf-token", &admin_csrf)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(create_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cr.status(), StatusCode::OK);
+        let cr_bytes = axum::body::to_bytes(cr.into_body(), 64 * 1024).await.unwrap();
+        let cr_json: serde_json::Value = serde_json::from_slice(&cr_bytes).unwrap();
+        let pid = cr_json["id"].as_i64().unwrap();
+        assert_eq!(cr_json["node_id"].as_i64(), Some(enrolled.node_id));
+
+        // 5. Remote File Write & Read proxy via Core HTTP API -> WS RPC -> NodeExecState
+        let fw = app_router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/api/projects/{pid}/files/content"))
+                    .header(header::COOKIE, format!("nd_session={admin_sid}"))
+                    .header("x-csrf-token", &admin_csrf)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "path": "src/app.js", "content": "remote-hello" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fw.status(), StatusCode::OK);
+
+        let fr = app_router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/projects/{pid}/files/content?path=src/app.js"))
+                    .header(header::COOKIE, format!("nd_session={admin_sid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fr.status(), StatusCode::OK);
+        let fr_bytes = axum::body::to_bytes(fr.into_body(), 64 * 1024).await.unwrap();
+        let fr_json: serde_json::Value = serde_json::from_slice(&fr_bytes).unwrap();
+        assert_eq!(fr_json["content"].as_str(), Some("remote-hello"));
+
+        // Core RBAC rejects .env write BEFORE proxying to remote Web-Node
+        let env_denied = app_router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/api/projects/{pid}/files/content"))
+                    .header(header::COOKIE, format!("nd_session={}", file_sess.id))
+                    .header("x-csrf-token", &file_sess.csrf_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "path": ".env", "content": "SECRET=1" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(env_denied.status(), StatusCode::FORBIDDEN);
+        assert!(!remote_site_dir.join(".env").exists());
+
+        // 6. Streaming LogChunk over WS persists & reaches Core Logs
+        out_tx
+            .send(ClusterWsMessage::LogChunk {
+                project_id: Some(pid),
+                deployment_id: None,
+                channel: "deploy".to_string(),
+                level: "info".to_string(),
+                message: "Phase4 remote streamed log".to_string(),
+                ts: crate::db::now(),
+            })
+            .unwrap();
+        let mut found_log = false;
+        for _ in 0..30 {
+            let cnt: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM logs WHERE project_id = $1 AND message = 'Phase4 remote streamed log'",
+            )
+            .bind(pid)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+            if cnt > 0 {
+                found_log = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(found_log);
+
+        // 7. Streaming DeployStateUpdate updates PG deployments, releases, and project sha
+        let proj = state.projects.get(pid).await.unwrap().unwrap();
+        let dep_id = state
+            .deployer
+            .create_deployment(&proj, "manual", "admin", "remote-test")
+            .await;
+        let rel_dir = remote_site_dir.join("releases").join("rel-abc1234");
+        out_tx
+            .send(ClusterWsMessage::DeployStateUpdate {
+                update: crate::cluster::models::DeployStateUpdate {
+                    deployment_id: dep_id,
+                    project_id: pid,
+                    kind: Some("manual".to_string()),
+                    stage: Some("done".to_string()),
+                    status: Some("success".to_string()),
+                    sha: Some("abc1234567890abcdef".to_string()),
+                    short_sha: Some("abc1234".to_string()),
+                    release_dir: Some(rel_dir.to_string_lossy().to_string()),
+                    commit_message: Some("Deployed via remote worker".to_string()),
+                    commit_author: Some("admin".to_string()),
+                    deployed_sha: Some("abc1234567890abcdef".to_string()),
+                    app_pid: Some(42424),
+                    app_status: Some("running".to_string()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let mut deploy_done = false;
+        for _ in 0..30 {
+            let st: Option<String> = sqlx::query_scalar("SELECT status FROM deployments WHERE id = $1")
+                .bind(dep_id)
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None);
+            if st.as_deref() == Some("success") {
+                deploy_done = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(deploy_done);
+
+        // 8. Heartbeat workload telemetry syncs status, pid, and remote disk_bytes
+        out_tx
+            .send(ClusterWsMessage::Heartbeat {
+                metrics: crate::cluster::models::NodeMetrics::default(),
+                workloads: vec![crate::cluster::models::NodeWorkloadPlacement {
+                    project_id: pid,
+                    slug: proj.slug.clone(),
+                    placement_version: 1,
+                    port: Some(49123),
+                    app_status: "running".to_string(),
+                    pid: Some(42424),
+                    disk_bytes: 20480,
+                    deploy_dir: proj.deploy_dir.clone(),
+                }],
+                ts: crate::db::now(),
+            })
+            .unwrap();
+        let mut hb_synced = false;
+        for _ in 0..30 {
+            if state.cluster.get_remote_disk_bytes(pid).await == Some(20480) {
+                hb_synced = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(hb_synced);
+
+        let gp = app_router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/projects/{pid}"))
+                    .header(header::COOKIE, format!("nd_session={admin_sid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(gp.status(), StatusCode::OK);
+        let gp_bytes = axum::body::to_bytes(gp.into_body(), 64 * 1024).await.unwrap();
+        let gp_json: serde_json::Value = serde_json::from_slice(&gp_bytes).unwrap();
+        assert_eq!(gp_json["deployed_sha"].as_str(), Some("abc1234567890abcdef"));
+        assert_eq!(gp_json["app_status"].as_str(), Some("running"));
+        assert_eq!(gp_json["diskFormatted"].as_str(), Some("20 KB"));
+
+        // Cleanup project, WS client, server, and temp dir
+        let dp = app_router
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/api/projects/{pid}"))
+                    .header(header::COOKIE, format!("nd_session={admin_sid}"))
+                    .header("x-csrf-token", &admin_csrf)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dp.status(), StatusCode::OK);
+
+        agent_task.abort();
+        server_task.abort();
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 }

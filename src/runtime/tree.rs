@@ -166,6 +166,122 @@ pub fn detect_java_exe() -> Option<(PathBuf, PathBuf)> {
     None
 }
 
+pub(crate) async fn kill_project_processes_pure(
+    project_id: i64,
+    slug: &str,
+    deploy_dir: &str,
+    port: Option<u16>,
+    known_extra_pids: &[u32],
+    old_child: Option<tokio::process::Child>,
+) -> bool {
+    let fake_proj = Project {
+        id: project_id,
+        name: slug.to_string(),
+        slug: slug.to_string(),
+        repo_url: String::new(),
+        branch: String::new(),
+        project_type: String::new(),
+        deploy_method: String::new(),
+        deploy_dir: deploy_dir.to_string(),
+        port,
+        install_cmd: String::new(),
+        build_cmd: String::new(),
+        start_cmd: String::new(),
+        health_url: String::new(),
+        health_timeout_s: 30,
+        stability_s: 5,
+        auto_deploy: false,
+        webhook_secret: None,
+        current_release_id: None,
+        deployed_sha: None,
+        last_poll_at: None,
+        app_status: String::new(),
+        app_pid: None,
+        app_started_at: None,
+        domains: Vec::new(),
+        ssl_email: String::new(),
+        created_at: 0,
+        updated_at: 0,
+        project_kind: "web".to_string(),
+        access_mode: "local".to_string(),
+        allowed_ips: String::new(),
+        node_id: None,
+        placement_version: 1,
+        assigned_port: None,
+    };
+    let container = super::container::ensure_container_with_port(&fake_proj, port.unwrap_or(3000));
+    let mut pids_to_kill: HashSet<u32> = HashSet::new();
+
+    let had_child = old_child.is_some();
+    if let Some(ref child) = old_child {
+        if let Some(pid) = child.id() {
+            pids_to_kill.insert(pid);
+        }
+    }
+
+    for &pid in known_extra_pids {
+        if pid > 0 {
+            pids_to_kill.insert(pid);
+        }
+    }
+
+    for cpid in super::container::read_container_pids_from(&container) {
+        pids_to_kill.insert(cpid);
+    }
+
+    if let Some(port_num) = port {
+        for port_pid in Runtime::find_pids_on_port(port_num) {
+            pids_to_kill.insert(port_pid);
+        }
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let base_dir = if Path::new(deploy_dir).is_absolute() {
+        PathBuf::from(deploy_dir)
+    } else {
+        cwd.join(deploy_dir.trim_start_matches("./").trim_start_matches(".\\"))
+    };
+    let sysinfo_pids = Runtime::find_project_processes_sysinfo(project_id, slug, &base_dir, &pids_to_kill);
+    for spid in sysinfo_pids {
+        pids_to_kill.insert(spid);
+    }
+
+    for pid in &pids_to_kill {
+        Runtime::kill_pid_tree(*pid).await;
+    }
+
+    if let Some(mut child) = old_child {
+        let _ = child.start_kill();
+    }
+
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let lingering = Runtime::find_project_processes_sysinfo(project_id, slug, &base_dir, &HashSet::new());
+        if lingering.is_empty() {
+            break;
+        }
+        for pid in lingering {
+            Runtime::kill_pid_tree(pid).await;
+        }
+    }
+
+    if let Some(port_num) = port {
+        for _ in 0..12 {
+            let remaining_pids = Runtime::find_pids_on_port(port_num);
+            if remaining_pids.is_empty() && !Runtime::is_port_accepting(port_num).await {
+                break;
+            }
+            for pid in remaining_pids {
+                Runtime::kill_pid_tree(pid).await;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    super::container::clear_container_pids_in(&container);
+    !pids_to_kill.is_empty() || had_child
+}
+
 impl Runtime {
     pub async fn kill_pid_tree(pid: u32) {
         if pid == 0 || pid == std::process::id() {
@@ -329,24 +445,14 @@ impl Runtime {
         tokio::time::sleep(Duration::from_millis(40)).await;
 
         let container = self.ensure_container(p).await;
-        let mut pids_to_kill: HashSet<u32> = HashSet::new();
-
-        // 1. In-memory Child handle: record PID, but DO NOT call start_kill() yet!
         let old_child = {
             let mut map = self.processes.lock().unwrap();
             map.remove(&p.id)
         };
-        let had_child = old_child.is_some();
-        if let Some(ref child) = old_child {
-            if let Some(pid) = child.id() {
-                pids_to_kill.insert(pid);
-            }
-        }
-
-        // 2. Database recorded PID
+        let mut known_extra = Vec::new();
         if let Some(old_pid) = p.app_pid {
             if old_pid > 0 {
-                pids_to_kill.insert(old_pid);
+                known_extra.push(old_pid);
             }
         }
         if let Ok(Some(Some(db_pid))) = sqlx::query_scalar::<_, Option<i64>>(
@@ -358,73 +464,20 @@ impl Runtime {
         {
             if let Ok(pid) = u32::try_from(db_pid) {
                 if pid > 0 {
-                    pids_to_kill.insert(pid);
+                    known_extra.push(pid);
                 }
             }
         }
 
-        // 3. Container pidfile PIDs
-        for cpid in self.read_container_pids(&container) {
-            pids_to_kill.insert(cpid);
-        }
-
-        // 4. All processes listening on the website's port
-        if let Some(port) = p.port {
-            for port_pid in Self::find_pids_on_port(port) {
-                pids_to_kill.insert(port_pid);
-            }
-        }
-
-        // 5. Deep Scan with sysinfo: Find ALL child, grandchild, detached, and matching processes
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let base_dir = if Path::new(&p.deploy_dir).is_absolute() {
-            PathBuf::from(&p.deploy_dir)
-        } else {
-            cwd.join(p.deploy_dir.trim_start_matches("./").trim_start_matches(".\\"))
-        };
-        let sysinfo_pids = Self::find_project_processes_sysinfo(p.id, &p.slug, &base_dir, &pids_to_kill);
-        for spid in sysinfo_pids {
-            pids_to_kill.insert(spid);
-        }
-
-        // 6. Kill all collected PIDs and their process trees while the parents are still known
-        for pid in &pids_to_kill {
-            Self::kill_pid_tree(*pid).await;
-        }
-
-        // 7. Now reap the old child handle
-        if let Some(mut child) = old_child {
-            let _ = child.start_kill();
-        }
-
-        // 8. Re-scan sysinfo with up to 6 rounds of verification to catch and kill any stubborn or surviving child processes
-        for _ in 0..6 {
-            tokio::time::sleep(Duration::from_millis(60)).await;
-            let lingering = Self::find_project_processes_sysinfo(p.id, &p.slug, &base_dir, &HashSet::new());
-            if lingering.is_empty() {
-                break;
-            }
-            for pid in lingering {
-                Self::kill_pid_tree(pid).await;
-            }
-        }
-
-        // 9. Verify the website's port is completely freed (retry up to 1.5s if child processes re-bound)
-        if let Some(port) = p.port {
-            for _ in 0..12 {
-                let remaining_pids = Self::find_pids_on_port(port);
-                if remaining_pids.is_empty() && !Self::is_port_accepting(port).await {
-                    break;
-                }
-                for pid in remaining_pids {
-                    Self::kill_pid_tree(pid).await;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-
-        self.clear_container_pids(&container);
-        !pids_to_kill.is_empty() || had_child
+        kill_project_processes_pure(
+            p.id,
+            &p.slug,
+            &p.deploy_dir,
+            Some(p.port.unwrap_or(container.port)),
+            &known_extra,
+            old_child,
+        )
+        .await
     }
 }
 

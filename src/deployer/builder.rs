@@ -81,6 +81,21 @@ pub async fn run_shell_cmd(
     project_id: i64,
     dep_id: i64,
 ) -> Result<(), String> {
+    let logs_ref = logs.clone();
+    run_shell_cmd_with_logger(cmd_str, cwd, move |channel, level, line| {
+        logs_ref.add(Some(project_id), Some(dep_id), channel, level, line);
+    })
+    .await
+}
+
+pub async fn run_shell_cmd_with_logger<F>(
+    cmd_str: &str,
+    cwd: &Path,
+    log_fn: F,
+) -> Result<(), String>
+where
+    F: Fn(&str, &str, &str) + Send + Sync,
+{
     #[cfg(windows)]
     let mut cmd = tokio::process::Command::new("cmd");
     #[cfg(windows)]
@@ -168,7 +183,7 @@ pub async fn run_shell_cmd(
     for line in stdout_str.lines() {
         let trimmed = line.trim();
         if !trimmed.is_empty() {
-            logs.add(Some(project_id), Some(dep_id), "build", "info", trimmed);
+            log_fn("build", "info", trimmed);
         }
     }
 
@@ -177,7 +192,7 @@ pub async fn run_shell_cmd(
         let trimmed = line.trim();
         if !trimmed.is_empty() {
             let lvl = if out.status.success() { "info" } else { "error" };
-            logs.add(Some(project_id), Some(dep_id), "build", lvl, trimmed);
+            log_fn("build", lvl, trimmed);
         }
     }
 

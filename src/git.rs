@@ -122,6 +122,36 @@ impl Git {
         tokens
     }
 
+    pub fn set_cached_github_tokens(tokens: Vec<StoredGithubToken>) {
+        if let Ok(mut guard) = GITHUB_TOKENS_CACHE.write() {
+            *guard = tokens;
+        }
+    }
+
+    pub fn write_project_deploy_key(
+        data_dir: &Path,
+        project_id: i64,
+        public_key: &str,
+        private_key: &str,
+    ) -> Result<(), String> {
+        let key_dir = data_dir.join("keys");
+        std::fs::create_dir_all(&key_dir).map_err(|e| e.to_string())?;
+        let key_path = key_dir.join(format!("deploy_key_{project_id}"));
+        let pub_path = key_dir.join(format!("deploy_key_{project_id}.pub"));
+        if !private_key.trim().is_empty() {
+            std::fs::write(&key_path, private_key).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+        if !public_key.trim().is_empty() {
+            std::fs::write(&pub_path, format!("{}\n", public_key.trim())).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     pub fn get_stored_github_tokens() -> Vec<StoredGithubToken> {
         let mut list = GITHUB_TOKENS_CACHE
             .read()

@@ -43,10 +43,12 @@ impl Runtime {
                     rt.logs.add(Some(proj_id), None, "system", "warn", &msg);
                 }
 
-                // Every 6s (every 3rd tick), also check preserved workloads from previous panel instances
+                // Every 6s (every 3rd tick), also check preserved local workloads from previous panel instances
                 if tick % 3 == 0 {
                     let external_running: Vec<(i64, u32)> = sqlx::query_as::<_, (i64, Option<i64>)>(
-                        "SELECT id, app_pid FROM projects WHERE app_status = 'running'",
+                        "SELECT id, app_pid FROM projects
+                         WHERE app_status = 'running'
+                           AND (node_id IS NULL OR node_id IN (SELECT id FROM nodes WHERE is_local = TRUE))",
                     )
                     .fetch_all(&rt.db)
                     .await
@@ -84,32 +86,36 @@ impl Runtime {
     }
 
     pub async fn health_check(&self, url: &str, timeout_s: u64) -> Result<(), String> {
-        if url.trim().is_empty() {
-            return Ok(());
-        }
-
-        let start = std::time::Instant::now();
-        let max_duration = Duration::from_secs(timeout_s.max(5));
-        let mut last_err = String::from("Service starting up...");
-
-        while start.elapsed() < max_duration {
-            match reqwest_or_hyper(url, Duration::from_secs(2)).await {
-                Ok(true) => return Ok(()),
-                Ok(false) => {
-                    last_err = "Health check responded with non-2xx status".to_string();
-                }
-                Err(e) => {
-                    last_err = e;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-
-        Err(format!(
-            "Health check timed out after {}s (endpoint: {}): {}",
-            timeout_s, url, last_err
-        ))
+        health_check_url(url, timeout_s).await
     }
+}
+
+pub async fn health_check_url(url: &str, timeout_s: u64) -> Result<(), String> {
+    if url.trim().is_empty() {
+        return Ok(());
+    }
+
+    let start = std::time::Instant::now();
+    let max_duration = Duration::from_secs(timeout_s.max(5));
+    let mut last_err = String::from("Service starting up...");
+
+    while start.elapsed() < max_duration {
+        match reqwest_or_hyper(url, Duration::from_secs(2)).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                last_err = "Health check responded with non-2xx status".to_string();
+            }
+            Err(e) => {
+                last_err = e;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Err(format!(
+        "Health check timed out after {}s (endpoint: {}): {}",
+        timeout_s, url, last_err
+    ))
 }
 
 async fn reqwest_or_hyper(url_str: &str, timeout: Duration) -> Result<bool, String> {

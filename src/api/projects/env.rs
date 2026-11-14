@@ -56,6 +56,9 @@ pub(crate) async fn set_env_handler(
         )
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if let Ok(Some(p)) = state.projects.get(id).await {
+        state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
+    }
     log_audit_project(
         &state,
         Some(id),
@@ -117,6 +120,9 @@ pub(crate) async fn bulk_set_env_handler(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     };
+    if let Ok(Some(p)) = state.projects.get(id).await {
+        state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
+    }
     log_audit_project(
         &state,
         Some(id),
@@ -217,6 +223,9 @@ pub(crate) async fn delete_env_handler(
         .delete_env_var(id, &key)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Ok(Some(p)) = state.projects.get(id).await {
+        state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
+    }
     log_audit_project(
         &state,
         Some(id),

@@ -1,20 +1,26 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::http::StatusCode;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
+use crate::cache::AppCache;
 use crate::db::DbPool;
+use crate::git::Git;
+use crate::logs::Logs;
+use crate::projects::{Project, Projects};
 
 use super::mesh::{detect_capabilities, generate_wireguard_keypair, next_available_mesh_ip, DEFAULT_WG_PORT};
 use super::models::{
     ClusterNode, ClusterWsMessage, CreateEnrollTokenInput, CreateEnrollTokenResponse,
-    EnrollNodeRequest, EnrollNodeResponse, NodeCapabilities, NodeEnrollTokenView, NodeMetrics,
-    NodeStateManifest, PeerConfig,
+    DeployStateUpdate, EnrollNodeRequest, EnrollNodeResponse, NodeCapabilities, NodeEnrollTokenView,
+    NodeMetrics, NodeStateManifest, NodeWorkloadPlacement, PeerConfig,
 };
 use super::node_agent::{load_manifest, save_manifest};
 
@@ -45,10 +51,21 @@ fn generate_secret(prefix: &str) -> String {
     format!("{prefix}{}", hex::encode(bytes))
 }
 
+#[derive(Debug, Clone)]
+pub struct RpcReply {
+    pub ok: bool,
+    pub status: u16,
+    pub result: serde_json::Value,
+    pub error: Option<String>,
+}
+
 pub struct ClusterManager {
     db: DbPool,
     data_dir: PathBuf,
     peers_tx: RwLock<HashMap<i64, mpsc::UnboundedSender<ClusterWsMessage>>>,
+    pending_rpc: RwLock<HashMap<String, oneshot::Sender<RpcReply>>>,
+    rpc_seq: AtomicU64,
+    remote_disk_bytes: RwLock<HashMap<i64, u64>>,
 }
 
 impl ClusterManager {
@@ -57,6 +74,9 @@ impl ClusterManager {
             db,
             data_dir,
             peers_tx: RwLock::new(HashMap::new()),
+            pending_rpc: RwLock::new(HashMap::new()),
+            rpc_seq: AtomicU64::new(1),
+            remote_disk_bytes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -726,6 +746,422 @@ impl ClusterManager {
                 .await;
             }
         });
+    }
+
+    pub async fn default_local_node_id(&self) -> Option<i64> {
+        sqlx::query_scalar::<_, i64>("SELECT id FROM nodes WHERE is_local = TRUE ORDER BY id ASC LIMIT 1")
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub async fn should_proxy_to_node(&self, node_id: Option<i64>) -> Result<Option<i64>, String> {
+        let Some(nid) = node_id else {
+            return Ok(None);
+        };
+        let is_local: Option<bool> = sqlx::query_scalar("SELECT is_local FROM nodes WHERE id = $1")
+            .bind(nid)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(|e| format!("Failed checking target node #{nid}: {e}"))?;
+        match is_local {
+            Some(false) => Ok(Some(nid)),
+            Some(true) | None => Ok(None),
+        }
+    }
+
+    pub async fn is_node_connected(&self, node_id: i64) -> bool {
+        self.peers_tx.read().await.contains_key(&node_id)
+    }
+
+    pub async fn get_remote_disk_bytes(&self, project_id: i64) -> Option<u64> {
+        self.remote_disk_bytes.read().await.get(&project_id).copied()
+    }
+
+    pub async fn call_node(
+        &self,
+        node_id: i64,
+        op: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, (StatusCode, String)> {
+        let tx = self
+            .peers_tx
+            .read()
+            .await
+            .get(&node_id)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Web-Node #{node_id} is currently offline or not connected"),
+                )
+            })?;
+
+        let seq = self.rpc_seq.fetch_add(1, Ordering::Relaxed);
+        let req_id = format!("rpc-{}-{}", now_secs(), seq);
+        let (resp_tx, resp_rx) = oneshot::channel::<RpcReply>();
+        self.pending_rpc.write().await.insert(req_id.clone(), resp_tx);
+
+        if tx
+            .send(ClusterWsMessage::RpcRequest {
+                req_id: req_id.clone(),
+                op: op.to_string(),
+                params,
+            })
+            .is_err()
+        {
+            self.pending_rpc.write().await.remove(&req_id);
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Failed sending '{op}' to Web-Node #{node_id}"),
+            ));
+        }
+
+        let reply = match tokio::time::timeout(timeout, resp_rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => {
+                self.pending_rpc.write().await.remove(&req_id);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!("Web-Node #{node_id} closed connection during '{op}'"),
+                ));
+            }
+            Err(_) => {
+                self.pending_rpc.write().await.remove(&req_id);
+                return Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!("Timed out waiting for Web-Node #{node_id} to complete '{op}'"),
+                ));
+            }
+        };
+
+        if reply.ok {
+            Ok(reply.result)
+        } else {
+            let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            Err((
+                status,
+                reply
+                    .error
+                    .unwrap_or_else(|| format!("Remote '{op}' failed on Web-Node #{node_id}")),
+            ))
+        }
+    }
+
+    pub async fn resolve_rpc(
+        &self,
+        req_id: &str,
+        ok: bool,
+        status: u16,
+        result: serde_json::Value,
+        error: Option<String>,
+    ) {
+        if let Some(tx) = self.pending_rpc.write().await.remove(req_id) {
+            let _ = tx.send(RpcReply {
+                ok,
+                status,
+                result,
+                error,
+            });
+        }
+    }
+
+    pub async fn apply_remote_workloads_heartbeat(
+        &self,
+        node_id: i64,
+        workloads: &[NodeWorkloadPlacement],
+    ) {
+        if workloads.is_empty() {
+            return;
+        }
+        let mut disk_guard = self.remote_disk_bytes.write().await;
+        for w in workloads {
+            if w.disk_bytes > 0 {
+                disk_guard.insert(w.project_id, w.disk_bytes);
+            }
+            let pid_i64 = w.pid.map(|p| p as i64);
+            let normalized_status = match w.app_status.as_str() {
+                "running" | "stopped" | "maintenance" | "idle" => w.app_status.as_str(),
+                _ => continue,
+            };
+            let _ = sqlx::query(
+                "UPDATE projects
+                 SET app_status = $1,
+                     app_pid = $2
+                 WHERE id = $3 AND node_id = $4",
+            )
+            .bind(normalized_status)
+            .bind(pid_i64)
+            .bind(w.project_id)
+            .bind(node_id)
+            .execute(&self.db)
+            .await;
+        }
+    }
+
+    pub async fn apply_remote_deploy_update(
+        &self,
+        logs: &Logs,
+        cache: &AppCache,
+        upd: DeployStateUpdate,
+    ) {
+        let now = now_secs();
+        if let Some(ref stage) = upd.stage {
+            let _ = sqlx::query("UPDATE deployments SET stage = $1 WHERE id = $2")
+                .bind(stage)
+                .bind(upd.deployment_id)
+                .execute(&self.db)
+                .await;
+        }
+
+        if let Some(poll_ts) = upd.last_poll_at {
+            let _ = sqlx::query("UPDATE projects SET last_poll_at = $1 WHERE id = $2")
+                .bind(poll_ts)
+                .bind(upd.project_id)
+                .execute(&self.db)
+                .await;
+        }
+
+        // Create or update remote release entry once checkout/dir is known
+        let mut resolved_release_id = upd.release_id;
+        if let (Some(ref dir), Some(ref sha)) = (&upd.release_dir, &upd.sha) {
+            let existing: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM releases WHERE deployment_id = $1 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(upd.deployment_id)
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten();
+
+            let short_sha = upd
+                .short_sha
+                .clone()
+                .unwrap_or_else(|| sha[..7.min(sha.len())].to_string());
+            let rel_status = if upd.status.as_deref() == Some("success") {
+                "succeeded"
+            } else if upd.status.as_deref() == Some("failed") {
+                "failed"
+            } else {
+                "pulled"
+            };
+            let build_status = if upd.status.as_deref() == Some("success") {
+                "success"
+            } else if upd.status.as_deref() == Some("failed") {
+                "failed"
+            } else {
+                "pending"
+            };
+            let health_status = if upd.status.as_deref() == Some("success") {
+                "ok"
+            } else if upd.status.as_deref() == Some("failed") {
+                "failed"
+            } else {
+                "pending"
+            };
+
+            let rid = if let Some(eid) = existing {
+                let _ = sqlx::query(
+                    "UPDATE releases
+                     SET dir = $1, status = $2, build_status = $3, health_status = $4,
+                         deployed_at = CASE WHEN $2 = 'succeeded' THEN $5 ELSE deployed_at END
+                     WHERE id = $6",
+                )
+                .bind(dir)
+                .bind(rel_status)
+                .bind(build_status)
+                .bind(health_status)
+                .bind(now)
+                .bind(eid)
+                .execute(&self.db)
+                .await;
+                eid
+            } else {
+                sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO releases(project_id, deployment_id, sha, short_sha, message, author, committed_at, dir, status, build_status, health_status, created_at, deployed_at)
+                     VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $9 = 'succeeded' THEN $12 ELSE NULL END)
+                     RETURNING id",
+                )
+                .bind(upd.project_id)
+                .bind(upd.deployment_id)
+                .bind(sha)
+                .bind(&short_sha)
+                .bind(upd.commit_message.as_deref().unwrap_or("Deploy"))
+                .bind(upd.commit_author.as_deref().unwrap_or("System"))
+                .bind(upd.committed_at.unwrap_or(now))
+                .bind(dir)
+                .bind(rel_status)
+                .bind(build_status)
+                .bind(health_status)
+                .bind(now)
+                .fetch_one(&self.db)
+                .await
+                .unwrap_or(0)
+            };
+            if rid > 0 {
+                resolved_release_id = Some(rid);
+                let _ = sqlx::query(
+                    "UPDATE deployments SET release_id = $1, sha = $2 WHERE id = $3",
+                )
+                .bind(rid)
+                .bind(sha)
+                .bind(upd.deployment_id)
+                .execute(&self.db)
+                .await;
+            }
+        } else if upd.sha.is_some() || upd.release_id.is_some() {
+            let _ = sqlx::query(
+                "UPDATE deployments
+                 SET sha = COALESCE($1, sha),
+                     release_id = COALESCE($2, release_id)
+                 WHERE id = $3",
+            )
+            .bind(upd.sha.as_deref())
+            .bind(upd.release_id)
+            .bind(upd.deployment_id)
+            .execute(&self.db)
+            .await;
+        }
+
+        if let Some(ref app_status) = upd.app_status {
+            let pid_i64 = upd.app_pid.map(|p| p as i64);
+            let _ = sqlx::query(
+                "UPDATE projects
+                 SET app_status = $1,
+                     app_pid = $2,
+                     app_started_at = CASE WHEN $1 = 'running' THEN $3 ELSE app_started_at END
+                 WHERE id = $4",
+            )
+            .bind(app_status)
+            .bind(pid_i64)
+            .bind(now)
+            .bind(upd.project_id)
+            .execute(&self.db)
+            .await;
+        }
+
+        if let Some(ref deployed_sha) = upd.deployed_sha {
+            let _ = sqlx::query(
+                "UPDATE projects
+                 SET current_release_id = COALESCE($1, current_release_id),
+                     deployed_sha = $2,
+                     updated_at = $3
+                 WHERE id = $4",
+            )
+            .bind(resolved_release_id)
+            .bind(deployed_sha)
+            .bind(now)
+            .bind(upd.project_id)
+            .execute(&self.db)
+            .await;
+        }
+
+        if let (Some(sz), Some(ref rdir)) = (upd.backup_size_bytes, &upd.release_dir) {
+            if let Some(rid) = resolved_release_id {
+                let note = upd
+                    .backup_note
+                    .clone()
+                    .unwrap_or_else(|| format!("Auto-snapshot for Release #{rid}"));
+                let _ = sqlx::query(
+                    "INSERT INTO backups(project_id, release_id, path, size_bytes, note, created_at)
+                     VALUES($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(upd.project_id)
+                .bind(rid)
+                .bind(rdir)
+                .bind(sz)
+                .bind(&note)
+                .bind(now)
+                .execute(&self.db)
+                .await;
+            }
+        }
+
+        if let Some(ref status) = upd.status {
+            if status == "success" || status == "failed" {
+                let stage_val = if status == "success" { "completed" } else { "failed" };
+                let _ = sqlx::query(
+                    "UPDATE deployments SET status = $1, stage = $2, error = $3, finished_at = $4 WHERE id = $5",
+                )
+                .bind(status)
+                .bind(stage_val)
+                .bind(upd.error.as_deref())
+                .bind(now)
+                .bind(upd.deployment_id)
+                .execute(&self.db)
+                .await;
+                if let Some(ref err) = upd.error {
+                    logs.add(
+                        Some(upd.project_id),
+                        Some(upd.deployment_id),
+                        "deployment",
+                        "error",
+                        err,
+                    );
+                }
+            }
+        }
+
+        cache.invalidate_project(upd.project_id);
+    }
+
+    pub async fn build_remote_context(
+        &self,
+        projects: &Projects,
+        project_id: i64,
+    ) -> serde_json::Value {
+        let env_map = projects.get_env_map(project_id).await;
+        let deploy_keypair = projects.get_deploy_keypair(project_id).await;
+        let github_tokens = Git::read_github_tokens(&self.db).await;
+        serde_json::json!({
+            "env": env_map,
+            "deployKeyPublic": deploy_keypair.as_ref().map(|(pub_k, _)| pub_k),
+            "deployKeyPrivate": deploy_keypair.as_ref().map(|(_, priv_k)| priv_k),
+            "githubTokens": github_tokens,
+        })
+    }
+
+    pub async fn sync_remote_env_and_keys(&self, projects: &Projects, p: &Project) {
+        let Ok(Some(node_id)) = self.should_proxy_to_node(p.node_id).await else {
+            return;
+        };
+        if !self.is_node_connected(node_id).await {
+            return;
+        }
+        let ctx = self.build_remote_context(projects, p.id).await;
+        let _ = self
+            .call_node(
+                node_id,
+                "env.sync",
+                serde_json::json!({
+                    "project": p,
+                    "context": ctx,
+                }),
+                Duration::from_secs(15),
+            )
+            .await;
+    }
+
+    pub async fn sync_remote_caddy(&self, projects: &Projects, node_id: i64) {
+        let Ok(Some(target_node_id)) = self.should_proxy_to_node(Some(node_id)).await else {
+            return;
+        };
+        if !self.is_node_connected(target_node_id).await {
+            return;
+        }
+        let node_projects = projects.list_for_node(target_node_id).await.unwrap_or_default();
+        let _ = self
+            .call_node(
+                target_node_id,
+                "caddy.apply",
+                serde_json::json!({
+                    "projects": node_projects,
+                }),
+                Duration::from_secs(15),
+            )
+            .await;
     }
 }
 

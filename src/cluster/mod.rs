@@ -2,6 +2,7 @@ pub mod manager;
 pub mod mesh;
 pub mod models;
 pub mod node_agent;
+pub mod node_exec;
 pub mod ws;
 
 pub use manager::ClusterManager;

@@ -85,8 +85,9 @@ impl Projects {
                 install_cmd, build_cmd, start_cmd, health_url, health_timeout_s,
                 stability_s, auto_deploy, webhook_secret,
                 app_status, domains, ssl_email,
-                created_at, updated_at, project_kind, access_mode, allowed_ips
-            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+                created_at, updated_at, project_kind, access_mode, allowed_ips,
+                node_id, placement_version, assigned_port
+            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
             RETURNING id",
         )
         .bind(&p.name)
@@ -113,10 +114,40 @@ impl Projects {
         .bind(&p.project_kind)
         .bind(&p.access_mode)
         .bind(&p.allowed_ips)
+        .bind(p.node_id)
+        .bind(p.placement_version.max(1))
+        .bind(final_port as i32)
         .fetch_one(&self.db)
         .await?;
 
         Ok(id)
+    }
+
+    pub async fn list_for_node(&self, node_id: i64) -> Result<Vec<Project>, sqlx::Error> {
+        let query = format!(
+            "SELECT {} FROM projects WHERE node_id = $1 ORDER BY id DESC",
+            SELECT_PROJECT_FIELDS
+        );
+        let rows = sqlx::query(&query).bind(node_id).fetch_all(&self.db).await?;
+        let mut list = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut p = pg_row_to_project(&row)?;
+            self.ensure_project_port(&mut p).await;
+            list.push(p);
+        }
+        Ok(list)
+    }
+
+    pub async fn get_deploy_keypair(&self, project_id: i64) -> Option<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT COALESCE(public_key, ''), COALESCE(private_key, '') FROM project_keys WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten()
+        .filter(|(pub_k, priv_k)| !pub_k.trim().is_empty() || !priv_k.trim().is_empty())
     }
 
     pub async fn update(&self, id: i64, p: &Project) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

@@ -127,6 +127,53 @@ pub struct NodeWorkloadPlacement {
     pub placement_version: i64,
     pub port: Option<u16>,
     pub app_status: String,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub disk_bytes: u64,
+    #[serde(default)]
+    pub deploy_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployStateUpdate {
+    pub deployment_id: i64,
+    pub project_id: i64,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub sha: Option<String>,
+    #[serde(default)]
+    pub release_id: Option<i64>,
+    #[serde(default)]
+    pub release_dir: Option<String>,
+    #[serde(default)]
+    pub short_sha: Option<String>,
+    #[serde(default)]
+    pub commit_message: Option<String>,
+    #[serde(default)]
+    pub commit_author: Option<String>,
+    #[serde(default)]
+    pub committed_at: Option<i64>,
+    #[serde(default)]
+    pub deployed_sha: Option<String>,
+    #[serde(default)]
+    pub app_status: Option<String>,
+    #[serde(default)]
+    pub app_pid: Option<u32>,
+    #[serde(default)]
+    pub last_poll_at: Option<i64>,
+    #[serde(default)]
+    pub backup_note: Option<String>,
+    #[serde(default)]
+    pub backup_size_bytes: Option<i64>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +202,10 @@ fn default_wg_port() -> u16 {
     51820
 }
 
+fn default_ok_status() -> u16 {
+    200
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClusterWsMessage {
@@ -178,6 +229,34 @@ pub enum ClusterWsMessage {
     },
     SetStatus {
         status: String,
+    },
+    RpcRequest {
+        req_id: String,
+        op: String,
+        params: serde_json::Value,
+    },
+    RpcResponse {
+        req_id: String,
+        ok: bool,
+        #[serde(default = "default_ok_status")]
+        status: u16,
+        #[serde(default)]
+        result: serde_json::Value,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    LogChunk {
+        #[serde(default)]
+        project_id: Option<i64>,
+        #[serde(default)]
+        deployment_id: Option<i64>,
+        channel: String,
+        level: String,
+        message: String,
+        ts: i64,
+    },
+    DeployStateUpdate {
+        update: DeployStateUpdate,
     },
     Ping {
         ts: i64,

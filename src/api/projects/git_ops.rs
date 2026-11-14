@@ -39,20 +39,39 @@ pub(crate) async fn project_commits_handler(
         return Ok(res);
     }
 
-    let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
-    let branch = p.branch.clone();
-    let repo_dir_clone = repo_dir.clone();
-
-    let raw_commits = tokio::task::spawn_blocking(move || {
-        if !repo_dir_clone.exists() {
-            return Vec::new();
-        }
-        crate::git::Git::list_commits(&repo_dir_clone, &branch, 200)
-    })
-    .await
-    .unwrap_or_default();
-
     let releases = state.deployer.list_releases(id).await;
+
+    let raw_commits = if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "git.commits",
+                serde_json::json!({ "project": &p, "pull": false, "limit": 200, "context": ctx }),
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        serde_json::from_value::<Vec<crate::git::CommitInfo>>(res["commits"].clone()).unwrap_or_default()
+    } else {
+        let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
+        let branch = p.branch.clone();
+        let repo_dir_clone = repo_dir.clone();
+
+        tokio::task::spawn_blocking(move || {
+            if !repo_dir_clone.exists() {
+                return Vec::new();
+            }
+            crate::git::Git::list_commits(&repo_dir_clone, &branch, 200)
+        })
+        .await
+        .unwrap_or_default()
+    };
 
     let views: Vec<CommitView> = raw_commits
         .into_iter()
@@ -93,6 +112,33 @@ pub(crate) async fn project_check_handler(
 ) -> Result<Json<CheckGitResponse>, (StatusCode, String)> {
     let _actor = verify_project_access(&state, &headers, id).await?;
     let p = fetch_project(&state.projects, id).await?;
+
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "git.check",
+                serde_json::json!({ "project": &p, "context": ctx }),
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        let head = res["head"].as_str().unwrap_or("").to_string();
+        let needs_deploy = !head.is_empty() && p.deployed_sha.as_deref() != Some(&head);
+        return Ok(Json(CheckGitResponse {
+            needs_fetch: false,
+            needs_deploy,
+            remote_sha: head.clone(),
+            local_sha: head,
+            deployed_sha: p.deployed_sha,
+        }));
+    }
 
     let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
     let repo_url = p.repo_url.clone();
@@ -135,21 +181,42 @@ pub(crate) async fn project_fetch_handler(
     let actor = verify_power(&state, &headers, "deploy", Some(id)).await?.username;
     let p = fetch_project(&state.projects, id).await?;
 
-    let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
-    let repo_url = p.repo_url.clone();
-    let branch = p.branch.clone();
-    let repo_dir_clone = repo_dir.clone();
+    let (sha, has_new_commits) = if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "git.fetch",
+                serde_json::json!({ "project": &p, "context": ctx }),
+                std::time::Duration::from_secs(90),
+            )
+            .await?;
+        let head = res["head"].as_str().unwrap_or("").to_string();
+        let has_new = !head.is_empty() && p.deployed_sha.as_deref() != Some(&head);
+        (head, has_new)
+    } else {
+        let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
+        let repo_url = p.repo_url.clone();
+        let branch = p.branch.clone();
+        let repo_dir_clone = repo_dir.clone();
 
-    let (sha, has_new_commits) = tokio::task::spawn_blocking(move || -> Result<(String, bool), String> {
-        let before_sha = crate::git::Git::resolve_head(&repo_dir_clone).unwrap_or_default();
-        crate::git::Git::clone_or_fetch(&repo_url, &repo_dir_clone, &branch)?;
-        let after_sha = crate::git::Git::resolve_head(&repo_dir_clone).unwrap_or_default();
-        let has_new = !after_sha.is_empty() && (before_sha.is_empty() || before_sha != after_sha);
-        Ok((after_sha, has_new))
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        tokio::task::spawn_blocking(move || -> Result<(String, bool), String> {
+            let before_sha = crate::git::Git::resolve_head(&repo_dir_clone).unwrap_or_default();
+            crate::git::Git::clone_or_fetch(&repo_url, &repo_dir_clone, &branch)?;
+            let after_sha = crate::git::Git::resolve_head(&repo_dir_clone).unwrap_or_default();
+            let has_new = !after_sha.is_empty() && (before_sha.is_empty() || before_sha != after_sha);
+            Ok((after_sha, has_new))
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?
+    };
 
     let needs_deploy = !sha.is_empty() && p.deployed_sha.as_deref() != Some(&sha);
 
@@ -210,6 +277,30 @@ pub(crate) async fn detect_project_handler(
     .await?;
     let p = fetch_project(&state.projects, id).await?;
 
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "git.detect",
+                serde_json::json!({ "project": &p, "context": ctx }),
+                std::time::Duration::from_secs(90),
+            )
+            .await?;
+        return Ok(Json(DetectProjectResponse {
+            project_type: res["type"].as_str().unwrap_or(&p.project_type).to_string(),
+            install: res["install"].as_str().unwrap_or(&p.install_cmd).to_string(),
+            build: res["build"].as_str().unwrap_or(&p.build_cmd).to_string(),
+            start: res["start"].as_str().unwrap_or(&p.start_cmd).to_string(),
+        }));
+    }
+
     let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
     if !repo_dir.exists() {
         let _ = crate::git::Git::clone_or_fetch(&p.repo_url, &repo_dir, &p.branch);
@@ -265,6 +356,9 @@ pub(crate) async fn project_deploy_key_handler(
     .await
     {
         if !pub_key.trim().is_empty() {
+            if let Ok(Some(p)) = state.projects.get(id).await {
+                state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
+            }
             return Ok(Json(DeployKeyResponse {
                 public_key: pub_key.trim().to_string(),
             }));
@@ -307,6 +401,10 @@ pub(crate) async fn project_deploy_key_handler(
     .bind(now())
     .execute(&state.db)
     .await;
+
+    if let Ok(Some(p)) = state.projects.get(id).await {
+        state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
+    }
 
     Ok(Json(DeployKeyResponse {
         public_key: public_key.trim().to_string(),

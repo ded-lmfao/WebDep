@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
+use tokio::sync::mpsc;
 
 use super::mesh::{
     detect_capabilities, generate_wireguard_keypair, reconcile_mesh_network, DEFAULT_WG_PORT,
@@ -9,6 +11,7 @@ use super::mesh::{
 use super::models::{
     ClusterWsMessage, EnrollNodeRequest, EnrollNodeResponse, NodeMetrics, NodeStateManifest,
 };
+use super::node_exec::{execute_rpc, reconcile_placements, NodeExecState};
 use super::ws::{
     connect_ws, http_base_to_ws_url, http_post_json, normalize_core_http_url, WsMessage,
 };
@@ -263,13 +266,15 @@ pub async fn run_node_agent(data_dir: PathBuf) {
     };
 
     reconcile_mesh_network(&manifest, &data_dir).await;
+    let exec_state = Arc::new(NodeExecState::new(data_dir.clone(), manifest.clone()));
     let mut sampler = MetricsSampler::new();
     let backoff_secs = [1u64, 2, 5, 10, 30];
     let mut attempt: usize = 0;
 
     loop {
         if let Ok(Some(fresh)) = load_manifest(&data_dir) {
-            manifest = fresh;
+            manifest = fresh.clone();
+            *exec_state.manifest.write().await = fresh;
         }
 
         let ws = match connect_ws(&manifest.core_ws_url, Some(&manifest.node_token)).await {
@@ -290,18 +295,21 @@ pub async fn run_node_agent(data_dir: PathBuf) {
         };
 
         let (mut reader, mut writer) = ws.into_split();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClusterWsMessage>();
+
         let wg_endpoint = if manifest.public_ip.trim().is_empty() {
             String::new()
         } else {
             format!("{}:{}", manifest.public_ip.trim(), manifest.wg_listen_port)
         };
+        let initial_workloads = exec_state.snapshot_workloads().await;
         let register_msg = ClusterWsMessage::Register {
             node_version: env!("CARGO_PKG_VERSION").to_string(),
             wg_pubkey: manifest.wg_pubkey.clone(),
             wg_endpoint,
             public_ip: manifest.public_ip.clone(),
             capabilities: detect_capabilities(),
-            workloads: manifest.workloads.clone(),
+            workloads: initial_workloads,
         };
         if let Ok(json) = serde_json::to_string(&register_msg) {
             if let Err(e) = writer.send_text(&json).await {
@@ -321,10 +329,18 @@ pub async fn run_node_agent(data_dir: PathBuf) {
 
         loop {
             tokio::select! {
+                Some(outbound) = out_rx.recv() => {
+                    if let Ok(json) = serde_json::to_string(&outbound) {
+                        if writer.send_text(&json).await.is_err() {
+                            break;
+                        }
+                    }
+                }
                 _ = heartbeat.tick() => {
+                    let workloads = exec_state.snapshot_workloads().await;
                     let msg = ClusterWsMessage::Heartbeat {
                         metrics: sampler.sample(),
-                        workloads: manifest.workloads.clone(),
+                        workloads,
                         ts: now_secs(),
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
@@ -338,14 +354,27 @@ pub async fn run_node_agent(data_dir: PathBuf) {
                         Ok(WsMessage::Text(txt)) => {
                             if let Ok(parsed) = serde_json::from_str::<ClusterWsMessage>(&txt) {
                                 match parsed {
-                                    ClusterWsMessage::PeerSync { mesh_ip, peers, .. } => {
-                                        if !mesh_ip.trim().is_empty() {
-                                            manifest.mesh_ip = mesh_ip;
+                                    ClusterWsMessage::PeerSync { mesh_ip, peers, placement_versions } => {
+                                        {
+                                            let mut guard = exec_state.manifest.write().await;
+                                            if !mesh_ip.trim().is_empty() {
+                                                guard.mesh_ip = mesh_ip;
+                                            }
+                                            guard.peers = peers;
+                                            guard.updated_at = now_secs();
+                                            let _ = save_manifest(&data_dir, &guard);
+                                            manifest = guard.clone();
                                         }
-                                        manifest.peers = peers;
-                                        manifest.updated_at = now_secs();
-                                        let _ = save_manifest(&data_dir, &manifest);
                                         reconcile_mesh_network(&manifest, &data_dir).await;
+                                        let _ = reconcile_placements(&exec_state, &placement_versions, Some(&out_tx)).await;
+                                    }
+                                    ClusterWsMessage::RpcRequest { req_id, op, params } => {
+                                        let exec_c = exec_state.clone();
+                                        let tx_c = out_tx.clone();
+                                        tokio::spawn(async move {
+                                            let reply = execute_rpc(exec_c, req_id, op, params, tx_c.clone()).await;
+                                            let _ = tx_c.send(reply);
+                                        });
                                     }
                                     ClusterWsMessage::SetStatus { status } => {
                                         println!("Web-Node status updated by Core: {status}");
