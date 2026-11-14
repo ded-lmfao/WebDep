@@ -489,7 +489,12 @@ pub async fn start_project_shift(
         let src_dir = PathBuf::from(&proj.deploy_dir);
         let tgz_c = tmp_tgz.clone();
         let pack = tokio::task::spawn_blocking(move || {
-            pack_subdirs_to_tar_gz(&src_dir, &["current", "containers", "backups"], &tgz_c, &[])
+            pack_subdirs_to_tar_gz(
+                &src_dir,
+                &["current", "releases", "app", "containers", "backups"],
+                &tgz_c,
+                &[],
+            )
         })
         .await;
         let comp_bytes = match pack {

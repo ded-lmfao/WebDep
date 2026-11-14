@@ -1387,8 +1387,8 @@ pub async fn execute_rpc(
             let tgz_pack = tmp_tgz.clone();
 
             let pack_res = tokio::task::spawn_blocking(move || {
-                // Stage external container dir alongside deploy_dir if present outside deploy_dir
-                let subdirs = ["current", "containers", "backups"];
+                // Stage active app/release/container/backup subdirectories in direct P2P shift
+                let subdirs = ["current", "releases", "app", "containers", "backups"];
                 let (comp, raw) = pack_subdirs_to_tar_gz(&deploy_dir, &subdirs, &tgz_pack, &[])?;
                 let _ = container_dir;
                 Ok::<(u64, u64), String>((comp, raw))
@@ -1665,16 +1665,24 @@ pub async fn execute_rpc(
                 .await
                 .unwrap_or_default();
             let deploy_dir = PathBuf::from(&p.deploy_dir);
-            let target_current = deploy_dir.join("current");
-            let _ = tokio::fs::create_dir_all(&target_current).await;
-            let src_files = if tmp_dir.join("files").exists() {
+            let target_dir = if p.project_kind == "service" {
+                deploy_dir.join("app")
+            } else {
+                deploy_dir.join("current")
+            };
+            let _ = tokio::fs::create_dir_all(&target_dir).await;
+            let src_files = if p.project_kind == "service" && tmp_dir.join("files/app").exists() {
+                tmp_dir.join("files/app")
+            } else if tmp_dir.join("files").exists() {
                 tmp_dir.join("files")
+            } else if p.project_kind == "service" && tmp_dir.join("app").exists() {
+                tmp_dir.join("app")
             } else if tmp_dir.join("current").exists() {
                 tmp_dir.join("current")
             } else {
                 tmp_dir.clone()
             };
-            let tgt_c = target_current.clone();
+            let tgt_c = target_dir.clone();
             let _ = tokio::task::spawn_blocking(move || copy_backup_files(&src_files, &tgt_c)).await;
             let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
 

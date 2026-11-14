@@ -465,14 +465,24 @@ pub(crate) async fn restore_backup_handler(
             let env_str = tokio::fs::read_to_string(tmp_unpack.join("backup.env"))
                 .await
                 .unwrap_or_default();
-            let target_current = PathBuf::from(&target_deploy_dir).join("current");
-            let _ = tokio::fs::create_dir_all(&target_current).await;
-            let src_files = if tmp_unpack.join("files").exists() {
+            let target_dir = if p.project_kind == "service" {
+                PathBuf::from(&target_deploy_dir).join("app")
+            } else {
+                PathBuf::from(&target_deploy_dir).join("current")
+            };
+            let _ = tokio::fs::create_dir_all(&target_dir).await;
+            let src_files = if p.project_kind == "service" && tmp_unpack.join("files/app").exists() {
+                tmp_unpack.join("files/app")
+            } else if tmp_unpack.join("files").exists() {
                 tmp_unpack.join("files")
+            } else if p.project_kind == "service" && tmp_unpack.join("app").exists() {
+                tmp_unpack.join("app")
+            } else if tmp_unpack.join("current").exists() {
+                tmp_unpack.join("current")
             } else {
                 tmp_unpack.clone()
             };
-            let tc = target_current.clone();
+            let tc = target_dir.clone();
             let _ = tokio::task::spawn_blocking(move || copy_backup_files(&src_files, &tc)).await;
             let _ = tokio::fs::remove_dir_all(&tmp_unpack).await;
             env_str
