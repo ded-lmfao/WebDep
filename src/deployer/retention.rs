@@ -2,9 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::params;
-
-use crate::db::{shrink_memory, DbPool};
+use crate::db::DbPool;
 use crate::monitor::invalidate_path_disk_cache;
 
 /// Maximum number of deployment records kept per project.
@@ -135,8 +133,8 @@ fn collect_protected_paths(
     protected
 }
 
-fn remove_unreferenced_release_rows(
-    conn: &rusqlite::Connection,
+async fn remove_unreferenced_release_rows(
+    db: &DbPool,
     candidates: Vec<(i64, String)>,
     current_release_id: Option<i64>,
     retained_release_ids: &HashSet<i64>,
@@ -148,15 +146,20 @@ fn remove_unreferenced_release_rows(
             continue;
         }
         candidate_dirs.push(PathBuf::from(&rel_dir));
-        conn.execute(
-            "UPDATE backups SET release_id = NULL WHERE release_id = ? AND kind = 'manual'",
-            params![rel_id],
+        let _ = sqlx::query(
+            "UPDATE backups SET release_id = NULL WHERE release_id = $1 AND kind = 'manual'",
         )
-        .ok();
-        conn.execute("DELETE FROM backups WHERE release_id = ?", params![rel_id])
-            .ok();
-        conn.execute("DELETE FROM releases WHERE id = ?", params![rel_id])
-            .ok();
+        .bind(rel_id)
+        .execute(db)
+        .await;
+        let _ = sqlx::query("DELETE FROM backups WHERE release_id = $1")
+            .bind(rel_id)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM releases WHERE id = $1")
+            .bind(rel_id)
+            .execute(db)
+            .await;
         removed_any = true;
     }
     removed_any
@@ -165,165 +168,147 @@ fn remove_unreferenced_release_rows(
 /// Retain at most `keep` newest deployments for `project_id`, removing excess DB records
 /// (deployments, deployment logs, non-live releases, auto snapshot backups) and freeing
 /// unreferenced `rel-*` release directories on disk.
-pub fn prune_project_deployments(db: &DbPool, project_id: i64, keep: usize) -> usize {
+pub async fn prune_project_deployments(db: &DbPool, project_id: i64, keep: usize) -> usize {
     let mut candidate_dirs: Vec<PathBuf> = Vec::new();
     let mut protected_db_dirs: Vec<String> = Vec::new();
     let mut remaining_dep_ids: HashSet<i64> = HashSet::new();
-    let deploy_dir_str: String;
-    let pruned_count: usize;
 
-    {
-        let conn = db.lock().unwrap();
-        let proj_row: Option<(String, Option<i64>)> = conn
-            .query_row(
-                "SELECT deploy_dir, current_release_id FROM projects WHERE id = ?",
-                params![project_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok();
+    let proj_row: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT deploy_dir, current_release_id FROM projects WHERE id = $1",
+    )
+    .bind(project_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
 
-        let Some((dep_dir, current_release_id)) = proj_row else {
-            return 0;
-        };
-        deploy_dir_str = dep_dir;
+    let Some((deploy_dir_str, current_release_id)) = proj_row else {
+        return 0;
+    };
 
-        // Collect excess deployments ordered newest-first beyond `keep`.
-        let mut excess_deps: Vec<i64> = Vec::new();
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id FROM deployments WHERE project_id = ? ORDER BY id DESC LIMIT -1 OFFSET ?",
-        ) {
-            if let Ok(rows) = stmt.query_map(params![project_id, keep as i64], |r| r.get::<_, i64>(0)) {
-                for row in rows.flatten() {
-                    excess_deps.push(row);
-                }
-            }
+    // Collect excess deployments ordered newest-first beyond `keep`.
+    let excess_deps: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM deployments WHERE project_id = $1 ORDER BY id DESC OFFSET $2",
+    )
+    .bind(project_id)
+    .bind(keep as i64)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    // Collect release IDs referenced by kept deployments so rollbacks stay intact.
+    let mut retained_release_ids: HashSet<i64> = HashSet::new();
+    let kept_rows: Vec<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT id, release_id FROM deployments WHERE project_id = $1 ORDER BY id DESC LIMIT $2",
+    )
+    .bind(project_id)
+    .bind(keep as i64)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    for (dep_id, rel_id) in kept_rows {
+        remaining_dep_ids.insert(dep_id);
+        if let Some(rid) = rel_id {
+            retained_release_ids.insert(rid);
         }
+    }
+    if let Some(cid) = current_release_id {
+        retained_release_ids.insert(cid);
+    }
 
-        // Collect release IDs referenced by kept deployments so rollbacks stay intact.
-        let mut retained_release_ids: HashSet<i64> = HashSet::new();
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, release_id FROM deployments WHERE project_id = ? ORDER BY id DESC LIMIT ?",
-        ) {
-            if let Ok(rows) = stmt.query_map(params![project_id, keep as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
-            }) {
-                for (dep_id, rel_id) in rows.flatten() {
-                    remaining_dep_ids.insert(dep_id);
-                    if let Some(rid) = rel_id {
-                        retained_release_ids.insert(rid);
-                    }
-                }
-            }
-        }
-        if let Some(cid) = current_release_id {
-            retained_release_ids.insert(cid);
-        }
+    let pruned_count = excess_deps.len();
 
-        pruned_count = excess_deps.len();
+    let releases_root = Path::new(&deploy_dir_str).join("releases");
+    for dep_id in &excess_deps {
+        candidate_dirs.push(releases_root.join(format!("rel-{}", dep_id)));
 
-        let releases_root = Path::new(&deploy_dir_str).join("releases");
-        for dep_id in &excess_deps {
-            candidate_dirs.push(releases_root.join(format!("rel-{}", dep_id)));
+        // Find releases built specifically by this pruned deployment.
+        let dep_releases: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, dir FROM releases WHERE project_id = $1 AND deployment_id = $2",
+        )
+        .bind(project_id)
+        .bind(*dep_id)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
 
-            // Find releases built specifically by this pruned deployment.
-            let mut dep_releases: Vec<(i64, String)> = Vec::new();
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT id, dir FROM releases WHERE project_id = ? AND deployment_id = ?",
-            ) {
-                if let Ok(rows) = stmt.query_map(params![project_id, dep_id], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                }) {
-                    for pair in rows.flatten() {
-                        dep_releases.push(pair);
-                    }
-                }
-            }
-
-            remove_unreferenced_release_rows(
-                &conn,
-                dep_releases,
-                current_release_id,
-                &retained_release_ids,
-                &mut candidate_dirs,
-            );
-
-            conn.execute("DELETE FROM logs WHERE deployment_id = ?", params![dep_id])
-                .ok();
-            conn.execute("DELETE FROM deployments WHERE id = ?", params![dep_id])
-                .ok();
-        }
-
-        // Clean up any previously spared release rows whose owning deployment was already pruned
-        // (including rows whose `deployment_id` became NULL via ON DELETE SET NULL) once they
-        // are no longer `current_release_id` or referenced by any kept deployment.
-        let mut stale_releases: Vec<(i64, String)> = Vec::new();
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, deployment_id, dir FROM releases WHERE project_id = ?",
-        ) {
-            if let Ok(rows) = stmt.query_map(params![project_id], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<i64>>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            }) {
-                for (rel_id, dep_id_opt, rel_dir) in rows.flatten() {
-                    let pruned_by_dep_id = matches!(dep_id_opt, Some(did) if !remaining_dep_ids.contains(&did));
-                    let pruned_by_rel_dir = Path::new(&rel_dir)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .and_then(|n| n.strip_prefix("rel-"))
-                        .and_then(|d| d.parse::<i64>().ok())
-                        .map(|did| !remaining_dep_ids.contains(&did))
-                        .unwrap_or(false);
-                    if pruned_by_dep_id || pruned_by_rel_dir {
-                        stale_releases.push((rel_id, rel_dir));
-                    }
-                }
-            }
-        }
-        let removed_stale_rel = remove_unreferenced_release_rows(
-            &conn,
-            stale_releases,
+        remove_unreferenced_release_rows(
+            db,
+            dep_releases,
             current_release_id,
             &retained_release_ids,
             &mut candidate_dirs,
-        );
+        )
+        .await;
 
-        // Gather all still-referenced release directories (live + retained).
-        if let Some(cid) = current_release_id {
-            if let Ok(dir) = conn.query_row(
-                "SELECT dir FROM releases WHERE id = ?",
-                params![cid],
-                |r| r.get::<_, String>(0),
-            ) {
-                protected_db_dirs.push(dir);
-            }
-        }
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT dir FROM releases WHERE project_id = ?")
-        {
-            if let Ok(rows) = stmt.query_map(params![project_id], |r| r.get::<_, String>(0)) {
-                for dir in rows.flatten() {
-                    protected_db_dirs.push(dir);
-                }
-            }
-        }
+        let _ = sqlx::query("DELETE FROM logs WHERE deployment_id = $1")
+            .bind(*dep_id)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM deployments WHERE id = $1")
+            .bind(*dep_id)
+            .execute(db)
+            .await;
+    }
 
-        if pruned_count > 0 || removed_stale_rel {
-            let freelist_count: i64 = conn
-                .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-                .unwrap_or(0);
-            if freelist_count >= 128 {
-                conn.execute_batch("VACUUM;").ok();
-            }
-            conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA optimize;")
-                .ok();
-            shrink_memory(&conn);
+    // Clean up any previously spared release rows whose owning deployment was already pruned
+    // (including rows whose `deployment_id` became NULL via ON DELETE SET NULL) once they
+    // are no longer `current_release_id` or referenced by any kept deployment.
+    let release_rows: Vec<(i64, Option<i64>, String)> = sqlx::query_as(
+        "SELECT id, deployment_id, dir FROM releases WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let mut stale_releases: Vec<(i64, String)> = Vec::new();
+    for (rel_id, dep_id_opt, rel_dir) in release_rows {
+        let pruned_by_dep_id =
+            matches!(dep_id_opt, Some(did) if !remaining_dep_ids.contains(&did));
+        let pruned_by_rel_dir = Path::new(&rel_dir)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("rel-"))
+            .and_then(|d| d.parse::<i64>().ok())
+            .map(|did| !remaining_dep_ids.contains(&did))
+            .unwrap_or(false);
+        if pruned_by_dep_id || pruned_by_rel_dir {
+            stale_releases.push((rel_id, rel_dir));
         }
     }
 
-    // Perform filesystem cleanup outside the DB lock.
+    let _removed_stale_rel = remove_unreferenced_release_rows(
+        db,
+        stale_releases,
+        current_release_id,
+        &retained_release_ids,
+        &mut candidate_dirs,
+    )
+    .await;
+
+    // Gather all still-referenced release directories (live + retained).
+    if let Some(cid) = current_release_id {
+        if let Ok(Some(dir)) =
+            sqlx::query_scalar::<_, String>("SELECT dir FROM releases WHERE id = $1")
+                .bind(cid)
+                .fetch_optional(db)
+                .await
+        {
+            protected_db_dirs.push(dir);
+        }
+    }
+    if let Ok(dirs) =
+        sqlx::query_scalar::<_, String>("SELECT dir FROM releases WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_all(db)
+            .await
+    {
+        protected_db_dirs.extend(dirs);
+    }
+
+    // Perform filesystem cleanup outside the DB queries.
     let base_dir = PathBuf::from(&deploy_dir_str);
     let releases_root = base_dir.join("releases");
     let protected_paths = collect_protected_paths(&base_dir, &protected_db_dirs);
@@ -366,28 +351,24 @@ pub fn prune_project_deployments(db: &DbPool, project_id: i64, keep: usize) -> u
 }
 
 /// Sweep excess deployment records across every existing project (used at startup).
-pub fn prune_all_projects(db: &DbPool, keep: usize) -> usize {
-    let project_ids: Vec<i64> = {
-        let conn = db.lock().unwrap();
-        let Ok(mut stmt) = conn.prepare("SELECT id FROM projects") else {
-            return 0;
-        };
-        let Ok(rows) = stmt.query_map([], |r| r.get::<_, i64>(0)) else {
-            return 0;
-        };
-        rows.flatten().collect()
-    };
+pub async fn prune_all_projects(db: &DbPool, keep: usize) -> usize {
+    let project_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM projects")
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
 
-    project_ids
-        .into_iter()
-        .map(|pid| prune_project_deployments(db, pid, keep))
-        .sum()
+    let mut total = 0;
+    for pid in project_ids {
+        total += prune_project_deployments(db, pid, keep).await;
+    }
+    total
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{now, open_db};
+    use crate::db::now;
+    use crate::pg_control::test_db::isolated_pool;
 
     fn test_temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -402,27 +383,31 @@ mod tests {
         dir
     }
 
-    fn insert_test_project(db: &DbPool, deploy_dir: &Path, kind: &str) -> i64 {
-        let conn = db.lock().unwrap();
+    async fn insert_test_project(db: &DbPool, deploy_dir: &Path, kind: &str) -> i64 {
         let ts = now();
         let slug = format!(
             "retention-{}-{}",
             ts,
             deploy_dir.file_name().and_then(|s| s.to_str()).unwrap_or("app")
         );
-        conn.execute(
+        sqlx::query_scalar(
             "INSERT INTO projects(name, slug, project_kind, repo_url, branch, deploy_dir, created_at, updated_at) \
-             VALUES('Retention Test App', ?, ?, 'https://github.com/example/app', 'main', ?, ?, ?)",
-            params![slug, kind, deploy_dir.to_string_lossy().to_string(), ts, ts],
+             VALUES('Retention Test App', $1, $2, 'https://github.com/example/app', 'main', $3, $4, $5) RETURNING id",
         )
-        .unwrap();
-        conn.last_insert_rowid()
+        .bind(&slug)
+        .bind(kind)
+        .bind(deploy_dir.to_string_lossy().to_string())
+        .bind(ts)
+        .bind(ts)
+        .fetch_one(db)
+        .await
+        .unwrap()
     }
 
-    #[test]
-    fn test_prune_keeps_latest_five_and_cleans_non_live_storage() {
+    #[tokio::test]
+    async fn test_prune_keeps_latest_five_and_cleans_non_live_storage() {
         let root = test_temp_dir("cap5");
-        let db = open_db(&root).unwrap();
+        let db = isolated_pool().await;
         let deploy_dir = root.join("apps").join("site");
         let releases_dir = deploy_dir.join("releases");
         fs::create_dir_all(&releases_dir).unwrap();
@@ -432,19 +417,21 @@ mod tests {
         fs::create_dir_all(&container_db_dir).unwrap();
         fs::write(container_db_dir.join("app.db"), b"keep-me").unwrap();
 
-        let project_id = insert_test_project(&db, &deploy_dir, "website");
+        let project_id = insert_test_project(&db, &deploy_dir, "website").await;
         let mut dep_ids = Vec::new();
         let mut rel_ids = Vec::new();
 
-        for i in 1..=7 {
-            let conn = db.lock().unwrap();
-            conn.execute(
+        for i in 1i64..=7 {
+            let dep_id: i64 = sqlx::query_scalar(
                 "INSERT INTO deployments(project_id, kind, status, stage, trigger, actor, started_at) \
-                 VALUES(?, 'deploy', 'success', 'cleanup', 'manual', 'admin', ?)",
-                params![project_id, 1000 + i],
+                 VALUES($1, 'deploy', 'success', 'cleanup', 'manual', 'admin', $2) RETURNING id",
             )
+            .bind(project_id)
+            .bind(1000 + i)
+            .fetch_one(&db)
+            .await
             .unwrap();
-            let dep_id = conn.last_insert_rowid();
+
             let rel_path = releases_dir.join(format!("rel-{}", dep_id));
             fs::create_dir_all(&rel_path).unwrap();
             fs::write(rel_path.join("bundle.js"), vec![b'x'; 256]).unwrap();
@@ -470,41 +457,54 @@ mod tests {
                 }
             }
 
-            conn.execute(
+            let rel_id: i64 = sqlx::query_scalar(
                 "INSERT INTO releases(project_id, deployment_id, sha, short_sha, message, author, committed_at, dir, status, created_at) \
-                 VALUES(?, ?, ?, ?, 'msg', 'dev', 1000, ?, 'ready', ?)",
-                params![
-                    project_id,
-                    dep_id,
-                    format!("sha{}", i),
-                    format!("s{}", i),
-                    rel_path.to_string_lossy().to_string(),
-                    1000 + i
-                ],
+                 VALUES($1, $2, $3, $4, 'msg', 'dev', 1000, $5, 'ready', $6) RETURNING id",
             )
+            .bind(project_id)
+            .bind(dep_id)
+            .bind(format!("sha{}", i))
+            .bind(format!("s{}", i))
+            .bind(rel_path.to_string_lossy().to_string())
+            .bind(1000 + i)
+            .fetch_one(&db)
+            .await
             .unwrap();
-            let rel_id = conn.last_insert_rowid();
 
-            conn.execute(
-                "UPDATE deployments SET release_id = ? WHERE id = ?",
-                params![rel_id, dep_id],
+            sqlx::query("UPDATE deployments SET release_id = $1 WHERE id = $2")
+                .bind(rel_id)
+                .bind(dep_id)
+                .execute(&db)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO logs(project_id, deployment_id, channel, level, message, ts) VALUES($1, $2, 'build', 'info', 'log line', $3)",
             )
+            .bind(project_id)
+            .bind(dep_id)
+            .bind(1000 + i)
+            .execute(&db)
+            .await
             .unwrap();
-            conn.execute(
-                "INSERT INTO logs(project_id, deployment_id, channel, level, message, ts) VALUES(?, ?, 'build', 'info', 'log line', ?)",
-                params![project_id, dep_id, 1000 + i],
+            sqlx::query(
+                "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at) VALUES($1, $2, 'snapshot', $3, 256, 'auto', $4)",
             )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at) VALUES(?, ?, 'snapshot', ?, 256, 'auto', ?)",
-                params![project_id, rel_id, rel_path.to_string_lossy().to_string(), 1000 + i],
-            )
+            .bind(project_id)
+            .bind(rel_id)
+            .bind(rel_path.to_string_lossy().to_string())
+            .bind(1000 + i)
+            .execute(&db)
+            .await
             .unwrap();
             if i == 1 {
-                conn.execute(
-                    "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at) VALUES(?, ?, 'manual', 'manual.tar.gz', 100, 'keep', ?)",
-                    params![project_id, rel_id, 1000 + i],
+                sqlx::query(
+                    "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at) VALUES($1, $2, 'manual', 'manual.tar.gz', 100, 'keep', $3)",
                 )
+                .bind(project_id)
+                .bind(rel_id)
+                .bind(1000 + i)
+                .execute(&db)
+                .await
                 .unwrap();
             }
 
@@ -513,58 +513,54 @@ mod tests {
         }
 
         // Point live deployment to release #7
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE projects SET current_release_id = ? WHERE id = ?",
-                params![rel_ids[6], project_id],
-            )
+        sqlx::query("UPDATE projects SET current_release_id = $1 WHERE id = $2")
+            .bind(rel_ids[6])
+            .bind(project_id)
+            .execute(&db)
+            .await
             .unwrap();
-        }
 
-        let pruned = prune_project_deployments(&db, project_id, MAX_DEPLOYMENT_RECORDS);
+        let pruned = prune_project_deployments(&db, project_id, MAX_DEPLOYMENT_RECORDS).await;
         assert_eq!(pruned, 2);
 
-        let conn = db.lock().unwrap();
-        let kept_ids: Vec<i64> = {
-            let mut stmt = conn
-                .prepare("SELECT id FROM deployments WHERE project_id = ? ORDER BY id ASC")
-                .unwrap();
-            stmt.query_map(params![project_id], |r| r.get(0))
-                .unwrap()
-                .flatten()
-                .collect()
-        };
+        let kept_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM deployments WHERE project_id = $1 ORDER BY id ASC",
+        )
+        .bind(project_id)
+        .fetch_all(&db)
+        .await
+        .unwrap();
         assert_eq!(kept_ids, dep_ids[2..].to_vec());
 
         // Logs & non-manual backups for pruned deployments (1 & 2) removed; manual backup preserved with NULL release_id
-        let log_count_pruned: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM logs WHERE deployment_id IN (?, ?)",
-                params![dep_ids[0], dep_ids[1]],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let log_count_pruned: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM logs WHERE deployment_id IN ($1, $2)",
+        )
+        .bind(dep_ids[0])
+        .bind(dep_ids[1])
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(log_count_pruned, 0);
 
-        let manual_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM backups WHERE project_id = ? AND kind = 'manual' AND release_id IS NULL",
-                params![project_id],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let manual_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM backups WHERE project_id = $1 AND kind = 'manual' AND release_id IS NULL",
+        )
+        .bind(project_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(manual_count, 1);
 
-        let auto_backup_pruned: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM backups WHERE project_id = ? AND kind = 'snapshot' AND path LIKE ?",
-                params![project_id, format!("%rel-{}", dep_ids[0])],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let auto_backup_pruned: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM backups WHERE project_id = $1 AND kind = 'snapshot' AND path LIKE $2",
+        )
+        .bind(project_id)
+        .bind(format!("%rel-{}", dep_ids[0]))
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(auto_backup_pruned, 0);
-        drop(conn);
 
         // Old release dirs deleted; newer 5 intact; persistent container DB intact!
         assert!(!releases_dir.join(format!("rel-{}", dep_ids[0])).exists());
@@ -577,10 +573,10 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn test_prune_spares_live_dir_until_replaced() {
+    #[tokio::test]
+    async fn test_prune_spares_live_dir_until_replaced() {
         let root = test_temp_dir("live-guard");
-        let db = open_db(&root).unwrap();
+        let db = isolated_pool().await;
         let deploy_dir = root.join("apps").join("svc");
         let releases_dir = deploy_dir.join("releases");
         let app_dir = deploy_dir.join("app");
@@ -588,88 +584,81 @@ mod tests {
         fs::create_dir_all(&app_dir).unwrap();
         fs::write(app_dir.join("index.js"), b"service-code").unwrap();
 
-        let project_id = insert_test_project(&db, &deploy_dir, "website");
+        let project_id = insert_test_project(&db, &deploy_dir, "website").await;
         let mut dep_ids = Vec::new();
         let mut rel_ids = Vec::new();
 
-        for i in 1..=6 {
-            let conn = db.lock().unwrap();
-            conn.execute(
+        for i in 1i64..=6 {
+            let dep_id: i64 = sqlx::query_scalar(
                 "INSERT INTO deployments(project_id, kind, status, stage, trigger, actor, started_at) \
-                 VALUES(?, 'deploy', 'success', 'cleanup', 'manual', 'admin', ?)",
-                params![project_id, 2000 + i],
+                 VALUES($1, 'deploy', 'success', 'cleanup', 'manual', 'admin', $2) RETURNING id",
             )
+            .bind(project_id)
+            .bind(2000 + i)
+            .fetch_one(&db)
+            .await
             .unwrap();
-            let dep_id = conn.last_insert_rowid();
             let rel_path = releases_dir.join(format!("rel-{}", dep_id));
             fs::create_dir_all(&rel_path).unwrap();
-            conn.execute(
+            let rel_id: i64 = sqlx::query_scalar(
                 "INSERT INTO releases(project_id, deployment_id, sha, short_sha, message, author, committed_at, dir, status, created_at) \
-                 VALUES(?, ?, ?, ?, 'msg', 'dev', 1000, ?, 'ready', ?)",
-                params![
-                    project_id,
-                    dep_id,
-                    format!("sha{}", i),
-                    format!("s{}", i),
-                    rel_path.to_string_lossy().to_string(),
-                    2000 + i
-                ],
+                 VALUES($1, $2, $3, $4, 'msg', 'dev', 1000, $5, 'ready', $6) RETURNING id",
             )
+            .bind(project_id)
+            .bind(dep_id)
+            .bind(format!("sha{}", i))
+            .bind(format!("s{}", i))
+            .bind(rel_path.to_string_lossy().to_string())
+            .bind(2000 + i)
+            .fetch_one(&db)
+            .await
             .unwrap();
-            let rel_id = conn.last_insert_rowid();
-            conn.execute(
-                "UPDATE deployments SET release_id = ? WHERE id = ?",
-                params![rel_id, dep_id],
-            )
-            .unwrap();
+            sqlx::query("UPDATE deployments SET release_id = $1 WHERE id = $2")
+                .bind(rel_id)
+                .bind(dep_id)
+                .execute(&db)
+                .await
+                .unwrap();
             dep_ids.push(dep_id);
             rel_ids.push(rel_id);
         }
 
         // Suppose rel-1 was STILL live when #6 started!
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE projects SET current_release_id = ? WHERE id = ?",
-                params![rel_ids[0], project_id],
-            )
+        sqlx::query("UPDATE projects SET current_release_id = $1 WHERE id = $2")
+            .bind(rel_ids[0])
+            .bind(project_id)
+            .execute(&db)
+            .await
             .unwrap();
-        }
 
-        prune_project_deployments(&db, project_id, MAX_DEPLOYMENT_RECORDS);
+        prune_project_deployments(&db, project_id, MAX_DEPLOYMENT_RECORDS).await;
         // Record #1 is removed from deployments (5 records left), but rel-1 dir is spared while live.
-        let count: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT COUNT(*) FROM deployments WHERE project_id = ?",
-                params![project_id],
-                |r| r.get(0),
-            )
-            .unwrap()
-        };
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployments WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
         assert_eq!(count, 5);
         assert!(releases_dir.join(format!("rel-{}", dep_ids[0])).exists());
         assert!(app_dir.join("index.js").exists());
 
         // Now live swaps to rel-6; sweeping on completion removes old rel-1 dir cleanly.
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE projects SET current_release_id = ? WHERE id = ?",
-                params![rel_ids[5], project_id],
-            )
+        sqlx::query("UPDATE projects SET current_release_id = $1 WHERE id = $2")
+            .bind(rel_ids[5])
+            .bind(project_id)
+            .execute(&db)
+            .await
             .unwrap();
-        }
-        prune_project_deployments(&db, project_id, MAX_DEPLOYMENT_RECORDS);
+        prune_project_deployments(&db, project_id, MAX_DEPLOYMENT_RECORDS).await;
         assert!(!releases_dir.join(format!("rel-{}", dep_ids[0])).exists());
 
         let _ = fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn test_create_deployment_immediately_prunes_oldest_on_sixth_start() {
+    #[tokio::test]
+    async fn test_create_deployment_immediately_prunes_oldest_on_sixth_start() {
         let root = test_temp_dir("create-dep-cap");
-        let db = open_db(&root).unwrap();
+        let db = isolated_pool().await;
         let deploy_dir = root.join("apps").join("myapp");
         let releases_dir = deploy_dir.join("releases");
         fs::create_dir_all(&releases_dir).unwrap();
@@ -688,25 +677,26 @@ mod tests {
             projects.clone(),
             runtime,
             cache,
-        );
+        )
+        .await;
 
-        let project_id = insert_test_project(&db, &deploy_dir, "website");
-        let project = projects.get(project_id).unwrap().unwrap();
+        let project_id = insert_test_project(&db, &deploy_dir, "website").await;
+        let project = projects.get(project_id).await.unwrap().unwrap();
 
         let mut created_ids = Vec::new();
         for i in 1..=6 {
-            let dep_id = deployer.create_deployment(&project, "deploy", "tester", "manual");
+            let dep_id = deployer.create_deployment(&project, "deploy", "tester", "manual").await;
             let rel_dir = releases_dir.join(format!("rel-{}", dep_id));
             fs::create_dir_all(&rel_dir).unwrap();
             fs::write(rel_dir.join("artifact.txt"), format!("build-{}", i)).unwrap();
             created_ids.push(dep_id);
 
-            let listed = deployer.list_deployments(Some(project_id), 20);
+            let listed = deployer.list_deployments(Some(project_id), 20).await;
             assert!(listed.len() <= MAX_DEPLOYMENT_RECORDS);
         }
 
         // Starting deployment #6 should have pruned deployment #1 and freed `rel-<id1>` immediately.
-        let remaining = deployer.list_deployments(Some(project_id), 20);
+        let remaining = deployer.list_deployments(Some(project_id), 20).await;
         let remaining_ids: Vec<i64> = remaining.into_iter().map(|d| d.id).collect();
         assert_eq!(remaining_ids.len(), 5);
         assert!(!remaining_ids.contains(&created_ids[0]));

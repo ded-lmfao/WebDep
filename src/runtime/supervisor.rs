@@ -35,7 +35,7 @@ impl Runtime {
                     }
                 }
                 for (proj_id, status) in exited {
-                    rt.mark_project_stopped(proj_id);
+                    rt.mark_project_stopped(proj_id).await;
                     let msg = match status {
                         Some(s) => format!("Process exited ({})", s),
                         None => "Process terminated unexpectedly".to_string(),
@@ -45,44 +45,35 @@ impl Runtime {
 
                 // Every 6s (every 3rd tick), also check preserved workloads from previous panel instances
                 if tick % 3 == 0 {
-                    let external_running: Vec<(i64, u32)> = {
-                        if let Ok(conn) = rt.db.lock() {
-                            if let Ok(mut stmt) = conn.prepare("SELECT id, app_pid FROM projects WHERE app_status = 'running'") {
-                                let rows = stmt.query_map([], |r| {
-                                    Ok((r.get::<_, i64>(0)?, r.get::<_, Option<u32>>(1)?))
-                                });
-                                if let Ok(mapped) = rows {
-                                    mapped
-                                        .flatten()
-                                        .filter_map(|(id, opt_pid)| opt_pid.map(|p| (id, p)))
-                                        .collect()
-                                } else {
-                                    Vec::new()
-                                }
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        }
-                    };
+                    let external_running: Vec<(i64, u32)> = sqlx::query_as::<_, (i64, Option<i64>)>(
+                        "SELECT id, app_pid FROM projects WHERE app_status = 'running'",
+                    )
+                    .fetch_all(&rt.db)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(id, opt_pid)| {
+                        opt_pid.and_then(|p| u32::try_from(p).ok()).map(|p| (id, p))
+                    })
+                    .collect();
 
                     for (proj_id, pid) in external_running {
                         let is_in_memory = rt.processes.lock().map(|m| m.contains_key(&proj_id)).unwrap_or(false);
                         if !is_in_memory && !is_pid_alive(pid) {
-                            let still_listening = {
-                                if let Ok(conn) = rt.db.lock() {
-                                    conn.query_row("SELECT port FROM projects WHERE id = ?", rusqlite::params![proj_id], |r| r.get::<_, Option<u16>>(0))
-                                        .ok()
-                                        .flatten()
-                                        .map(|port| !Runtime::find_pids_on_port(port).is_empty())
-                                        .unwrap_or(false)
-                                } else {
-                                    false
-                                }
-                            };
+                            let still_listening = sqlx::query_scalar::<_, Option<i32>>(
+                                "SELECT port FROM projects WHERE id = $1",
+                            )
+                            .bind(proj_id)
+                            .fetch_optional(&rt.db)
+                            .await
+                            .ok()
+                            .flatten()
+                            .flatten()
+                            .and_then(|p| u16::try_from(p).ok())
+                            .map(|port| !Runtime::find_pids_on_port(port).is_empty())
+                            .unwrap_or(false);
                             if !still_listening {
-                                rt.mark_project_stopped(proj_id);
+                                rt.mark_project_stopped(proj_id).await;
                                 rt.logs.add(Some(proj_id), None, "system", "warn", "Process terminated");
                             }
                         }

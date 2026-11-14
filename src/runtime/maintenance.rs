@@ -316,27 +316,23 @@ impl Runtime {
     pub async fn set_maintenance_mode(&self, p: &Project, enabled: bool) -> Result<(), String> {
         if enabled {
             self.bump_stop_seq(p.id);
-            {
-                let conn = self.db.lock().unwrap();
-                conn.execute(
-                    "UPDATE projects SET app_status='maintenance', app_pid=NULL, app_started_at=NULL WHERE id=?",
-                    rusqlite::params![p.id],
-                )
-                .ok();
-            }
+            let _ = sqlx::query(
+                "UPDATE projects SET app_status='maintenance', app_pid=NULL, app_started_at=NULL WHERE id=$1",
+            )
+            .bind(p.id)
+            .execute(&self.db)
+            .await;
 
             let proj_lock = self.get_project_lock(p.id);
             let _guard = proj_lock.lock().await;
             self.kill_project_everything(p).await;
 
-            {
-                let conn = self.db.lock().unwrap();
-                conn.execute(
-                    "UPDATE projects SET app_status='maintenance', app_pid=NULL, app_started_at=NULL WHERE id=?",
-                    rusqlite::params![p.id],
-                )
-                .ok();
-            }
+            let _ = sqlx::query(
+                "UPDATE projects SET app_status='maintenance', app_pid=NULL, app_started_at=NULL WHERE id=$1",
+            )
+            .bind(p.id)
+            .execute(&self.db)
+            .await;
 
             if let Some(port) = p.port {
                 self.start_maintenance_server(

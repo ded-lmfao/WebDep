@@ -75,15 +75,18 @@ impl User {
         }
     }
 
-    pub fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
+    pub fn from_pg_row(r: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        let disabled_bool: bool = r.try_get::<Option<bool>, _>(2)?.unwrap_or(false);
+        let totp_bool: bool = r.try_get::<Option<bool>, _>(5)?.unwrap_or(false);
         Ok(Self::from_db(
-            r.get(0)?,
-            r.get(1)?,
-            r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "[\"*\"]".into()),
-            r.get::<_, Option<String>>(4)?.unwrap_or_else(|| "[\"*\"]".into()),
-            r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-            r.get(6)?,
+            r.try_get(0)?,
+            r.try_get(1)?,
+            if disabled_bool { 1 } else { 0 },
+            r.try_get::<Option<String>, _>(3)?.unwrap_or_else(|| "[\"*\"]".into()),
+            r.try_get::<Option<String>, _>(4)?.unwrap_or_else(|| "[\"*\"]".into()),
+            if totp_bool { 1 } else { 0 },
+            r.try_get(6)?,
         ))
     }
 

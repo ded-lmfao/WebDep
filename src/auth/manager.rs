@@ -1,4 +1,4 @@
-use rusqlite::params;
+use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,7 +30,6 @@ pub struct Auth {
     pub(crate) session_presence: Mutex<HashMap<String, (i64, u64, bool)>>,
 }
 
-
 impl Auth {
     #[cfg(test)]
     pub fn new(db: DbPool, session_ttl_s: u64) -> Self {
@@ -38,7 +37,10 @@ impl Auth {
     }
 
     pub fn with_timeouts(db: DbPool, session_ttl_s: u64, session_idle_timeout_s: u64) -> Self {
-        let auth = Self {
+        std::thread::spawn(|| {
+            sync_real_utc_offset();
+        });
+        Self {
             db,
             session_ttl_s,
             session_idle_timeout_s,
@@ -48,12 +50,7 @@ impl Auth {
             failures: Mutex::new(HashMap::new()),
             session_cache: RwLock::new(HashMap::new()),
             session_presence: Mutex::new(HashMap::new()),
-        };
-        auth.ensure_admin();
-        std::thread::spawn(|| {
-            sync_real_utc_offset();
-        });
-        auth
+        }
     }
 
     pub(crate) fn now_millis() -> u64 {
@@ -171,7 +168,7 @@ impl Auth {
             5
         };
         if entry.count >= max_attempts {
-            entry.locked_until_s = now + 600; // 10-minute lockout
+            entry.locked_until_s = now + 600;
             return Some(600);
         }
         None
@@ -186,9 +183,8 @@ impl Auth {
         let now = Self::now_secs();
         let token = random_token(32);
         let mut map = self.mfa_challenges.lock().unwrap();
-        // Invalidate any older pending MFA challenges for this user so only the newest challenge is valid
         map.retain(|_, (uid, exp)| *exp > now && *uid != user_id);
-        map.insert(token.clone(), (user_id, now + 180)); // valid for 3 minutes
+        map.insert(token.clone(), (user_id, now + 180));
         token
     }
 
@@ -205,21 +201,22 @@ impl Auth {
         map.remove(token).map(|(uid, _)| uid)
     }
 
-    pub fn verify_user_2fa(&self, user_id: i64, code: &str) -> bool {
+    pub async fn verify_user_2fa(&self, user_id: i64, code: &str) -> bool {
         let trimmed = code.trim();
         if trimmed.is_empty() {
             return false;
         }
 
-        let (secret_opt, backup_json): (Option<String>, String) = {
-            let conn = self.db.lock().unwrap();
-            conn.query_row(
-                "SELECT totp_secret, COALESCE(totp_backup_codes, '[]') FROM users WHERE id = ? AND totp_enabled = 1",
-                params![user_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((None, "[]".to_string()))
-        };
+        let row: Option<(Option<String>, String)> = sqlx::query_as(
+            "SELECT totp_secret, COALESCE(totp_backup_codes, '[]') FROM users WHERE id = $1 AND totp_enabled = TRUE",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten();
+
+        let (secret_opt, backup_json) = row.unwrap_or((None, "[]".to_string()));
 
         if let Some(secret) = secret_opt {
             if verify_totp_code(&secret, trimmed) {
@@ -227,7 +224,6 @@ impl Auth {
             }
         }
 
-        // Check one-time backup recovery codes (case-insensitive, with or without hyphen)
         let norm_input: String = trimmed
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
@@ -245,12 +241,11 @@ impl Auth {
                 }) {
                     codes.remove(pos);
                     let updated_json = serde_json::to_string(&codes).unwrap_or_else(|_| "[]".to_string());
-                    let conn = self.db.lock().unwrap();
-                    conn.execute(
-                        "UPDATE users SET totp_backup_codes = ? WHERE id = ?",
-                        params![updated_json, user_id],
-                    )
-                    .ok();
+                    let _ = sqlx::query("UPDATE users SET totp_backup_codes = $1 WHERE id = $2")
+                        .bind(updated_json)
+                        .bind(user_id)
+                        .execute(&self.db)
+                        .await;
                     return true;
                 }
             }
@@ -259,80 +254,90 @@ impl Auth {
         false
     }
 
-    pub fn ensure_admin(&self) {
+    pub async fn ensure_admin(&self) {
         let (env_user, env_pass, reset_2fa) = crate::config::Config::read_dotenv_admin();
-        let conn = self.db.lock().unwrap();
 
-        let existing_main: Option<(i64, String, String)> = conn
-            .query_row(
-                "SELECT id, username, password_hash FROM users WHERE id = 1 OR LOWER(username) = LOWER(?) ORDER BY CASE WHEN id = 1 THEN 0 ELSE 1 END, id ASC LIMIT 1",
-                params![&env_user],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .ok();
+        let existing_main: Option<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, username, password_hash FROM users
+             WHERE id = 1 OR LOWER(username) = LOWER($1)
+             ORDER BY CASE WHEN id = 1 THEN 0 ELSE 1 END, id ASC
+             LIMIT 1",
+        )
+        .bind(&env_user)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten();
 
         if let Some((admin_id, current_username, current_hash)) = existing_main {
             let mut updated_session_needed = false;
 
             if current_username != env_user {
-                conn.execute(
-                    "UPDATE users SET username = ?, disabled = 0 WHERE id = ?",
-                    params![&env_user, admin_id],
-                )
-                .ok();
+                let _ = sqlx::query("UPDATE users SET username = $1, disabled = FALSE WHERE id = $2")
+                    .bind(&env_user)
+                    .bind(admin_id)
+                    .execute(&self.db)
+                    .await;
                 updated_session_needed = true;
             }
 
             if current_hash.starts_with("scrypt$") || !verify_password(&env_pass, &current_hash) {
                 if let Ok(hashed) = hash_password(&env_pass) {
-                    conn.execute(
-                        "UPDATE users SET password_hash = ?, disabled = 0 WHERE id = ?",
-                        params![hashed, admin_id],
-                    )
-                    .ok();
+                    let _ = sqlx::query("UPDATE users SET password_hash = $1, disabled = FALSE WHERE id = $2")
+                        .bind(hashed)
+                        .bind(admin_id)
+                        .execute(&self.db)
+                        .await;
                     updated_session_needed = true;
                 }
             }
 
             if reset_2fa {
-                conn.execute(
-                    "UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_pending_secret = NULL, totp_backup_codes = '[]' WHERE id = ?",
-                    params![admin_id],
+                let _ = sqlx::query(
+                    "UPDATE users SET totp_enabled = FALSE, totp_secret = NULL, totp_pending_secret = NULL, totp_backup_codes = '[]' WHERE id = $1",
                 )
-                .ok();
-                drop(conn);
+                .bind(admin_id)
+                .execute(&self.db)
+                .await;
                 crate::config::Config::sync_dotenv_admin(None, None);
                 self.invalidate_sessions();
                 return;
             }
 
-            drop(conn);
             if updated_session_needed {
                 self.invalidate_sessions();
             }
         } else if let Ok(hashed) = hash_password(&env_pass) {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            conn.execute(
-                "INSERT INTO users(id, username, password_hash, disabled, permissions, allowed_projects, created_at) VALUES(1, ?, ?, 0, '[\"*\"]', '[\"*\"]', ?)",
-                params![&env_user, hashed, now],
+            let now = Self::now_millis() as i64;
+            let _ = sqlx::query(
+                "INSERT INTO users(id, username, password_hash, disabled, permissions, allowed_projects, created_at)
+                 VALUES(1, $1, $2, FALSE, '[\"*\"]', '[\"*\"]', $3)
+                 ON CONFLICT(id) DO NOTHING",
             )
-            .ok();
+            .bind(&env_user)
+            .bind(hashed)
+            .bind(now)
+            .execute(&self.db)
+            .await;
+            let _ = sqlx::query(
+                "SELECT setval(pg_get_serial_sequence('users', 'id'), COALESCE((SELECT MAX(id) FROM users), 1), true)",
+            )
+            .execute(&self.db)
+            .await;
         }
     }
 
-    pub fn get_user_by_id(&self, id: i64) -> Option<User> {
-        let conn = self.db.lock().unwrap();
-        let mut u = conn
-            .query_row(
-                "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, 0), created_at FROM users WHERE id = ?",
-                params![id],
-                User::from_row,
-            )
-            .ok()?;
-        drop(conn);
+    pub async fn get_user_by_id(&self, id: i64) -> Option<User> {
+        let row = sqlx::query(
+            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at FROM users WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten()?;
+
+        let mut u = User::from_pg_row(&row).ok()?;
         u.presence = if u.disabled {
             "offline".to_string()
         } else {
@@ -341,30 +346,40 @@ impl Auth {
         Some(u)
     }
 
-    pub fn list_users(&self) -> rusqlite::Result<Vec<User>> {
-        let conn = self.db.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, 0), created_at FROM users ORDER BY id ASC")?;
-        let mut list: Vec<User> = stmt.query_map([], User::from_row)?.flatten().collect();
-        drop(stmt);
-        drop(conn);
-        for u in &mut list {
+    pub async fn list_users(&self) -> Result<Vec<User>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at FROM users ORDER BY id ASC",
+        )
+        .fetch_all(&self.db)
+        .await?;
+
+        let mut list = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut u = User::from_pg_row(&row)?;
             u.presence = if u.disabled {
                 "offline".to_string()
             } else {
                 self.presence_for_user(u.id)
             };
+            list.push(u);
         }
         Ok(list)
     }
 
-    pub fn get_user_by_username(&self, username: &str) -> Option<(User, String)> {
-        let conn = self.db.lock().unwrap();
-        conn.query_row(
-            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, 0), created_at, password_hash FROM users WHERE LOWER(username) = LOWER(?)",
-            params![username],
-            |r| Ok((User::from_row(r)?, r.get(7)?)),
+    pub async fn get_user_by_username(&self, username: &str) -> Option<(User, String)> {
+        let row = sqlx::query(
+            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at, password_hash
+             FROM users WHERE LOWER(username) = LOWER($1)",
         )
+        .bind(username)
+        .fetch_optional(&self.db)
+        .await
         .ok()
+        .flatten()?;
+
+        let user = User::from_pg_row(&row).ok()?;
+        let hash: String = row.try_get(7).ok()?;
+        Some((user, hash))
     }
 
     fn is_idle_expired(&self, last_active_at: i64, now_s: u64) -> bool {
@@ -373,19 +388,23 @@ impl Auth {
             && (now_s as i64).saturating_sub(last_active_at) > (self.session_idle_timeout_s as i64)
     }
 
-    pub fn create_session(&self, user_id: i64) -> Result<Session, rusqlite::Error> {
+    pub async fn create_session(&self, user_id: i64) -> Result<Session, sqlx::Error> {
         let session_id = random_token(32);
         let csrf_token = random_token(24);
         let now_s = Self::now_secs();
         let expires_at = (now_s + self.session_ttl_s) as i64;
         let last_active_at = now_s as i64;
 
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO sessions(id, user_id, expires_at, last_active_at, csrf_token) VALUES(?, ?, ?, ?, ?)",
-            params![session_id, user_id, expires_at, last_active_at, csrf_token],
-        )?;
-        drop(conn);
+        sqlx::query(
+            "INSERT INTO sessions(id, user_id, expires_at, last_active_at, csrf_token) VALUES($1, $2, $3, $4, $5)",
+        )
+        .bind(&session_id)
+        .bind(user_id)
+        .bind(expires_at)
+        .bind(last_active_at)
+        .bind(&csrf_token)
+        .execute(&self.db)
+        .await?;
 
         self.set_session_presence(&session_id, user_id, "online");
 
@@ -398,7 +417,7 @@ impl Auth {
         })
     }
 
-    fn touch_session_activity(&self, session_id: &str, prev_active: i64, now_s: u64) {
+    async fn touch_session_activity(&self, session_id: &str, prev_active: i64, now_s: u64) {
         let now_i64 = now_s as i64;
         if now_i64.saturating_sub(prev_active) < 30 {
             return;
@@ -408,81 +427,104 @@ impl Auth {
                 sess.last_active_at = now_i64;
             }
         }
-        let conn = self.db.lock().unwrap();
-        let _ = conn.execute(
-            "UPDATE sessions SET last_active_at = ? WHERE id = ?",
-            params![now_i64, session_id],
-        );
+        let _ = sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
+            .bind(now_i64)
+            .bind(session_id)
+            .execute(&self.db)
+            .await;
     }
 
-    pub fn get_session(&self, session_id: &str) -> Option<(Session, User)> {
-        self.get_session_with_touch(session_id, false)
+    pub async fn get_session(&self, session_id: &str) -> Option<(Session, User)> {
+        self.get_session_with_touch(session_id, false).await
     }
 
-    pub fn get_session_with_touch(&self, session_id: &str, touch_activity: bool) -> Option<(Session, User)> {
+    pub async fn get_session_with_touch(&self, session_id: &str, touch_activity: bool) -> Option<(Session, User)> {
         let now_s = Self::now_secs();
 
-        // Fast-path: check in-memory session cache (30s TTL)
-        if let Ok(cache) = self.session_cache.read() {
-            if let Some((sess, usr, cached_until)) = cache.get(session_id) {
-                if *cached_until > now_s && sess.expires_at > (now_s as i64) && !usr.disabled {
-                    if self.is_idle_expired(sess.last_active_at, now_s) {
-                        drop(cache);
-                        self.delete_session(session_id);
-                        return None;
-                    }
-                    let prev_active = sess.last_active_at;
-                    let mut out_sess = sess.clone();
-                    let out_usr = usr.clone();
-                    drop(cache);
-                    if touch_activity {
-                        self.touch_session_activity(session_id, prev_active, now_s);
-                        if (now_s as i64).saturating_sub(prev_active) >= 30 {
-                            out_sess.last_active_at = now_s as i64;
-                        }
-                    }
-                    self.ensure_session_presence(session_id, out_usr.id);
-                    return Some((out_sess, out_usr));
-                }
-            }
+        enum CacheCheck {
+            Miss,
+            Expired,
+            Hit(Session, User),
         }
 
-        let conn = self.db.lock().unwrap();
-        let res = conn.query_row(
-            "SELECT s.id, s.user_id, s.expires_at, s.last_active_at, s.csrf_token, u.username, u.disabled, u.permissions, u.allowed_projects, COALESCE(u.totp_enabled, 0), u.created_at
+        let cached = {
+            if let Ok(cache) = self.session_cache.read() {
+                if let Some((sess, usr, cached_until)) = cache.get(session_id) {
+                    if *cached_until > now_s && sess.expires_at > (now_s as i64) && !usr.disabled {
+                        if self.is_idle_expired(sess.last_active_at, now_s) {
+                            CacheCheck::Expired
+                        } else {
+                            CacheCheck::Hit(sess.clone(), usr.clone())
+                        }
+                    } else {
+                        CacheCheck::Miss
+                    }
+                } else {
+                    CacheCheck::Miss
+                }
+            } else {
+                CacheCheck::Miss
+            }
+        };
+
+        match cached {
+            CacheCheck::Expired => {
+                self.delete_session(session_id).await;
+                return None;
+            }
+            CacheCheck::Hit(mut out_sess, out_usr) => {
+                let prev_active = out_sess.last_active_at;
+                if touch_activity {
+                    self.touch_session_activity(session_id, prev_active, now_s).await;
+                    if (now_s as i64).saturating_sub(prev_active) >= 30 {
+                        out_sess.last_active_at = now_s as i64;
+                    }
+                }
+                self.ensure_session_presence(session_id, out_usr.id);
+                return Some((out_sess, out_usr));
+            }
+            CacheCheck::Miss => {}
+        }
+
+        let row = sqlx::query(
+            "SELECT s.id, s.user_id, s.expires_at, s.last_active_at, s.csrf_token, u.username, u.disabled, u.permissions, u.allowed_projects, COALESCE(u.totp_enabled, FALSE), u.created_at
              FROM sessions s
              JOIN users u ON u.id = s.user_id
-             WHERE s.id = ? AND s.expires_at > ?",
-            params![session_id, now_s as i64],
-            |r| {
-                let session = Session {
-                    id: r.get(0)?,
-                    user_id: r.get(1)?,
-                    expires_at: r.get(2)?,
-                    last_active_at: r.get(3)?,
-                    csrf_token: r.get(4)?,
-                };
-                let user = User::from_db(
-                    r.get(1)?,
-                    r.get(5)?,
-                    r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                    r.get::<_, Option<String>>(7)?.unwrap_or_else(|| "[\"*\"]".into()),
-                    r.get::<_, Option<String>>(8)?.unwrap_or_else(|| "[\"*\"]".into()),
-                    r.get::<_, Option<i64>>(9)?.unwrap_or(0),
-                    r.get(10)?,
-                );
-                Ok((session, user))
-            },
-        );
-        drop(conn);
+             WHERE s.id = $1 AND s.expires_at > $2",
+        )
+        .bind(session_id)
+        .bind(now_s as i64)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten()?;
 
-        let mut valid = res.ok().filter(|(_, u)| !u.disabled)?;
+        let session = Session {
+            id: row.try_get(0).ok()?,
+            user_id: row.try_get(1).ok()?,
+            expires_at: row.try_get(2).ok()?,
+            last_active_at: row.try_get(3).ok()?,
+            csrf_token: row.try_get(4).ok()?,
+        };
+        let disabled_bool: bool = row.try_get::<Option<bool>, _>(6).ok().flatten().unwrap_or(false);
+        let totp_bool: bool = row.try_get::<Option<bool>, _>(9).ok().flatten().unwrap_or(false);
+        let user = User::from_db(
+            session.user_id,
+            row.try_get(5).ok()?,
+            if disabled_bool { 1 } else { 0 },
+            row.try_get::<Option<String>, _>(7).ok().flatten().unwrap_or_else(|| "[\"*\"]".into()),
+            row.try_get::<Option<String>, _>(8).ok().flatten().unwrap_or_else(|| "[\"*\"]".into()),
+            if totp_bool { 1 } else { 0 },
+            row.try_get(10).ok()?,
+        );
+
+        let mut valid = (!user.disabled).then_some((session, user))?;
         if self.is_idle_expired(valid.0.last_active_at, now_s) {
-            self.delete_session(session_id);
+            self.delete_session(session_id).await;
             return None;
         }
         if touch_activity && (now_s as i64).saturating_sub(valid.0.last_active_at) >= 30 {
-            self.touch_session_activity(session_id, valid.0.last_active_at, now_s);
+            self.touch_session_activity(session_id, valid.0.last_active_at, now_s).await;
             valid.0.last_active_at = now_s as i64;
         }
         self.ensure_session_presence(session_id, valid.1.id);
@@ -498,62 +540,63 @@ impl Auth {
         Some(valid)
     }
 
-    pub fn delete_session(&self, session_id: &str) {
+    pub async fn delete_session(&self, session_id: &str) {
         if let Ok(mut cache) = self.session_cache.write() {
             cache.remove(session_id);
         }
         if let Ok(mut map) = self.session_presence.lock() {
             map.remove(session_id);
         }
-        let conn = self.db.lock().unwrap();
-        conn.execute("DELETE FROM sessions WHERE id = ?", params![session_id])
-            .ok();
+        let _ = sqlx::query("DELETE FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&self.db)
+            .await;
     }
 
-    pub fn revoke_other_sessions(&self, user_id: i64, keep_session_id: &str) -> usize {
+    pub async fn revoke_other_sessions(&self, user_id: i64, keep_session_id: &str) -> usize {
         self.invalidate_sessions();
         if let Ok(mut map) = self.session_presence.lock() {
             map.retain(|sid, (uid, _, _)| *uid != user_id || sid == keep_session_id);
         }
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            "DELETE FROM sessions WHERE user_id = ? AND id != ?",
-            params![user_id, keep_session_id],
-        )
-        .unwrap_or(0)
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id != $2")
+            .bind(user_id)
+            .bind(keep_session_id)
+            .execute(&self.db)
+            .await
+            .map(|r| r.rows_affected() as usize)
+            .unwrap_or(0)
     }
 
-    pub fn count_active_sessions(&self, user_id: i64) -> usize {
+    pub async fn count_active_sessions(&self, user_id: i64) -> usize {
         let now_s = Self::now_secs() as i64;
-        let conn = self.db.lock().unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND expires_at > ?",
-            params![user_id, now_s],
-            |r| r.get::<_, i64>(0),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sessions WHERE user_id = $1 AND expires_at > $2",
         )
+        .bind(user_id)
+        .bind(now_s)
+        .fetch_one(&self.db)
+        .await
         .unwrap_or(1) as usize
     }
 
-    pub fn purge_expired_sessions(&self) {
+    pub async fn purge_expired_sessions(&self) {
         let now_s = Self::now_secs();
         let idle_cutoff = (now_s as i64).saturating_sub(self.session_idle_timeout_s as i64);
         if let Ok(mut cache) = self.session_cache.write() {
             cache.retain(|_, (sess, _, exp)| *exp > now_s && !self.is_idle_expired(sess.last_active_at, now_s));
         }
-        let conn = self.db.lock().unwrap();
-        conn.execute("DELETE FROM sessions WHERE expires_at <= ?", params![now_s as i64])
-            .ok();
+        let _ = sqlx::query("DELETE FROM sessions WHERE expires_at <= $1")
+            .bind(now_s as i64)
+            .execute(&self.db)
+            .await;
         if self.session_idle_timeout_s > 0 {
-            conn.execute(
-                "DELETE FROM sessions WHERE last_active_at > 0 AND last_active_at <= ?",
-                params![idle_cutoff],
-            )
-            .ok();
+            let _ = sqlx::query("DELETE FROM sessions WHERE last_active_at > 0 AND last_active_at <= $1")
+                .bind(idle_cutoff)
+                .execute(&self.db)
+                .await;
         }
     }
 
-    /// Evict stale in-memory auth state (MFA/WebAuthn challenges, expired failure lockouts,
-    /// idle presence heartbeats, and oversized caches) so long-running daemons never leak RAM.
     pub fn prune_in_memory(&self) {
         let now_s = Self::now_secs();
         let now_ms = Self::now_millis();
@@ -588,12 +631,11 @@ impl Auth {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_session_presence_transitions() {
-        let temp_dir = std::env::temp_dir().join(format!("webdep-auth-presence-{}", Auth::now_millis()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let db = crate::db::open_db(&temp_dir).unwrap();
+    #[tokio::test]
+    async fn test_session_presence_transitions() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
         let auth = Auth::new(db, 3600);
+        auth.ensure_admin().await;
 
         assert_eq!(auth.presence_for_user(2), "offline");
         auth.set_session_presence("sid-a", 2, "online");
@@ -610,48 +652,38 @@ mod tests {
 
         auth.set_session_presence("sid-b", 2, "offline");
         assert_eq!(auth.presence_for_user(2), "offline");
-
-        drop(auth);
-        std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    #[test]
-    fn test_session_idle_expiration_and_activity_refresh() {
-        let temp_dir = std::env::temp_dir().join(format!("webdep-auth-idle-{}", Auth::now_millis()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let db = crate::db::open_db(&temp_dir).unwrap();
+    #[tokio::test]
+    async fn test_session_idle_expiration_and_activity_refresh() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
         let auth = Auth::with_timeouts(db.clone(), 3600, 120);
+        auth.ensure_admin().await;
 
-        let sess = auth.create_session(1).unwrap();
-        assert!(auth.get_session(&sess.id).is_some());
+        let sess = auth.create_session(1).await.unwrap();
+        assert!(auth.get_session(&sess.id).await.is_some());
 
-        // Backdate last_active_at by 60s (still within 120s idle window) and touch activity
         let now_i64 = Auth::now_secs() as i64;
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE sessions SET last_active_at = ? WHERE id = ?",
-                params![now_i64 - 60, &sess.id],
-            )
+        sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
+            .bind(now_i64 - 60)
+            .bind(&sess.id)
+            .execute(&db)
+            .await
             .unwrap();
-        }
         auth.invalidate_sessions();
-        let (refreshed, _) = auth.get_session_with_touch(&sess.id, true).expect("session should refresh within idle window");
+        let (refreshed, _) = auth
+            .get_session_with_touch(&sess.id, true)
+            .await
+            .expect("session should refresh within idle window");
         assert!(refreshed.last_active_at >= now_i64 - 1);
 
-        // Backdate past idle timeout (200s > 120s) without touching -> must auto-expire and delete
-        {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "UPDATE sessions SET last_active_at = ? WHERE id = ?",
-                params![now_i64 - 200, &sess.id],
-            )
+        sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
+            .bind(now_i64 - 200)
+            .bind(&sess.id)
+            .execute(&db)
+            .await
             .unwrap();
-        }
         auth.invalidate_sessions();
-        assert!(auth.get_session(&sess.id).is_none());
-
-        drop(auth);
-        std::fs::remove_dir_all(&temp_dir).ok();
+        assert!(auth.get_session(&sess.id).await.is_none());
     }
 }

@@ -56,6 +56,7 @@ pub(crate) async fn github_webhook_handler(
     let p = state
         .projects
         .get_by_slug(&slug)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found for this slug".to_string()))?;
 
@@ -108,7 +109,8 @@ pub(crate) async fn github_webhook_handler(
 
     let dep_id = state
         .deployer
-        .create_deployment(&p, "deploy", "github-webhook", "webhook");
+        .create_deployment(&p, "deploy", "github-webhook", "webhook")
+        .await;
 
     trigger_background_deploy(state.deployer.clone(), p.id, dep_id);
 

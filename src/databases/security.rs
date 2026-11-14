@@ -99,13 +99,7 @@ pub async fn wait_for_pg_ready(port: u16, data_dir: &Path, max_wait_ms: u64) -> 
 }
 
 pub fn is_process_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let mut sys = sysinfo::System::new();
-    let sys_pid = sysinfo::Pid::from_u32(pid);
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
-    sys.process(sys_pid).is_some()
+    crate::runtime::tree::is_pid_alive(pid)
 }
 
 pub async fn sync_firewall_rules(port: u16, access_mode: &str, allowed_ips: &str) {

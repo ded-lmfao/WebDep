@@ -4,8 +4,8 @@ pub mod worker;
 
 pub use retention::MAX_DEPLOYMENT_RECORDS;
 
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use sqlx::{Postgres, Row};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -74,27 +74,27 @@ const SELECT_DEPLOYMENT_FIELDS: &str = "\
     d.id, d.project_id, p.name, d.release_id, d.from_release_id, d.kind, d.status, d.stage, \
     d.sha, d.trigger, d.actor, d.error, d.started_at, d.finished_at";
 
-fn row_to_deployment(r: &rusqlite::Row) -> Result<Deployment, rusqlite::Error> {
+fn pg_row_to_deployment(r: &sqlx::postgres::PgRow) -> Result<Deployment, sqlx::Error> {
     Ok(Deployment {
-        id: r.get(0)?,
-        project_id: r.get(1)?,
-        project_name: r.get(2)?,
-        release_id: r.get(3)?,
-        from_release_id: r.get(4)?,
-        kind: r.get(5)?,
-        status: r.get(6)?,
-        stage: r.get(7)?,
-        sha: r.get(8)?,
-        trigger: r.get(9)?,
-        actor: r.get(10)?,
-        error: r.get(11)?,
-        started_at: r.get(12)?,
-        finished_at: r.get(13)?,
+        id: r.try_get(0)?,
+        project_id: r.try_get(1)?,
+        project_name: r.try_get(2)?,
+        release_id: r.try_get(3)?,
+        from_release_id: r.try_get(4)?,
+        kind: r.try_get(5)?,
+        status: r.try_get(6)?,
+        stage: r.try_get(7)?,
+        sha: r.try_get(8)?,
+        trigger: r.try_get(9)?,
+        actor: r.try_get(10)?,
+        error: r.try_get(11)?,
+        started_at: r.try_get(12)?,
+        finished_at: r.try_get(13)?,
     })
 }
 
 impl Deployer {
-    pub fn new(
+    pub async fn new(
         db: DbPool,
         logs: Logs,
         projects: Arc<Projects>,
@@ -102,12 +102,13 @@ impl Deployer {
         cache: Arc<AppCache>,
     ) -> Self {
         // Clean up any stale deployments left in active states from a previous server restart/crash
-        if let Ok(conn) = db.lock() {
-            let _ = conn.execute(
-                "UPDATE deployments SET status='failed', stage='failed', error='Interrupted by server restart', finished_at=? WHERE status IN ('pending', 'running', 'in_progress', 'queued')",
-                params![now()],
-            );
-        }
+        let _ = sqlx::query(
+            "UPDATE deployments SET status = 'failed', stage = 'failed', error = 'Interrupted by server restart', finished_at = $1 \
+             WHERE status IN ('pending', 'running', 'in_progress', 'queued')",
+        )
+        .bind(now())
+        .execute(&db)
+        .await;
 
         Self {
             db,
@@ -122,160 +123,146 @@ impl Deployer {
     }
 
     /// Check if a project currently has an in-flight or queued deployment/rollback
-    pub fn has_active_deployment(&self, project_id: i64) -> bool {
-        if let Ok(active) = self.active_projects.lock() {
-            if let Some(&dep_id) = active.get(&project_id) {
-                let conn = self.db.lock().unwrap();
-                let status: Option<String> = conn
-                    .query_row(
-                        "SELECT status FROM deployments WHERE id = ?",
-                        params![dep_id],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if let Some(s) = status {
-                    if s == "in_progress" || s == "running" || s == "pending" || s == "queued" {
-                        return true;
-                    }
+    pub async fn has_active_deployment(&self, project_id: i64) -> bool {
+        let dep_id_opt = self
+            .active_projects
+            .lock()
+            .ok()
+            .and_then(|active| active.get(&project_id).copied());
+
+        if let Some(dep_id) = dep_id_opt {
+            let status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM deployments WHERE id = $1")
+                    .bind(dep_id)
+                    .fetch_optional(&self.db)
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(s) = status {
+                if s == "in_progress" || s == "running" || s == "pending" || s == "queued" {
+                    return true;
                 }
             }
         }
         false
     }
 
-    pub fn list_deployments(&self, project_id: Option<i64>, limit: usize) -> Vec<Deployment> {
-        let conn = self.db.lock().unwrap();
-        Self::list_deployments_conn(&conn, project_id, limit)
+    pub async fn list_deployments(&self, project_id: Option<i64>, limit: usize) -> Vec<Deployment> {
+        let mut qb = sqlx::QueryBuilder::<Postgres>::new(format!(
+            "SELECT {} FROM deployments d LEFT JOIN projects p ON d.project_id = p.id",
+            SELECT_DEPLOYMENT_FIELDS
+        ));
+        if let Some(pid) = project_id {
+            qb.push(" WHERE d.project_id = ");
+            qb.push_bind(pid);
+        }
+        qb.push(" ORDER BY d.id DESC LIMIT ");
+        qb.push_bind(limit as i64);
+
+        let rows = qb.build().fetch_all(&self.db).await.unwrap_or_default();
+        rows.iter()
+            .filter_map(|r| pg_row_to_deployment(r).ok())
+            .collect()
     }
 
-    pub fn list_deployments_conn(
-        conn: &rusqlite::Connection,
-        project_id: Option<i64>,
-        limit: usize,
-    ) -> Vec<Deployment> {
-        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::ToSql>>) = match project_id {
-            Some(pid) => (
-                format!(
-                    "SELECT {} FROM deployments d LEFT JOIN projects p ON d.project_id = p.id \
-                     WHERE d.project_id = ? ORDER BY d.id DESC LIMIT ?",
-                    SELECT_DEPLOYMENT_FIELDS
-                ),
-                vec![Box::new(pid), Box::new(limit as i64)],
-            ),
-            None => (
-                format!(
-                    "SELECT {} FROM deployments d LEFT JOIN projects p ON d.project_id = p.id \
-                     ORDER BY d.id DESC LIMIT ?",
-                    SELECT_DEPLOYMENT_FIELDS
-                ),
-                vec![Box::new(limit as i64)],
-            ),
-        };
-
-        let mut stmt = match conn.prepare_cached(&sql) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-        stmt.query_map(param_refs.as_slice(), row_to_deployment)
-            .map(|rows| rows.filter_map(Result::ok).collect())
-            .unwrap_or_default()
+    pub async fn get_deployment(&self, id: i64) -> Option<Deployment> {
+        let sql = format!(
+            "SELECT {} FROM deployments d LEFT JOIN projects p ON d.project_id = p.id WHERE d.id = $1",
+            SELECT_DEPLOYMENT_FIELDS
+        );
+        let row = sqlx::query(&sql)
+            .bind(id)
+            .fetch_optional(&self.db)
+            .await
+            .ok()??;
+        pg_row_to_deployment(&row).ok()
     }
 
-    pub fn get_deployment(&self, id: i64) -> Option<Deployment> {
-        let conn = self.db.lock().unwrap();
-        let sql = format!("SELECT {} FROM deployments d LEFT JOIN projects p ON d.project_id = p.id WHERE d.id = ?", SELECT_DEPLOYMENT_FIELDS);
-        conn.query_row(&sql, params![id], row_to_deployment).ok()
-    }
+    pub async fn list_releases(&self, project_id: i64) -> Vec<Release> {
+        let current_rel_id: Option<i64> =
+            sqlx::query_scalar("SELECT current_release_id FROM projects WHERE id = $1")
+                .bind(project_id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
 
-    pub fn list_releases(&self, project_id: i64) -> Vec<Release> {
-        let conn = self.db.lock().unwrap();
-        let current_rel_id: Option<i64> = conn
-            .query_row(
-                "SELECT current_release_id FROM projects WHERE id = ?",
-                params![project_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-
-        let mut stmt = match conn.prepare(
+        let rows = sqlx::query(
             "SELECT id, project_id, sha, short_sha, message, author, committed_at, dir, \
                     status, build_status, health_status, deployment_id, created_at, deployed_at \
-             FROM releases WHERE project_id = ? ORDER BY id DESC LIMIT 50",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+             FROM releases WHERE project_id = $1 ORDER BY id DESC LIMIT 50",
+        )
+        .bind(project_id)
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default();
 
-        let rows = stmt
-            .query_map(params![project_id], |r| {
-                let id: i64 = r.get(0)?;
-                let dir_str: String = r.get(7)?;
-                let status: String = r.get(8)?;
+        rows.into_iter()
+            .filter_map(|r| {
+                let id: i64 = r.try_get(0).ok()?;
+                let dir_str: String = r.try_get(7).ok()?;
+                let status: String = r.try_get(8).ok()?;
                 let dir_path = Path::new(&dir_str);
                 let available = dir_path.exists() && status == "succeeded";
                 let live = current_rel_id == Some(id);
 
-                Ok(Release {
+                Some(Release {
                     id,
-                    project_id: r.get(1)?,
-                    sha: r.get(2)?,
-                    short_sha: r.get(3)?,
-                    message: r.get(4)?,
-                    author: r.get(5)?,
-                    committed_at: r.get(6)?,
+                    project_id: r.try_get(1).ok()?,
+                    sha: r.try_get(2).ok()?,
+                    short_sha: r.try_get(3).ok()?,
+                    message: r.try_get(4).ok()?,
+                    author: r.try_get(5).ok()?,
+                    committed_at: r.try_get(6).ok()?,
                     dir: dir_str,
                     status,
-                    build_status: r.get(9)?,
-                    health_status: r.get(10)?,
-                    deployment_id: r.get(11)?,
-                    created_at: r.get(12)?,
-                    deployed_at: r.get(13)?,
+                    build_status: r.try_get(9).ok()?,
+                    health_status: r.try_get(10).ok()?,
+                    deployment_id: r.try_get(11).ok()?,
+                    created_at: r.try_get(12).ok()?,
+                    deployed_at: r.try_get(13).ok()?,
                     live,
                     available,
                 })
             })
-            .map(|iter| iter.filter_map(Result::ok).collect())
-            .unwrap_or_default();
-
-        rows
+            .collect()
     }
 
-    pub fn create_deployment(&self, p: &Project, kind: &str, actor: &str, trigger: &str) -> i64 {
+    pub async fn create_deployment(&self, p: &Project, kind: &str, actor: &str, trigger: &str) -> i64 {
         let ts = now();
         let action_name = if kind == "rollback" { "rollback.start" } else { "deploy.start" };
         let action_title = if kind == "rollback" { "Rollback" } else { "Deployment" };
 
-        let id = {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO deployments(project_id, kind, status, stage, trigger, actor, started_at) \
-                 VALUES(?, ?, 'running', 'queued', ?, ?, ?)",
-                params![p.id, kind, trigger, actor, ts],
-            )
-            .ok();
-            let dep_id = conn.last_insert_rowid();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO deployments(project_id, kind, status, stage, trigger, actor, started_at) \
+             VALUES($1, $2, 'running', 'queued', $3, $4, $5) RETURNING id",
+        )
+        .bind(p.id)
+        .bind(kind)
+        .bind(trigger)
+        .bind(actor)
+        .bind(ts)
+        .fetch_one(&self.db)
+        .await
+        .unwrap_or(0);
 
-            conn.execute(
-                "INSERT INTO audit(project_id, action, actor, target, detail, ts) VALUES(?, ?, ?, ?, ?, ?)",
-                params![
-                    p.id,
-                    action_name,
-                    actor,
-                    p.name,
-                    format!("Triggered {} #{} (Trigger: {})", action_title, dep_id, trigger),
-                    ts,
-                ],
+        if id > 0 {
+            let _ = sqlx::query(
+                "INSERT INTO audit(project_id, action, actor, target, detail, ts) VALUES($1, $2, $3, $4, $5, $6)",
             )
-            .ok();
-
-            dep_id
-        };
+            .bind(p.id)
+            .bind(action_name)
+            .bind(actor)
+            .bind(&p.name)
+            .bind(format!("Triggered {} #{} (Trigger: {})", action_title, id, trigger))
+            .bind(ts)
+            .execute(&self.db)
+            .await;
+        }
 
         // Keep at most the latest 5 deployment records per project and reclaim old storage
         // immediately as the new deployment starts.
-        retention::prune_project_deployments(&self.db, p.id, retention::MAX_DEPLOYMENT_RECORDS);
+        retention::prune_project_deployments(&self.db, p.id, retention::MAX_DEPLOYMENT_RECORDS).await;
 
         if let Ok(mut active) = self.active_projects.lock() {
             active.insert(p.id, id);
@@ -294,49 +281,63 @@ impl Deployer {
         id
     }
 
-    pub fn update_stage(&self, dep_id: i64, stage: &str) {
-        let conn = self.db.lock().unwrap();
-        let _ = conn.execute(
-            "UPDATE deployments SET stage = ? WHERE id = ?",
-            params![stage, dep_id],
-        );
+    pub async fn update_stage(&self, dep_id: i64, stage: &str) {
+        let _ = sqlx::query("UPDATE deployments SET stage = $1 WHERE id = $2")
+            .bind(stage)
+            .bind(dep_id)
+            .execute(&self.db)
+            .await;
     }
 
-    pub fn fail_deployment_step(&self, dep_id: i64, project_id: i64, channel: &str, error: &str) {
+    pub async fn fail_deployment_step(&self, dep_id: i64, project_id: i64, channel: &str, error: &str) {
         self.logs.add(Some(project_id), Some(dep_id), channel, "error", error);
-        self.finish_deployment(dep_id, "failed", Some(error));
+        self.finish_deployment(dep_id, "failed", Some(error)).await;
     }
 
-    pub fn finish_deployment(&self, dep_id: i64, status: &str, error: Option<&str>) {
-        let (project_id, prev_stage, kind, actor, target_name) = {
-            let conn = self.db.lock().unwrap();
-            let _ = conn.execute(
-                "UPDATE deployments SET status = ?, error = ?, finished_at = ? WHERE id = ?",
-                params![status, error, now(), dep_id],
-            );
-            if status != "success" {
-                let _ = conn.execute(
-                    "UPDATE releases SET status = 'failed' WHERE deployment_id = ? AND status != 'succeeded'",
-                    params![dep_id],
-                );
-            }
-            conn.query_row(
-                "SELECT d.project_id, d.stage, d.kind, d.actor, p.name FROM deployments d LEFT JOIN projects p ON d.project_id = p.id WHERE d.id = ?",
-                params![dep_id],
-                |r| Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, Option<String>>(4)?.unwrap_or_else(|| "project".to_string())
-                )),
-            ).unwrap_or((0, "queued".to_string(), "deploy".to_string(), "system".to_string(), "project".to_string()))
-        };
+    pub async fn finish_deployment(&self, dep_id: i64, status: &str, error: Option<&str>) {
+        let _ = sqlx::query(
+            "UPDATE deployments SET status = $1, error = $2, finished_at = $3 WHERE id = $4",
+        )
+        .bind(status)
+        .bind(error)
+        .bind(now())
+        .bind(dep_id)
+        .execute(&self.db)
+        .await;
+
+        if status != "success" {
+            let _ = sqlx::query(
+                "UPDATE releases SET status = 'failed' WHERE deployment_id = $1 AND status != 'succeeded'",
+            )
+            .bind(dep_id)
+            .execute(&self.db)
+            .await;
+        }
+
+        let (project_id, prev_stage, kind, actor, target_name) = sqlx::query_as::<_, (i64, String, String, String, Option<String>)>(
+            "SELECT d.project_id, d.stage, d.kind, d.actor, p.name \
+             FROM deployments d LEFT JOIN projects p ON d.project_id = p.id WHERE d.id = $1",
+        )
+        .bind(dep_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|(pid, st, k, a, n)| (pid, st, k, a, n.unwrap_or_else(|| "project".to_string())))
+        .unwrap_or_else(|| {
+            (
+                0,
+                "queued".to_string(),
+                "deploy".to_string(),
+                "system".to_string(),
+                "project".to_string(),
+            )
+        });
 
         if status == "success" {
-            self.update_stage(dep_id, "ready");
+            self.update_stage(dep_id, "ready").await;
         } else if prev_stage == "queued" {
-            self.update_stage(dep_id, "failed_queue");
+            self.update_stage(dep_id, "failed_queue").await;
         }
 
         let is_rollback = kind == "rollback";
@@ -353,13 +354,17 @@ impl Deployer {
             format!("{} #{} failed: {}", action_title, dep_id, error.unwrap_or("unknown error"))
         };
 
-        {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO audit(project_id, action, actor, target, detail, ts) VALUES(?, ?, ?, ?, ?, ?)",
-                params![project_id, action_name, actor, target_name, detail_msg, now()],
-            ).ok();
-        }
+        let _ = sqlx::query(
+            "INSERT INTO audit(project_id, action, actor, target, detail, ts) VALUES($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(project_id)
+        .bind(action_name)
+        .bind(actor)
+        .bind(target_name)
+        .bind(detail_msg)
+        .bind(now())
+        .execute(&self.db)
+        .await;
 
         if project_id > 0 {
             let pid = project_id;
@@ -368,8 +373,8 @@ impl Deployer {
                     active_map.remove(&pid);
                 }
             }
-            retention::prune_project_deployments(&self.db, pid, retention::MAX_DEPLOYMENT_RECORDS);
-        self.cache.invalidate_project(pid);
+            retention::prune_project_deployments(&self.db, pid, retention::MAX_DEPLOYMENT_RECORDS).await;
+            self.cache.invalidate_project(pid);
         } else {
             self.cache.invalidate_all();
         }
@@ -401,7 +406,7 @@ impl Deployer {
                 match self.queue_semaphore.clone().acquire_owned().await {
                     Ok(p) => Some(p),
                     Err(_) => {
-                        self.finish_deployment(dep_id, "failed", Some("Deployment queue closed"));
+                        self.finish_deployment(dep_id, "failed", Some("Deployment queue closed")).await;
                         None
                     }
                 }

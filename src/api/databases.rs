@@ -24,20 +24,20 @@ fn can_access_db(user: &crate::auth::user::User, db: &crate::databases::ManagedD
         .unwrap_or(can_unlinked)
 }
 
-pub(crate) fn verify_db_access(
+pub(crate) async fn verify_db_access(
     state: &AppState,
     headers: &HeaderMap,
     powers: &[&str],
     db: &crate::databases::ManagedDatabase,
 ) -> Result<crate::auth::user::User, (StatusCode, String)> {
-    let user = verify_any_power(state, headers, powers, db.linked_project_id)?;
+    let user = verify_any_power(state, headers, powers, db.linked_project_id).await?;
     if !can_access_db(&user, db) {
         return Err((StatusCode::FORBIDDEN, "Access to unlinked database is restricted".to_string()));
     }
     Ok(user)
 }
 
-pub(crate) fn get_authorized_database(
+pub(crate) async fn get_authorized_database(
     state: &AppState,
     headers: &HeaderMap,
     powers: &[&str],
@@ -46,18 +46,19 @@ pub(crate) fn get_authorized_database(
     let db = state
         .databases
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let user = verify_db_access(state, headers, powers, &db)?;
+    let user = verify_db_access(state, headers, powers, &db).await?;
     Ok((user, db))
 }
 
-fn verify_db_files_write(
+async fn verify_db_files_write(
     state: &AppState,
     headers: &HeaderMap,
     id: i64,
 ) -> Result<(crate::auth::user::User, crate::databases::ManagedDatabase), (StatusCode, String)> {
-    let _ = get_authorized_database(state, headers, &["databases", "databases_manage"], id)?;
+    let _ = get_authorized_database(state, headers, &["databases", "databases_manage"], id).await?;
     Err((
         StatusCode::FORBIDDEN,
         "Database files are read-only once created. Delete and recreate the database to change configuration."
@@ -133,19 +134,20 @@ pub(crate) async fn list_databases_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let user = verify_any_power(&state, &headers, &["databases", "databases_manage"], None)?;
+    let user = verify_any_power(&state, &headers, &["databases", "databases_manage"], None).await?;
     let can_creds = user.has_any_power(&["databases_manage", "env"]);
     let cache_key = format!("databases:u{}:c{}", user.id, u8::from(can_creds));
 
     singleflight_json_bytes(&state.cache, cache_key, std::time::Duration::from_secs(4), &headers, || async {
-        let state = state.clone();
         let user = user.clone();
+        let all = state
+            .databases
+            .list_with_secrets(can_creds)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         tokio::task::spawn_blocking(move || {
             let cwd = cached_cwd();
-            let list: Vec<DatabaseResponse> = state
-                .databases
-                .list_with_secrets(can_creds)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            let list: Vec<DatabaseResponse> = all
                 .into_iter()
                 .filter(|db| can_access_db(&user, db))
                 .map(|db| to_database_response(db, can_creds, cwd))
@@ -166,9 +168,10 @@ pub(crate) async fn get_database_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
     let db = state.databases.get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let user = verify_db_access(&state, &headers, &["databases", "databases_manage"], &db)?;
+    let user = verify_db_access(&state, &headers, &["databases", "databases_manage"], &db).await?;
     let can_creds = user.has_any_power(&["databases_manage", "env"]);
     Ok(Json(to_database_response(db, can_creds, cached_cwd())))
 }
@@ -178,13 +181,13 @@ pub(crate) async fn create_database_handler(
     headers: HeaderMap,
     Json(payload): Json<crate::databases::CreateDatabaseInput>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
-    let user = verify_power(&state, &headers, "databases_manage", payload.linked_project_id)?;
+    let user = verify_power(&state, &headers, "databases_manage", payload.linked_project_id).await?;
     let db = state.databases.create(payload)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
-    log_audit(&state, &user.username, "database.create", Some(&db.name), Some(&format!("Created PostgreSQL database '{}' on port {}", db.db_name, db.port)));
+    log_audit(&state, &user.username, "database.create", Some(&db.name), Some(&format!("Created PostgreSQL database '{}' on port {}", db.db_name, db.port))).await;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     Ok(Json(to_database_response(db, true, &cwd)))
 }
@@ -201,15 +204,16 @@ where
     F: std::future::Future<Output = Result<(), String>>,
 {
     let db = state.databases.get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let user = verify_db_access(state, headers, &["databases", "databases_manage"], &db)?;
+    let user = verify_db_access(state, headers, &["databases", "databases_manage"], &db).await?;
     let can_creds = user.has_any_power(&["databases_manage", "env"]);
     f.await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
-    log_audit(state, &user.username, action_name, Some(&format!("DB #{}", id)), Some(audit_desc));
-    let updated = state.databases.get(id).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    log_audit(state, &user.username, action_name, Some(&format!("DB #{}", id)), Some(audit_desc)).await;
+    let updated = state.databases.get(id).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     Ok(Json(to_database_response(updated, can_creds, &cwd)))
@@ -245,9 +249,10 @@ pub(crate) async fn update_database_access_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = state.databases.get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let _ = verify_db_access(&state, &headers, &["databases_manage"], &db)?;
+    let _ = verify_db_access(&state, &headers, &["databases_manage"], &db).await?;
     Err((
         StatusCode::FORBIDDEN,
         "Database network access and domain are locked once created. Delete and recreate the database to change them."
@@ -261,13 +266,14 @@ pub(crate) async fn delete_database_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = state.databases.get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let user = verify_db_access(&state, &headers, &["databases_manage"], &db)?;
+    let user = verify_db_access(&state, &headers, &["databases_manage"], &db).await?;
     state.databases.delete(id).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
-    log_audit(&state, &user.username, "database.delete", Some(&format!("DB #{}", id)), Some("Deleted database container"));
+    log_audit(&state, &user.username, "database.delete", Some(&format!("DB #{}", id)), Some("Deleted database container")).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -315,12 +321,13 @@ pub(crate) async fn link_database_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<LinkDbPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let p = fetch_project(&state.projects, payload.project_id)?;
+    let p = fetch_project(&state.projects, payload.project_id).await?;
     let db = state.databases.get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let _ = verify_db_access(&state, &headers, &["databases_manage"], &db)?;
-    let user = verify_power(&state, &headers, "env", Some(p.id))?;
+    let _ = verify_db_access(&state, &headers, &["databases_manage"], &db).await?;
+    let user = verify_power(&state, &headers, "env", Some(p.id)).await?;
 
     let raw_pass = db.db_password.unwrap_or_default();
     let port_str = db.port.to_string();
@@ -336,10 +343,11 @@ pub(crate) async fn link_database_handler(
 
     for (key, val, is_secret) in entries {
         state.projects.set_env_var(p.id, key, val, is_secret)
+            .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
-    state.databases.set_linked_project(id, Some(p.id)).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.databases.set_linked_project(id, Some(p.id)).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.cache.invalidate_project(p.id);
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
@@ -360,7 +368,7 @@ pub(crate) async fn link_database_handler(
         }
     }
 
-    log_audit(&state, &user.username, "database.link", Some(&db.name), Some(&format!("Linked database '{}' to {} '{}'", db.name, target_noun, p.name)));
+    log_audit(&state, &user.username, "database.link", Some(&db.name), Some(&format!("Linked database '{}' to {} '{}'", db.name, target_noun, p.name))).await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "message": format!("Database linked to {} '{}' and credentials injected!", target_noun, p.name)
@@ -373,17 +381,21 @@ pub(crate) async fn unlink_database_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = state.databases.get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let actor = verify_db_access(&state, &headers, &["databases_manage"], &db)?;
-    let old_proj = db.linked_project_id.and_then(|pid| state.projects.get(pid).ok().flatten());
+    let actor = verify_db_access(&state, &headers, &["databases_manage"], &db).await?;
+    let old_proj = match db.linked_project_id {
+        Some(pid) => state.projects.get(pid).await.ok().flatten(),
+        None => None,
+    };
     if let Some(ref p) = old_proj {
-        let _ = verify_power(&state, &headers, "env", Some(p.id))?;
+        let _ = verify_power(&state, &headers, "env", Some(p.id)).await?;
     }
 
     if let Some(ref p) = old_proj {
         for key in LINKED_DB_ENV_KEYS {
-            let _ = state.projects.delete_env_var(p.id, key);
+            let _ = state.projects.delete_env_var(p.id, key).await;
         }
         if p.project_kind == "service" {
             let dotenv_path = service_dotenv_path(p);
@@ -401,10 +413,11 @@ pub(crate) async fn unlink_database_handler(
     let target_noun = if old_proj.as_ref().map(|p| p.project_kind.as_str()) == Some("service") { "service" } else { "website" };
     let desc = format!("Unlinked database from {}", target_noun);
     state.databases.set_linked_project(id, None)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
-    log_audit(&state, &actor.username, "database.unlink", Some(&db.name), Some(&desc));
+    log_audit(&state, &actor.username, "database.unlink", Some(&db.name), Some(&desc)).await;
 
     Ok(Json(serde_json::json!({ "ok": true, "message": desc })))
 }
@@ -480,17 +493,19 @@ pub(crate) async fn get_database_logs_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (_user, db) = get_authorized_database(&state, &headers, &["databases", "databases_manage"], id)?;
+    let (_user, db) = get_authorized_database(&state, &headers, &["databases", "databases_manage"], id).await?;
 
     let log_content = state
         .databases
         .get_logs(id)
+        .await
         .unwrap_or_else(|e| format!("Error reading log file: {}", e));
 
     let db_tag = format!("[DB #{}]", id);
     let mut entries: Vec<serde_json::Value> = state
         .logs
         .list(None, None, Some("database"), None, 150)
+        .await
         .into_iter()
         .filter(|e| e.message.contains(&db_tag) || e.message.contains(&db.name))
         .map(|e| {
@@ -539,7 +554,7 @@ pub(crate) async fn db_files_list_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (_actor, db) = get_authorized_database(&state, &headers, &["databases", "databases_manage"], id)?;
+    let (_actor, db) = get_authorized_database(&state, &headers, &["databases", "databases_manage"], id).await?;
     let root = database_root(&db);
     list_entries_in_root(&root, &q.path).await
 }
@@ -550,7 +565,7 @@ pub(crate) async fn db_files_read_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, db) = get_authorized_database(&state, &headers, &["databases", "databases_manage"], id)?;
+    let (actor, db) = get_authorized_database(&state, &headers, &["databases", "databases_manage"], id).await?;
     let root = database_root(&db);
     read_file_in_root(&actor, &root, &q.path).await
 }
@@ -561,7 +576,7 @@ pub(crate) async fn db_files_write_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileWritePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, db) = verify_db_files_write(&state, &headers, id)?;
+    let (actor, db) = verify_db_files_write(&state, &headers, id).await?;
     let root = database_root(&db);
     write_file_in_root(&state, &actor, None, &db.name, "database.file.write", &root, payload).await
 }
@@ -572,7 +587,7 @@ pub(crate) async fn db_files_mkdir_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileMkdirPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, db) = verify_db_files_write(&state, &headers, id)?;
+    let (actor, db) = verify_db_files_write(&state, &headers, id).await?;
     let root = database_root(&db);
     mkdir_in_root(&actor, &root, payload).await
 }
@@ -583,7 +598,7 @@ pub(crate) async fn db_files_delete_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, db) = verify_db_files_write(&state, &headers, id)?;
+    let (actor, db) = verify_db_files_write(&state, &headers, id).await?;
     let root = database_root(&db);
     delete_in_root(&state, &actor, None, &db.name, "database.file.delete", &root, &q.path).await
 }
@@ -595,7 +610,7 @@ pub(crate) async fn db_files_upload_handler(
     Query(q): Query<FilesQuery>,
     multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, db) = verify_db_files_write(&state, &headers, id)?;
+    let (actor, db) = verify_db_files_write(&state, &headers, id).await?;
     let root = database_root(&db);
     upload_in_root(&state, &actor, None, &db.name, "database.file.upload", &root, &q.path, multipart).await
 }
@@ -606,7 +621,7 @@ pub(crate) async fn db_files_download_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Response, (StatusCode, String)> {
-    let (actor, db) = get_authorized_database(&state, &headers, &["databases", "databases_manage"], id)?;
+    let (actor, db) = get_authorized_database(&state, &headers, &["databases", "databases_manage"], id).await?;
     let root = database_root(&db);
     download_in_root(&actor, &root, &q.path).await
 }
@@ -617,7 +632,7 @@ pub(crate) async fn db_files_rename_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileRenamePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, db) = verify_db_files_write(&state, &headers, id)?;
+    let (actor, db) = verify_db_files_write(&state, &headers, id).await?;
     let root = database_root(&db);
     rename_in_root(&state, &actor, None, &db.name, "database.file.rename", &root, payload).await
 }
@@ -760,21 +775,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        let db = crate::db::open_db(&tmp).unwrap();
+        let db = crate::pg_control::test_db::isolated_pool().await;
         let vault = Arc::new(crate::vault::Vault::new(&tmp).unwrap());
         let auth = Arc::new(crate::auth::Auth::new(db.clone(), 3600));
+        auth.ensure_admin().await;
         let projects = Arc::new(crate::projects::Projects::new(db.clone(), vault.clone()));
         let logs = Arc::new(crate::logs::Logs::new(db.clone()));
         let monitor = Arc::new(crate::monitor::Monitor::new());
         let caddy = Arc::new(crate::caddy::Caddy::new(&tmp));
         let runtime = Arc::new(crate::runtime::Runtime::new(db.clone(), (*logs).clone()));
-        let deployer = Arc::new(crate::deployer::Deployer::new(
-            db.clone(),
-            (*logs).clone(),
-            projects.clone(),
-            runtime.clone(),
-            Arc::new(crate::cache::AppCache::new()),
-        ));
+        let deployer = Arc::new(
+            crate::deployer::Deployer::new(
+                db.clone(),
+                (*logs).clone(),
+                projects.clone(),
+                runtime.clone(),
+                Arc::new(crate::cache::AppCache::new()),
+            )
+            .await,
+        );
         let databases = Arc::new(crate::databases::Databases::new(
             db.clone(),
             vault,
@@ -796,24 +815,29 @@ mod tests {
         };
 
         let admin_id: i64 = {
-            let conn = db.lock().unwrap();
             let data_dir = tmp.join("db1");
-            conn.execute(
+            sqlx::query(
                 "INSERT INTO databases(id, name, engine, db_name, db_user, db_password, port, is_superuser, domain, access_mode, allowed_ips, status, container_id, data_dir, linked_project_id, created_at, updated_at)
-                 VALUES(1, 'mewzik', 'postgres', 'mewzik', 'app_user', 'raw', 5432, 0, '', 'local', '', 'stopped', NULL, ?, NULL, 0, 0)",
-                rusqlite::params![data_dir.to_string_lossy().to_string()],
-            ).unwrap();
-            conn.query_row("SELECT id FROM users ORDER BY id ASC LIMIT 1", [], |r| r.get(0)).unwrap()
+                 VALUES(1, 'mewzik', 'postgres', 'mewzik', 'app_user', 'raw', 5432, FALSE, '', 'local', '', 'stopped', NULL, $1, NULL, 0, 0)",
+            )
+            .bind(data_dir.to_string_lossy().to_string())
+            .execute(&db)
+            .await
+            .unwrap();
+            sqlx::query_scalar("SELECT id FROM users ORDER BY id ASC LIMIT 1")
+                .fetch_one(&db)
+                .await
+                .unwrap()
         };
 
-        let sess = auth.create_session(admin_id).unwrap();
+        let sess = auth.create_session(admin_id).await.unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
             HeaderValue::from_str(&format!("nd_session={}", sess.id)).unwrap(),
         );
 
-        let files_err = verify_db_files_write(&state, &headers, 1).expect_err("DB file writes must be locked after creation");
+        let files_err = verify_db_files_write(&state, &headers, 1).await.expect_err("DB file writes must be locked after creation");
         assert_eq!(files_err.0, StatusCode::FORBIDDEN);
         assert!(files_err.1.contains("read-only once created"));
 

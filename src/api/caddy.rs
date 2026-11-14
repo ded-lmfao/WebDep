@@ -20,10 +20,11 @@ pub(crate) async fn get_caddy_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<CaddyResponse>, (StatusCode, String)> {
-    let _actor = verify_power(&state, &headers, "domains", Some(id))?;
+    let _actor = verify_power(&state, &headers, "domains", Some(id)).await?;
     let p = state
         .projects
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Project not found".to_string()))?;
 
@@ -45,10 +46,11 @@ pub(crate) async fn apply_caddy_handler(
     AxPath(id): AxPath<i64>,
     body_bytes: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "domains", Some(id))?;
+    let actor = verify_power(&state, &headers, "domains", Some(id)).await?;
     let mut p = state
         .projects
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
 
@@ -69,19 +71,18 @@ pub(crate) async fn apply_caddy_handler(
                 p.domains = cleaned;
                 let domains_json = serde_json::to_string(&p.domains).unwrap_or_else(|_| "[]".to_string());
                 let ts = crate::db::now();
-                {
-                    let conn = state.db.lock().unwrap();
-                    conn.execute(
-                        "UPDATE projects SET domains = ?, updated_at = ? WHERE id = ?",
-                        rusqlite::params![domains_json, ts, id],
-                    )
+                sqlx::query("UPDATE projects SET domains = $1, updated_at = $2 WHERE id = $3")
+                    .bind(domains_json)
+                    .bind(ts)
+                    .bind(id)
+                    .execute(&state.db)
+                    .await
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                }
             }
         }
     }
 
-    let all_projects = state.projects.list().unwrap_or_default();
+    let all_projects = state.projects.list().await.unwrap_or_default();
 
     state
         .caddy
@@ -98,7 +99,8 @@ pub(crate) async fn apply_caddy_handler(
         "domains.caddy_apply",
         Some(&p.name),
         Some(&format!("Configured domains: {:?}", p.domains)),
-    );
+    )
+    .await;
 
     let conf = state.caddy.generate_config(&p);
     Ok(Json(serde_json::json!({
@@ -113,7 +115,7 @@ pub(crate) async fn certbot_caddy_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let _actor = verify_power(&state, &headers, "domains", Some(id))?;
+    let _actor = verify_power(&state, &headers, "domains", Some(id)).await?;
     // Caddy provisions certificates automatically via ACME, no certbot needed!
     Ok(StatusCode::OK)
 }
@@ -133,8 +135,8 @@ pub(crate) async fn github_repos_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<GithubRepoItem>>, (StatusCode, String)> {
-    let _actor = verify_any_power(&state, &headers, &["projects_manage", "services_manage"], None)?;
-    let tokens = crate::git::Git::get_sqlite_github_tokens();
+    let _actor = verify_any_power(&state, &headers, &["projects_manage", "services_manage"], None).await?;
+    let tokens = crate::git::Git::read_github_tokens(&state.db).await;
 
     if !tokens.is_empty() {
         let mut combined: Vec<GithubRepoItem> = Vec::new();

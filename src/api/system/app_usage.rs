@@ -235,15 +235,16 @@ pub(crate) async fn project_usage_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<AppUsageResponse>, (StatusCode, String)> {
-    let _actor = verify_project_access(&state, &headers, id)?;
+    let _actor = verify_project_access(&state, &headers, id).await?;
+    let p = state
+        .projects
+        .get(id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Project not found".to_string()))?;
+    let runtime_running = state.runtime.is_running(p.id).await;
 
     tokio::task::spawn_blocking(move || {
-        let p = state
-            .projects
-            .get(id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "Project not found".to_string()))?;
-
         static CACHED_CWD: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
         let cwd = CACHED_CWD
             .get_or_init(|| std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()))
@@ -276,7 +277,7 @@ pub(crate) async fn project_usage_handler(
                 status_str: &p.app_status,
                 port: p.port,
                 seed_pids,
-                runtime_running: state.runtime.is_running(p.id),
+                runtime_running,
                 disk_dirs,
             },
         )))
@@ -296,7 +297,8 @@ pub(crate) async fn database_usage_handler(
         &headers,
         &["databases", "databases_manage"],
         id,
-    )?;
+    )
+    .await?;
 
     tokio::task::spawn_blocking(move || {
         let mut seeds: HashSet<u32> = HashSet::new();

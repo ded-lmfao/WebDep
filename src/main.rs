@@ -10,8 +10,10 @@ mod git;
 mod logs;
 mod monitor;
 mod monitor_net;
+mod pg_control;
 mod projects;
 mod runtime;
+mod sqlite_import;
 mod static_assets;
 mod updater;
 mod vault;
@@ -69,10 +71,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = Config::from_env();
+    if std::env::args().nth(1).as_deref() == Some("--import-sqlite") {
+        let sqlite_path = std::env::args()
+            .nth(2)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.data_dir.join("webdep.sqlite"));
+        let overwrite = std::env::args().any(|a| a == "--overwrite");
+        let (db, handle) = open_db(&config.data_dir).await?;
+        let report =
+            crate::sqlite_import::import_sqlite_into_postgres(&db, &sqlite_path, overwrite).await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if let Some(h) = handle {
+            h.stop().await;
+        }
+        return Ok(());
+    }
+
     info!("Starting WebDep — Multi-Website Deployment & Hosting Platform");
     info!("Data directory: {}", config.data_dir.display());
 
-    let db = open_db(&config.data_dir)?;
+    let (db, control_pg_handle) = open_db(&config.data_dir).await?;
+    if let Some(ref h) = control_pg_handle {
+        tracing::info!("Local control-plane PostgreSQL active on 127.0.0.1:{}", h.port);
+    }
     let vault = Arc::new(Vault::new(&config.data_dir)?);
     let mut auth_mgr = Auth::with_timeouts(
         db.clone(),
@@ -81,22 +102,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     auth_mgr.force_secure_cookies = config.force_secure_cookies;
     let auth = Arc::new(auth_mgr);
+    auth.ensure_admin().await;
     let projects = Arc::new(Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(Logs::new(db.clone()));
-    tracing::info!("WebDep engine initialized (SQLite database connected and live log stream active)");
+    let _ = crate::git::Git::read_github_tokens(&db).await;
+    tracing::info!("WebDep engine initialized (PostgreSQL control DB connected and live log stream active)");
     let monitor = Arc::new(Monitor::new());
     monitor.start_background_sampler();
     let cache = Arc::new(AppCache::new());
     let caddy = Arc::new(Caddy::new(&config.data_dir));
     let runtime = Arc::new(Runtime::new(db.clone(), (*logs).clone()));
     runtime.start_background_monitor();
-    let deployer = Arc::new(Deployer::new(
-        db.clone(),
-        (*logs).clone(),
-        projects.clone(),
-        runtime.clone(),
-        cache.clone(),
-    ));
+    let deployer = Arc::new(
+        Deployer::new(
+            db.clone(),
+            (*logs).clone(),
+            projects.clone(),
+            runtime.clone(),
+            cache.clone(),
+        )
+        .await,
+    );
     let databases = Arc::new(crate::databases::Databases::new(
         db.clone(),
         vault.clone(),
@@ -105,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
     let updater = Arc::new(Updater::with_db(db.clone()));
 
-    // Periodic memory maintenance: prunes expired cache, purges expired sessions, shrinks SQLite pager, and trims Linux heap
+    // Periodic memory maintenance: prunes expired cache, purges expired sessions, trims old logs, and trims Linux heap
     {
         let mem_cache = cache.clone();
         let mem_db = db.clone();
@@ -115,18 +141,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             loop {
                 interval.tick().await;
                 mem_cache.prune_expired();
-                mem_auth.purge_expired_sessions();
+                mem_auth.purge_expired_sessions().await;
                 mem_auth.prune_in_memory();
-                if let Ok(conn) = mem_db.lock() {
-                    crate::db::prune_old_logs(&conn, 20_000);
-                    crate::db::shrink_memory(&conn);
-                }
+                crate::db::prune_old_logs(&mem_db, 20_000).await;
                 trim_process_heap();
             }
         });
     }
 
-    // Auto-resume any websites marked 'running' in SQLite on platform startup,
+    // Auto-resume any websites marked 'running' in PostgreSQL on platform startup,
     // and ensure any websites marked 'stopped' have no orphan processes left on their ports
     {
         let resume_projects = projects.clone();
@@ -137,9 +160,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             resume_runtime.allow_firewall_port(80, None);
             resume_runtime.allow_firewall_port(443, None);
             resume_runtime.allow_firewall_port(platform_port, None);
-            if let Ok(list) = resume_projects.list() {
+            if let Ok(list) = resume_projects.list().await {
                 for p in list {
-                    let _ = resume_runtime.ensure_container(&p);
+                    let _ = resume_runtime.ensure_container(&p).await;
                     if p.app_status == "running" {
                         // Check if the workload is ALREADY running from before the panel restart
                         let is_already_running = if let Some(pid) = p.app_pid {
@@ -159,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             continue;
                         }
 
-                        let env = resume_projects.get_env_map(p.id);
+                        let env = resume_projects.get_env_map(p.id).await;
                         if let Err(e) = resume_runtime.start_project(&p, env, None).await {
                             resume_logs.add(
                                 Some(p.id),
@@ -188,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Enforce max-5 deployment retention cleanup across existing projects at startup.
-    crate::deployer::retention::prune_all_projects(&db, crate::deployer::MAX_DEPLOYMENT_RECORDS);
+    crate::deployer::retention::prune_all_projects(&db, crate::deployer::MAX_DEPLOYMENT_RECORDS).await;
 
     let state = AppState {
         db,
@@ -265,6 +288,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
     axum::serve(listener, app).await?;
+    if let Some(h) = control_pg_handle {
+        h.stop().await;
+    }
 
     Ok(())
 }

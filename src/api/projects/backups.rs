@@ -58,39 +58,36 @@ pub(crate) async fn list_backups_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Response, (StatusCode, String)> {
-    let _actor = verify_power(&state, &headers, "backups", Some(id))?;
+    let _actor = verify_power(&state, &headers, "backups", Some(id)).await?;
     let cache_key = format!("backups:p{}:list", id);
     if let Some(res) = check_api_cache(&state.cache, &cache_key) {
         return Ok(res);
     }
 
-    let mut backups: Vec<BackupItem> = {
-        let conn = state.db.lock().unwrap();
-        let res = if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, COALESCE(created_at, 0), COALESCE(size_bytes, 0), COALESCE(note, ''), COALESCE(kind, 'full-snapshot'), COALESCE(path, ''), release_id
-             FROM backups WHERE project_id = ? ORDER BY id DESC",
-        ) {
-            stmt.query_map(rusqlite::params![id], |r| {
-                Ok(BackupItem {
-                    id: r.get(0)?,
-                    ts: r.get(1)?,
-                    size: r.get::<_, i64>(2)?.max(0) as u64,
-                    note: r.get(3)?,
-                    kind: r.get(4)?,
-                    path: r.get(5)?,
-                    release_id: r.get(6)?,
-                })
-            })
-            .map(|rows| rows.flatten().collect())
-            .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        res
-    };
+    let rows = sqlx::query_as::<_, (i64, i64, i64, String, String, String, Option<i64>)>(
+        "SELECT id, COALESCE(created_at, 0), COALESCE(size_bytes, 0), COALESCE(note, ''), COALESCE(kind, 'full-snapshot'), COALESCE(path, ''), release_id \
+         FROM backups WHERE project_id = $1 ORDER BY id DESC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let mut backups: Vec<BackupItem> = rows
+        .into_iter()
+        .map(|(bid, ts, size, note, kind, path, release_id)| BackupItem {
+            id: bid,
+            ts,
+            size: size.max(0) as u64,
+            note,
+            kind,
+            path,
+            release_id,
+        })
+        .collect();
 
     if backups.is_empty() {
-        let releases = state.deployer.list_releases(id);
+        let releases = state.deployer.list_releases(id).await;
         backups = releases
             .into_iter()
             .map(|r| BackupItem {
@@ -121,7 +118,7 @@ pub(crate) async fn create_backup_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<CreateBackupPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "backups", Some(id))?;
+    let actor = verify_power(&state, &headers, "backups", Some(id)).await?;
     let note = payload
         .note
         .map(|s| s.trim().to_string())
@@ -136,6 +133,7 @@ pub(crate) async fn create_backup_handler(
     let p = state
         .projects
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Website not found".to_string()))?;
 
@@ -147,7 +145,7 @@ pub(crate) async fn create_backup_handler(
     let mut total_size = 0u64;
 
     // 1. Snapshot .env variables
-    if let Ok(raw_env) = state.projects.export_raw_env(id) {
+    if let Ok(raw_env) = state.projects.export_raw_env(id).await {
         let env_path = backup_dir.join("backup.env");
         if tokio::fs::write(&env_path, &raw_env).await.is_ok() {
             total_size += raw_env.len() as u64;
@@ -178,54 +176,50 @@ pub(crate) async fn create_backup_handler(
     let backup_path_str = backup_dir.to_string_lossy().to_string();
 
     // Also register an immutable release in `releases` so it appears in Releases & Rollbacks tabs!
-    let rel_id = {
-        let conn = state.db.lock().unwrap();
-        let sha = p.deployed_sha.clone().unwrap_or_else(|| format!("{:x}", ts));
-        let short_sha = sha[..7.min(sha.len())].to_string();
-        let release_files_dir = if backup_dir.join("files").exists() {
-            backup_dir.join("files").to_string_lossy().to_string()
-        } else {
-            backup_path_str.clone()
-        };
-
-        insert_success_release(
-            &conn,
-            id,
-            &sha,
-            &short_sha,
-            &format!("Snapshot: {}", note),
-            &actor.username,
-            &release_files_dir,
-            ts,
-        ).unwrap_or(0)
+    let sha = p.deployed_sha.clone().unwrap_or_else(|| format!("{:x}", ts));
+    let short_sha = sha[..7.min(sha.len())].to_string();
+    let release_files_dir = if backup_dir.join("files").exists() {
+        backup_dir.join("files").to_string_lossy().to_string()
+    } else {
+        backup_path_str.clone()
     };
 
-    let backup_id = {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at)
-             VALUES(?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                id,
-                rel_id,
-                kind,
-                &backup_path_str,
-                total_size as i64,
-                note,
-                ts
-            ],
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        conn.last_insert_rowid()
-    };
+    let rel_id_opt = insert_success_release(
+        &state.db,
+        id,
+        &sha,
+        &short_sha,
+        &format!("Snapshot: {}", note),
+        &actor.username,
+        &release_files_dir,
+        ts,
+    )
+    .await
+    .ok();
+    let rel_id = rel_id_opt.unwrap_or(0);
 
-    log_audit_project(&state, Some(id), &actor.username, "backup.create", Some(&p.name), Some(&note));
+    let backup_id: i64 = sqlx::query_scalar(
+        "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at) \
+         VALUES($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+    )
+    .bind(id)
+    .bind(rel_id_opt)
+    .bind(&kind)
+    .bind(&backup_path_str)
+    .bind(total_size as i64)
+    .bind(&note)
+    .bind(ts)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    log_audit_project(&state, Some(id), &actor.username, "backup.create", Some(&p.name), Some(&note)).await;
     state.logs.add(
         Some(id),
         None,
         "backup",
         "info",
-        &format!("Created {} backup #{} / Release #{} ({}) in SQLite & disk", kind, backup_id, rel_id, note),
+        &format!("Created {} backup #{} / Release #{} ({})", kind, backup_id, rel_id, note),
     );
 
     Ok(Json(serde_json::json!({
@@ -248,22 +242,23 @@ pub(crate) async fn restore_backup_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<RestoreBackupPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "backups", Some(id))?;
+    let actor = verify_power(&state, &headers, "backups", Some(id)).await?;
     let p = state
         .projects
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Website not found".into()))?;
 
-    let backup_row: Option<(Option<i64>, String, String)> = {
-        let conn = state.db.lock().unwrap();
-        conn.query_row(
-            "SELECT release_id, COALESCE(path, ''), COALESCE(note, '') FROM backups WHERE id = ? AND project_id = ?",
-            rusqlite::params![payload.backup_id, id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .ok()
-    };
+    let backup_row: Option<(Option<i64>, String, String)> = sqlx::query_as(
+        "SELECT release_id, COALESCE(path, ''), COALESCE(note, '') FROM backups WHERE id = $1 AND project_id = $2",
+    )
+    .bind(payload.backup_id)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
     if let Some((rel_id, b_path, note)) = backup_row {
         let b_dir = std::path::PathBuf::from(&b_path);
@@ -271,7 +266,7 @@ pub(crate) async fn restore_backup_handler(
         let env_file = b_dir.join("backup.env");
         if let Ok(raw_env) = tokio::fs::read_to_string(&env_file).await {
             if !raw_env.trim().is_empty() {
-                let _ = state.projects.set_bulk_env(id, &raw_env, true, false);
+                let _ = state.projects.set_bulk_env(id, &raw_env, true, false).await;
             }
         }
         // Restore files if present in snapshot
@@ -281,17 +276,17 @@ pub(crate) async fn restore_backup_handler(
             let _ = copy_backup_files(&files_dir, &target_current);
         }
         if let Some(target_rel) = rel_id {
-            let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore");
+            let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore").await;
             let deployer = state.deployer.clone();
             tokio::spawn(async move {
                 deployer.run_rollback(id, dep_id, target_rel).await;
             });
         } else {
             let _ = state.runtime.stop_project(&p).await;
-            let env = state.projects.get_env_map(id);
+            let env = state.projects.get_env_map(id).await;
             let _ = state.runtime.start_project(&p, env, None).await;
         }
-        log_audit_project(&state, Some(id), &actor.username, "backup.restore", Some(&p.name), Some(&note));
+        log_audit_project(&state, Some(id), &actor.username, "backup.restore", Some(&p.name), Some(&note)).await;
         state.logs.add(
             Some(id),
             None,
@@ -301,7 +296,7 @@ pub(crate) async fn restore_backup_handler(
         );
     } else {
         // Fallback: treat backup_id as release_id
-        let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore");
+        let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore").await;
         let deployer = state.deployer.clone();
         let target_rel = payload.backup_id;
         tokio::spawn(async move {
@@ -317,18 +312,19 @@ pub(crate) async fn delete_backup_handler(
     headers: HeaderMap,
     AxPath((id, backup_id)): AxPath<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "backups", Some(id))?;
-    let b_path: Option<String> = {
-        let conn = state.db.lock().unwrap();
-        conn.query_row(
-            "SELECT path FROM backups WHERE id = ? AND project_id = ?",
-            rusqlite::params![backup_id, id],
-            |r| r.get(0),
-        )
-        .ok()
-    };
+    let actor = verify_power(&state, &headers, "backups", Some(id)).await?;
+    let b_path: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT path FROM backups WHERE id = $1 AND project_id = $2",
+    )
+    .bind(backup_id)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
 
-    let p_opt = state.projects.get(id).ok().flatten();
+    let p_opt = state.projects.get(id).await.ok().flatten();
     if let Some(p_str) = b_path {
         let path = std::path::Path::new(&p_str);
         if let Some(ref p) = p_opt {
@@ -350,18 +346,16 @@ pub(crate) async fn delete_backup_handler(
         }
     }
 
-    {
-        let conn = state.db.lock().unwrap();
-        let _ = conn.execute_batch("PRAGMA foreign_keys = OFF;");
-        let del_res = conn.execute(
-            "DELETE FROM backups WHERE id = ? AND project_id = ?",
-            rusqlite::params![backup_id, id],
-        );
-        let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
-        del_res.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
+    sqlx::query("DELETE FROM backups WHERE id = $1 AND project_id = $2")
+        .bind(backup_id)
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let p_name = state.projects.get(id).ok().flatten().map(|p| p.name).unwrap_or_else(|| format!("Website #{}", id));
+    let p_name = p_opt
+        .map(|p| p.name)
+        .unwrap_or_else(|| format!("Website #{}", id));
     log_audit_project(
         &state,
         Some(id),
@@ -369,7 +363,8 @@ pub(crate) async fn delete_backup_handler(
         "backup.delete",
         Some(&p_name),
         Some(&format!("Deleted backup #{}", backup_id)),
-    );
+    )
+    .await;
     state.cache.invalidate_project(id);
     Ok(Json(serde_json::json!({ "ok": true })))
 }

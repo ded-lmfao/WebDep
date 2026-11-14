@@ -26,7 +26,7 @@ impl Runtime {
             return Err("No start command configured for this project".to_string());
         }
 
-        let container = self.ensure_container(p);
+        let container = self.ensure_container(p).await;
         let port_str = container.port.to_string();
         let resolved_cmd = p.start_cmd.replace("{{PORT}}", &port_str);
 
@@ -298,7 +298,7 @@ impl Runtime {
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         if let Ok(Some(status)) = child.try_wait() {
-            self.mark_project_stopped(p.id);
+            self.mark_project_stopped(p.id).await;
             let err_msg = format!("Process exited immediately with code {}", status);
             self.logs.add(Some(p.id), None, "system", "warn", &err_msg);
             return Err(err_msg);
@@ -319,14 +319,12 @@ impl Runtime {
 
         // Update database status
         let ts = now();
-        {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "UPDATE projects SET app_status='running', app_pid=?, app_started_at=? WHERE id=?",
-                rusqlite::params![final_pid, ts, p.id],
-            )
-            .ok();
-        }
+        let _ = sqlx::query("UPDATE projects SET app_status='running', app_pid=$1, app_started_at=$2 WHERE id=$3")
+            .bind(final_pid as i64)
+            .bind(ts)
+            .bind(p.id)
+            .execute(&self.db)
+            .await;
 
         self.logs.add(
             Some(p.id),
@@ -362,45 +360,38 @@ impl Runtime {
 
 
 
-    pub(crate) fn mark_project_stopped(&self, project_id: i64) {
-        if let Ok(conn) = self.db.lock() {
-            let _ = conn.execute(
-                "UPDATE projects SET app_status='stopped', app_pid=NULL, app_started_at=NULL WHERE id=?",
-                rusqlite::params![project_id],
-            );
-        }
+    pub(crate) async fn mark_project_stopped(&self, project_id: i64) {
+        let _ = sqlx::query(
+            "UPDATE projects SET app_status='stopped', app_pid=NULL, app_started_at=NULL WHERE id=$1",
+        )
+        .bind(project_id)
+        .execute(&self.db)
+        .await;
     }
 
-
-
     pub async fn stop_project(&self, p: &Project) -> Result<(), String> {
-        let was_active = {
-            if let Ok(conn) = self.db.lock() {
-                conn.query_row(
-                    "SELECT app_status FROM projects WHERE id = ?",
-                    rusqlite::params![p.id],
-                    |r| r.get::<_, String>(0),
-                )
-                .map(|s| s == "running")
-                .unwrap_or(p.app_status == "running")
-            } else {
-                p.app_status == "running"
-            }
-        };
+        let was_active = sqlx::query_scalar::<_, String>("SELECT app_status FROM projects WHERE id = $1")
+            .bind(p.id)
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s == "running")
+            .unwrap_or(p.app_status == "running");
 
         // Bump stop_seq first so any in-progress deployment knows Stop was requested
         self.bump_stop_seq(p.id);
 
-        // Immediately update SQLite status to stopped
-        self.mark_project_stopped(p.id);
+        // Immediately update status to stopped
+        self.mark_project_stopped(p.id).await;
 
         // Acquire per-project lock and synchronously terminate all processes + port listeners for this website
         let proj_lock = self.get_project_lock(p.id);
         let _guard = proj_lock.lock().await;
         let killed_any = self.kill_project_everything(p).await;
 
-        // Re-ensure SQLite status is stopped in case a concurrent start finished just before the lock
-        self.mark_project_stopped(p.id);
+        // Re-ensure status is stopped in case a concurrent start finished just before the lock
+        self.mark_project_stopped(p.id).await;
 
         if was_active || killed_any {
             self.logs.add(
@@ -423,41 +414,46 @@ impl Runtime {
         Ok(())
     }
 
-
-
-    pub fn is_running(&self, project_id: i64) -> bool {
-        let mut map = match self.processes.lock() {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if let Some(child) = map.get_mut(&project_id) {
-            match child.try_wait() {
-                Ok(Some(_status)) => {
-                    map.remove(&project_id);
-                    false
-                }
-                Ok(None) => true,
-                Err(_) => {
-                    map.remove(&project_id);
-                    false
-                }
-            }
-        } else {
-            // If process was started by a previous panel instance before update/restart,
-            // check if the recorded SQLite app_pid is still alive on the system
-            if let Ok(conn) = self.db.lock() {
-                if let Ok(Some(pid)) = conn.query_row(
-                    "SELECT app_pid FROM projects WHERE id = ? AND app_status = 'running'",
-                    rusqlite::params![project_id],
-                    |r| r.get::<_, Option<u32>>(0),
-                ) {
-                    if pid > 0 && is_pid_alive(pid) {
-                        return true;
+    pub async fn is_running(&self, project_id: i64) -> bool {
+        let in_mem = {
+            let mut map = match self.processes.lock() {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
+            if let Some(child) = map.get_mut(&project_id) {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        map.remove(&project_id);
+                        Some(false)
+                    }
+                    Ok(None) => Some(true),
+                    Err(_) => {
+                        map.remove(&project_id);
+                        Some(false)
                     }
                 }
+            } else {
+                None
             }
-            false
+        };
+        if let Some(running) = in_mem {
+            return running;
         }
+
+        if let Ok(Some(Some(pid_i64))) = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT app_pid FROM projects WHERE id = $1 AND app_status = 'running'",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.db)
+        .await
+        {
+            if let Ok(pid) = u32::try_from(pid_i64) {
+                if pid > 0 && is_pid_alive(pid) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
 }

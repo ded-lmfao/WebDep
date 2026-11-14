@@ -173,7 +173,19 @@ if [[ ! -f "target/release/webdep" ]]; then
 fi
 
 chmod +x target/release/webdep
-mkdir -p data/logs data/caddy
+mkdir -p data/logs data/caddy data/control-pg
+
+# Ensure local PostgreSQL binaries exist for zero-config control-plane PG (unless DATABASE_URL is explicitly provided)
+if [[ -z "${DATABASE_URL:-}" ]] && ! grep -q "^DATABASE_URL=" .env 2>/dev/null; then
+    if ! command -v pg_ctl >/dev/null 2>&1 && ! ls /usr/lib/postgresql/*/bin/pg_ctl >/dev/null 2>&1; then
+        echo "[*] PostgreSQL server binaries not found. Installing postgresql for zero-config control DB..."
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y postgresql postgresql-client
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y postgresql-server postgresql
+        fi
+    fi
+fi
 
 # Low-memory allocator tuning for Linux glibc (eliminates multi-arena RAM bloat)
 export MALLOC_ARENA_MAX=2
@@ -274,7 +286,7 @@ if [[ "${PUBLIC_IP}" != "127.0.0.1" ]]; then
     echo "    Recommended for production: route via Caddy/HTTPS domain, or use an SSH tunnel:"
     echo "    ssh -N -L ${PORT}:127.0.0.1:${PORT} ${SERVICE_USER}@${PUBLIC_IP}"
 fi
-echo "[*] SQLite Database: data/webdep.sqlite"
+echo "[*] PostgreSQL Control DB: data/control-pg/ (override via DATABASE_URL)"
 echo "[*] Tip: Run './start.sh -d' for background mode or './start.sh --service' for 24/7 systemd auto-start."
 echo ""
 

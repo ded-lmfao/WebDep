@@ -27,11 +27,11 @@ pub(crate) async fn login_handler(
 ) -> Result<Response, (StatusCode, String)> {
     // Always revoke any pre-existing session cookie when starting a new login attempt
     if let Some(old_sid) = extract_session_id(&headers) {
-        state.auth.delete_session(&old_sid);
+        state.auth.delete_session(&old_sid).await;
     }
 
     // Sync Main Admin login ID & password from .env (supports live editing .env without server restart)
-    state.auth.ensure_admin();
+    state.auth.ensure_admin().await;
 
     let uname_key = format!("login:{}", payload.username.trim().to_lowercase());
     if let Some(rem) = state.auth.check_lockout(&uname_key) {
@@ -41,7 +41,7 @@ pub(crate) async fn login_handler(
         ));
     }
 
-    let Some((user, hash)) = state.auth.get_user_by_username(payload.username.trim()) else {
+    let Some((user, hash)) = state.auth.get_user_by_username(payload.username.trim()).await else {
         state.auth.record_failure(&uname_key);
         return Err((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()));
     };
@@ -60,7 +60,7 @@ pub(crate) async fn login_handler(
 
     if !verify_password(&payload.password, &hash) {
         if let Some(lock_s) = state.auth.record_failure(&uname_key) {
-            log_audit(&state, &user.username, "auth.lockout", Some(&user.username), Some("Account locked after repeated failed password attempts"));
+            log_audit(&state, &user.username, "auth.lockout", Some(&user.username), Some("Account locked after repeated failed password attempts")).await;
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 format!("Too many failed sign-in attempts. Account locked for {} seconds.", lock_s),
@@ -88,8 +88,8 @@ pub(crate) async fn login_handler(
         return Ok(res);
     }
 
-    log_audit(&state, &user.username, "auth.login", Some(&user.username), Some("User signed in"));
-    create_authenticated_response(&state, &headers, user)
+    log_audit(&state, &user.username, "auth.login", Some(&user.username), Some("User signed in")).await;
+    create_authenticated_response(&state, &headers, user).await
 }
 
 #[derive(Deserialize)]
@@ -129,6 +129,7 @@ pub(crate) async fn verify_2fa_login_handler(
     let user = state
         .auth
         .get_user_by_id(user_id)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found".to_string()))?;
 
     if user.disabled {
@@ -136,12 +137,12 @@ pub(crate) async fn verify_2fa_login_handler(
         return Err((StatusCode::FORBIDDEN, "Account is disabled".to_string()));
     }
 
-    if !state.auth.verify_user_2fa(user.id, &payload.code) {
+    if !state.auth.verify_user_2fa(user.id, &payload.code).await {
         let token_lock = state.auth.record_failure(&lock_key);
         let user_lock = state.auth.record_failure(&user_2fa_key);
         if let Some(lock_s) = token_lock.or(user_lock) {
             state.auth.consume_mfa_challenge(&payload.mfa_token);
-            log_audit(&state, &user.username, "auth.lockout", Some(&user.username), Some("Account locked after repeated failed 2FA attempts"));
+            log_audit(&state, &user.username, "auth.lockout", Some(&user.username), Some("Account locked after repeated failed 2FA attempts")).await;
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 format!("Too many failed 2FA attempts. Locked for {} seconds.", lock_s),
@@ -160,9 +161,10 @@ pub(crate) async fn verify_2fa_login_handler(
         "auth.login",
         Some(&user.username),
         Some("User signed in with 2FA verification"),
-    );
+    )
+    .await;
 
-    create_authenticated_response(&state, &headers, user)
+    create_authenticated_response(&state, &headers, user).await
 }
 
 pub(crate) async fn logout_handler(
@@ -170,7 +172,7 @@ pub(crate) async fn logout_handler(
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
     if let Some(session_id) = extract_session_id(&headers) {
-        state.auth.delete_session(&session_id);
+        state.auth.delete_session(&session_id).await;
     }
     let is_https = is_https_request(&headers, state.auth.force_secure_cookies);
     let mut res = (StatusCode::OK, "Logged out").into_response();
@@ -192,6 +194,7 @@ pub(crate) async fn me_handler(
     let (session, mut user) = state
         .auth
         .get_session(&session_id)
+        .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     user.presence = if user.disabled {
@@ -199,8 +202,8 @@ pub(crate) async fn me_handler(
     } else {
         state.auth.presence_for_user(user.id)
     };
-    let active_sessions = state.auth.count_active_sessions(user.id);
-    let passkey_count = state.auth.count_user_passkeys(user.id);
+    let active_sessions = state.auth.count_active_sessions(user.id).await;
+    let passkey_count = state.auth.count_user_passkeys(user.id).await;
     Ok(Json(LoginResponse {
         user,
         csrf: session.csrf_token,
@@ -229,6 +232,7 @@ pub(crate) async fn presence_handler(
     let (_, user) = state
         .auth
         .get_session_with_touch(&session_id, normalized == "online")
+        .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     state.auth.set_session_presence(&session_id, user.id, normalized);
@@ -259,11 +263,13 @@ pub(crate) async fn change_password_handler(
     let (_, user) = state
         .auth
         .get_session(&session_id)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized session".to_string()))?;
 
     let (_, current_hash) = state
         .auth
         .get_user_by_username(&user.username)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found".to_string()))?;
 
     if !verify_password(&payload.current, &current_hash) {
@@ -278,7 +284,7 @@ pub(crate) async fn change_password_handler(
                 "Two-Factor Authentication is enabled: please enter your 6-digit authenticator code".to_string(),
             ));
         }
-        if !state.auth.verify_user_2fa(user.id, code) {
+        if !state.auth.verify_user_2fa(user.id, code).await {
             return Err((StatusCode::BAD_REQUEST, "Invalid 2FA authenticator code".to_string()));
         }
     }
@@ -300,21 +306,19 @@ pub(crate) async fn change_password_handler(
     let next_hash = hash_password(&payload.next)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to hash password".to_string()))?;
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
-            rusqlite::params![next_hash, user.id],
-        )
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(&next_hash)
+        .bind(user.id)
+        .execute(&state.db)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string()))?;
-    }
 
     if user.is_main_admin {
         crate::config::Config::sync_dotenv_admin(Some(&user.username), Some(&payload.next));
     }
 
     let revoked = if payload.revoke_other_sessions.unwrap_or(true) {
-        state.auth.revoke_other_sessions(user.id, &session_id)
+        state.auth.revoke_other_sessions(user.id, &session_id).await
     } else {
         0
     };
@@ -325,7 +329,8 @@ pub(crate) async fn change_password_handler(
         "user.update",
         Some(&user.username),
         Some(&format!("Changed account password (revoked {} other sessions)", revoked)),
-    );
+    )
+    .await;
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -344,18 +349,17 @@ pub(crate) async fn setup_2fa_handler(
     Json(payload): Json<Setup2faPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = current_user(&state, &headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
-    verify_current_user_password(&state, &user, &payload.password)?;
+    verify_current_user_password(&state, &user, &payload.password).await?;
 
     let secret = generate_totp_secret();
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "UPDATE users SET totp_pending_secret = ? WHERE id = ?",
-            rusqlite::params![&secret, user.id],
-        )
+    sqlx::query("UPDATE users SET totp_pending_secret = $1 WHERE id = $2")
+        .bind(&secret)
+        .bind(user.id)
+        .execute(&state.db)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save pending 2FA secret".to_string()))?;
-    }
 
     // Refresh real-world UTC offset in background so verification works even if local system clock is shifted
     std::thread::spawn(|| {
@@ -392,18 +396,18 @@ pub(crate) async fn enable_2fa_handler(
     Json(payload): Json<Enable2faPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = current_user(&state, &headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
 
-    let pending_secret: Option<String> = {
-        let conn = state.db.lock().unwrap();
-        conn.query_row(
-            "SELECT totp_pending_secret FROM users WHERE id = ?",
-            rusqlite::params![user.id],
-            |r| r.get(0),
-        )
-        .ok()
-        .flatten()
-    };
+    let pending_secret: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT totp_pending_secret FROM users WHERE id = $1",
+    )
+    .bind(user.id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
 
     let Some(secret) = pending_secret else {
         return Err((
@@ -422,16 +426,17 @@ pub(crate) async fn enable_2fa_handler(
     let backup_codes = generate_backup_codes();
     let backup_json = serde_json::to_string(&backup_codes).unwrap_or_else(|_| "[]".to_string());
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "UPDATE users SET totp_secret = ?, totp_pending_secret = NULL, totp_enabled = 1, totp_backup_codes = ? WHERE id = ?",
-            rusqlite::params![&secret, &backup_json, user.id],
-        )
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to enable 2FA".to_string()))?;
-    }
+    sqlx::query(
+        "UPDATE users SET totp_secret = $1, totp_pending_secret = NULL, totp_enabled = TRUE, totp_backup_codes = $2 WHERE id = $3",
+    )
+    .bind(&secret)
+    .bind(&backup_json)
+    .bind(user.id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to enable 2FA".to_string()))?;
 
-    apply_2fa_state_change(&state, &user.username, "Enabled Two-Factor Authentication (2FA)");
+    apply_2fa_state_change(&state, &user.username, "Enabled Two-Factor Authentication (2FA)").await;
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -451,26 +456,26 @@ pub(crate) async fn disable_2fa_handler(
     Json(payload): Json<Disable2faPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = current_user(&state, &headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
-    verify_current_user_password(&state, &user, &payload.password)?;
+    verify_current_user_password(&state, &user, &payload.password).await?;
 
-    if !state.auth.verify_user_2fa(user.id, &payload.code) {
+    if !state.auth.verify_user_2fa(user.id, &payload.code).await {
         return Err((
             StatusCode::BAD_REQUEST,
             "Invalid 6-digit authenticator code or recovery code".to_string(),
         ));
     }
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_enabled = 0, totp_backup_codes = '[]' WHERE id = ?",
-            rusqlite::params![user.id],
-        )
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to disable 2FA".to_string()))?;
-    }
+    sqlx::query(
+        "UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_enabled = FALSE, totp_backup_codes = '[]' WHERE id = $1",
+    )
+    .bind(user.id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to disable 2FA".to_string()))?;
 
-    apply_2fa_state_change(&state, &user.username, "Disabled Two-Factor Authentication (2FA)");
+    apply_2fa_state_change(&state, &user.username, "Disabled Two-Factor Authentication (2FA)").await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -484,20 +489,21 @@ pub(crate) async fn revoke_other_sessions_handler(
     let (_, user) = state
         .auth
         .get_session(&session_id)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
 
-    let revoked = state.auth.revoke_other_sessions(user.id, &session_id);
+    let revoked = state.auth.revoke_other_sessions(user.id, &session_id).await;
     log_audit(
         &state,
         &user.username,
         "user.update",
         Some(&user.username),
         Some(&format!("Revoked {} other active session(s)", revoked)),
-    );
+    )
+    .await;
 
     Ok(Json(serde_json::json!({ "ok": true, "revoked": revoked })))
 }
-
 
 // ---------------------------------------------------------------------------
 // Passkey & Biometric (WebAuthn) Handlers
@@ -507,8 +513,9 @@ pub(crate) async fn list_passkeys_handler(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = current_user(&state, &headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
-    let passkeys = state.auth.list_passkeys(user.id);
+    let passkeys = state.auth.list_passkeys(user.id).await;
     Ok(Json(serde_json::json!({ "passkeys": passkeys })))
 }
 
@@ -517,11 +524,13 @@ pub(crate) async fn passkey_register_start_handler(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = current_user(&state, &headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
     let (challenge_id, challenge_b64) = state.auth.create_passkey_challenge(Some(user.id));
     let existing: Vec<String> = state
         .auth
         .list_passkeys(user.id)
+        .await
         .into_iter()
         .map(|p| p.credential_id)
         .collect();
@@ -561,6 +570,7 @@ pub(crate) async fn passkey_register_finish_handler(
     Json(payload): Json<PasskeyRegisterFinishPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = current_user(&state, &headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
     let (uid_opt, expected_challenge) = state
         .auth
@@ -586,6 +596,7 @@ pub(crate) async fn passkey_register_finish_handler(
             &payload.client_data_json,
             &expected_challenge,
         )
+        .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     log_audit(
@@ -594,9 +605,10 @@ pub(crate) async fn passkey_register_finish_handler(
         "user.update",
         Some(&user.username),
         Some(&format!("Registered passkey / biometric device '{}'", info.name)),
-    );
+    )
+    .await;
 
-    let passkeys = state.auth.list_passkeys(user.id);
+    let passkeys = state.auth.list_passkeys(user.id).await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "passkey": info,
@@ -610,8 +622,9 @@ pub(crate) async fn delete_passkey_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let user = current_user(&state, &headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))?;
-    if !state.auth.delete_passkey(user.id, id) {
+    if !state.auth.delete_passkey(user.id, id).await {
         return Err((StatusCode::NOT_FOUND, "Passkey not found".to_string()));
     }
     log_audit(
@@ -620,8 +633,9 @@ pub(crate) async fn delete_passkey_handler(
         "user.update",
         Some(&user.username),
         Some(&format!("Removed passkey #{}", id)),
-    );
-    let passkeys = state.auth.list_passkeys(user.id);
+    )
+    .await;
+    let passkeys = state.auth.list_passkeys(user.id).await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "passkeys": passkeys,
@@ -637,7 +651,7 @@ pub(crate) async fn passkey_login_start_handler(
     State(state): State<AppState>,
     Json(payload): Json<PasskeyLoginStartPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let total = state.auth.total_passkeys_count();
+    let total = state.auth.total_passkeys_count().await;
     if total == 0 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -646,7 +660,8 @@ pub(crate) async fn passkey_login_start_handler(
     }
     let cred_ids = state
         .auth
-        .list_login_credential_ids(payload.username.as_deref());
+        .list_login_credential_ids(payload.username.as_deref())
+        .await;
     if cred_ids.is_empty() && payload.username.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -680,7 +695,7 @@ pub(crate) async fn passkey_login_finish_handler(
     Json(payload): Json<PasskeyLoginFinishPayload>,
 ) -> Result<Response, (StatusCode, String)> {
     if let Some(old_sid) = extract_session_id(&headers) {
-        state.auth.delete_session(&old_sid);
+        state.auth.delete_session(&old_sid).await;
     }
 
     let (_uid_opt, expected_challenge) = state
@@ -697,6 +712,7 @@ pub(crate) async fn passkey_login_finish_handler(
             &payload.signature,
             &expected_challenge,
         )
+        .await
         .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
 
     log_audit(
@@ -705,9 +721,10 @@ pub(crate) async fn passkey_login_finish_handler(
         "auth.login",
         Some(&user.username),
         Some(&format!("User signed in via Passkey / Biometrics ({})", passkey_name)),
-    );
+    )
+    .await;
 
-    create_authenticated_response(&state, &headers, user)
+    create_authenticated_response(&state, &headers, user).await
 }
 
 // ---------------------------------------------------------------------------

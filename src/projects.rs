@@ -1,4 +1,4 @@
-use rusqlite::{params, OptionalExtension};
+use sqlx::Row;
 use std::sync::Arc;
 
 use crate::db::{now, DbPool};
@@ -17,224 +17,252 @@ impl Projects {
         Self { db, vault }
     }
 
-    fn ensure_project_port(conn: &rusqlite::Connection, p: &mut Project) {
+    async fn ensure_project_port(&self, p: &mut Project) {
         if p.port.is_none() || p.port == Some(0) {
             let default_start = if p.project_kind == "service" { 8000 } else { 3000 };
-            if let Ok(new_port) = crate::db::allocate_global_unique_port(conn, None, default_start, Some(p.id), None) {
-                let _ = conn.execute("UPDATE projects SET port = ? WHERE id = ?", params![new_port as u32, p.id]);
+            if let Ok(new_port) = crate::db::allocate_global_unique_port(&self.db, None, default_start, Some(p.id), None).await {
+                let _ = sqlx::query("UPDATE projects SET port = $1 WHERE id = $2")
+                    .bind(new_port as i32)
+                    .bind(p.id)
+                    .execute(&self.db)
+                    .await;
                 p.port = Some(new_port);
             }
         }
     }
 
-    pub fn list(&self) -> Result<Vec<Project>, rusqlite::Error> {
-        let conn = self.db.lock().unwrap();
+    pub async fn list(&self) -> Result<Vec<Project>, sqlx::Error> {
         let query = format!("SELECT {} FROM projects ORDER BY id DESC", SELECT_PROJECT_FIELDS);
-        let mut stmt = conn.prepare_cached(&query)?;
+        let rows = sqlx::query(&query).fetch_all(&self.db).await?;
 
-        let rows = stmt.query_map([], row_to_project)?;
-
-        let mut list = Vec::new();
-        for r in rows {
-            let mut p = r?;
-            Self::ensure_project_port(&conn, &mut p);
+        let mut list = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut p = pg_row_to_project(&row)?;
+            self.ensure_project_port(&mut p).await;
             list.push(p);
         }
         Ok(list)
     }
 
-    pub fn get(&self, id: i64) -> Result<Option<Project>, rusqlite::Error> {
-        let conn = self.db.lock().unwrap();
-        let query = format!("SELECT {} FROM projects WHERE id = ?", SELECT_PROJECT_FIELDS);
-        let mut stmt = conn.prepare_cached(&query)?;
+    pub async fn get(&self, id: i64) -> Result<Option<Project>, sqlx::Error> {
+        let query = format!("SELECT {} FROM projects WHERE id = $1", SELECT_PROJECT_FIELDS);
+        let row = sqlx::query(&query).bind(id).fetch_optional(&self.db).await?;
 
-        let res = stmt.query_row(params![id], row_to_project).optional()?;
-
-        if let Some(mut p) = res {
-            Self::ensure_project_port(&conn, &mut p);
-            return Ok(Some(p));
-        }
-
-        Ok(None)
-    }
-
-    pub fn get_by_slug(&self, slug: &str) -> Result<Option<Project>, rusqlite::Error> {
-        let conn = self.db.lock().unwrap();
-        let query = format!("SELECT {} FROM projects WHERE slug = ? LIMIT 1", SELECT_PROJECT_FIELDS);
-        let mut stmt = conn.prepare_cached(&query)?;
-
-        let res = stmt.query_row(params![slug], row_to_project).optional()?;
-        if let Some(mut p) = res {
-            Self::ensure_project_port(&conn, &mut p);
+        if let Some(r) = row {
+            let mut p = pg_row_to_project(&r)?;
+            self.ensure_project_port(&mut p).await;
             return Ok(Some(p));
         }
         Ok(None)
     }
 
-    pub fn create(&self, p: &Project) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_by_slug(&self, slug: &str) -> Result<Option<Project>, sqlx::Error> {
+        let query = format!("SELECT {} FROM projects WHERE slug = $1 LIMIT 1", SELECT_PROJECT_FIELDS);
+        let row = sqlx::query(&query).bind(slug).fetch_optional(&self.db).await?;
+
+        if let Some(r) = row {
+            let mut p = pg_row_to_project(&r)?;
+            self.ensure_project_port(&mut p).await;
+            return Ok(Some(p));
+        }
+        Ok(None)
+    }
+
+    pub async fn create(&self, p: &Project) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
         let ts = now();
         let domains_json = serde_json::to_string(&p.domains)?;
 
-        let conn = self.db.lock().unwrap();
         let final_port = if let Some(req) = p.port.filter(|&pt| pt > 0) {
-            crate::db::allocate_global_unique_port(&conn, Some(req), req, None, None).unwrap_or(req)
+            crate::db::allocate_global_unique_port(&self.db, Some(req), req, None, None).await.unwrap_or(req)
         } else {
             let default_start = if p.project_kind == "service" { 8000 } else { 3000 };
-            crate::db::allocate_global_unique_port(&conn, None, default_start, None, None).unwrap_or(default_start)
+            crate::db::allocate_global_unique_port(&self.db, None, default_start, None, None).await.unwrap_or(default_start)
         };
 
-        conn.execute(
+        let id: i64 = sqlx::query_scalar(
             "INSERT INTO projects(
                 name, slug, repo_url, branch, project_type, deploy_method, deploy_dir, port,
                 install_cmd, build_cmd, start_cmd, health_url, health_timeout_s,
                 stability_s, auto_deploy, webhook_secret,
                 app_status, domains, ssl_email,
                 created_at, updated_at, project_kind, access_mode, allowed_ips
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            params![
-                p.name,
-                p.slug,
-                p.repo_url,
-                p.branch,
-                p.project_type,
-                p.deploy_method,
-                p.deploy_dir,
-                final_port as u32,
-                p.install_cmd,
-                p.build_cmd,
-                p.start_cmd,
-                p.health_url,
-                p.health_timeout_s,
-                p.stability_s,
-                if p.auto_deploy { 1 } else { 0 },
-                p.webhook_secret,
-                "stopped",
-                domains_json,
-                p.ssl_email,
-                ts,
-                ts,
-                p.project_kind,
-                p.access_mode,
-                p.allowed_ips,
-            ],
-        )?;
+            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+            RETURNING id",
+        )
+        .bind(&p.name)
+        .bind(&p.slug)
+        .bind(&p.repo_url)
+        .bind(&p.branch)
+        .bind(&p.project_type)
+        .bind(&p.deploy_method)
+        .bind(&p.deploy_dir)
+        .bind(final_port as i32)
+        .bind(&p.install_cmd)
+        .bind(&p.build_cmd)
+        .bind(&p.start_cmd)
+        .bind(&p.health_url)
+        .bind(p.health_timeout_s as i32)
+        .bind(p.stability_s as i32)
+        .bind(p.auto_deploy)
+        .bind(&p.webhook_secret)
+        .bind("stopped")
+        .bind(domains_json)
+        .bind(&p.ssl_email)
+        .bind(ts)
+        .bind(ts)
+        .bind(&p.project_kind)
+        .bind(&p.access_mode)
+        .bind(&p.allowed_ips)
+        .fetch_one(&self.db)
+        .await?;
 
-        let id = conn.last_insert_rowid();
         Ok(id)
     }
 
-    pub fn update(&self, id: i64, p: &Project) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn update(&self, id: i64, p: &Project) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let ts = now();
         let domains_json = serde_json::to_string(&p.domains)?;
 
-        let conn = self.db.lock().unwrap();
         let final_port = if let Some(req) = p.port.filter(|&pt| pt > 0) {
-            crate::db::allocate_global_unique_port(&conn, Some(req), req, Some(id), None).unwrap_or(req)
+            crate::db::allocate_global_unique_port(&self.db, Some(req), req, Some(id), None).await.unwrap_or(req)
         } else {
             let default_start = if p.project_kind == "service" { 8000 } else { 3000 };
-            crate::db::allocate_global_unique_port(&conn, None, default_start, Some(id), None).unwrap_or(default_start)
+            crate::db::allocate_global_unique_port(&self.db, None, default_start, Some(id), None).await.unwrap_or(default_start)
         };
 
-        conn.execute(
+        sqlx::query(
             "UPDATE projects SET
-                name=?, repo_url=?, branch=?, project_type=?, deploy_method=?, deploy_dir=?, port=?,
-                install_cmd=?, build_cmd=?, start_cmd=?, health_url=?, health_timeout_s=?,
-                stability_s=?, auto_deploy=?,
-                domains=?, ssl_email=?, updated_at=?,
-                project_kind=?, access_mode=?, allowed_ips=?
-             WHERE id=?",
-            params![
-                p.name,
-                p.repo_url,
-                p.branch,
-                p.project_type,
-                p.deploy_method,
-                p.deploy_dir,
-                final_port as u32,
-                p.install_cmd,
-                p.build_cmd,
-                p.start_cmd,
-                p.health_url,
-                p.health_timeout_s,
-                p.stability_s,
-                if p.auto_deploy { 1 } else { 0 },
-                domains_json,
-                p.ssl_email,
-                ts,
-                p.project_kind,
-                p.access_mode,
-                p.allowed_ips,
-                id
-            ],
-        )?;
+                name=$1, repo_url=$2, branch=$3, project_type=$4, deploy_method=$5, deploy_dir=$6, port=$7,
+                install_cmd=$8, build_cmd=$9, start_cmd=$10, health_url=$11, health_timeout_s=$12,
+                stability_s=$13, auto_deploy=$14,
+                domains=$15, ssl_email=$16, updated_at=$17,
+                project_kind=$18, access_mode=$19, allowed_ips=$20
+             WHERE id=$21",
+        )
+        .bind(&p.name)
+        .bind(&p.repo_url)
+        .bind(&p.branch)
+        .bind(&p.project_type)
+        .bind(&p.deploy_method)
+        .bind(&p.deploy_dir)
+        .bind(final_port as i32)
+        .bind(&p.install_cmd)
+        .bind(&p.build_cmd)
+        .bind(&p.start_cmd)
+        .bind(&p.health_url)
+        .bind(p.health_timeout_s as i32)
+        .bind(p.stability_s as i32)
+        .bind(p.auto_deploy)
+        .bind(domains_json)
+        .bind(&p.ssl_email)
+        .bind(ts)
+        .bind(&p.project_kind)
+        .bind(&p.access_mode)
+        .bind(&p.allowed_ips)
+        .bind(id)
+        .execute(&self.db)
+        .await?;
 
         Ok(())
     }
 
-    pub fn delete(&self, id: i64) -> Result<(), rusqlite::Error> {
-        let mut conn = self.db.lock().unwrap();
-        let _ = conn.execute_batch("PRAGMA foreign_keys = OFF;");
-        let res = (|| -> Result<(), rusqlite::Error> {
-            let tx = conn.transaction()?;
-            tx.execute("UPDATE projects SET current_release_id = NULL WHERE id = ?", params![id]).ok();
-            tx.execute("DELETE FROM logs WHERE project_id = ?", params![id]).ok();
-            tx.execute("DELETE FROM backups WHERE project_id = ?", params![id]).ok();
-            tx.execute("DELETE FROM deployments WHERE project_id = ?", params![id]).ok();
-            tx.execute("DELETE FROM releases WHERE project_id = ?", params![id]).ok();
-            tx.execute("DELETE FROM project_env WHERE project_id = ?", params![id]).ok();
-            tx.execute("DELETE FROM project_keys WHERE project_id = ?", params![id]).ok();
-            tx.execute("DELETE FROM audit WHERE project_id = ? AND action != 'website.delete'", params![id]).ok();
-            tx.execute("DELETE FROM projects WHERE id = ?", params![id])?;
-            tx.commit()?;
-            Ok(())
-        })();
-        let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
-        crate::db::purge_orphaned_project_data(&conn);
-        res
+    pub async fn delete(&self, id: i64) -> Result<(), sqlx::Error> {
+        let mut tx = self.db.begin().await?;
+        sqlx::query("UPDATE projects SET current_release_id = NULL WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("UPDATE deployments SET release_id = NULL, from_release_id = NULL WHERE project_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM logs WHERE project_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM backups WHERE project_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM deployments WHERE project_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM releases WHERE project_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM project_env WHERE project_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM project_keys WHERE project_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM audit WHERE project_id = $1 AND action != 'website.delete'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        crate::db::purge_orphaned_project_data(&self.db).await;
+        Ok(())
     }
 
-    pub fn get_env_vars(&self, project_id: i64) -> Result<Vec<EnvVarView>, rusqlite::Error> {
-        let conn = self.db.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT key, value_enc, is_secret FROM project_env WHERE project_id = ? ORDER BY key ASC",
-        )?;
+    pub async fn get_env_vars(&self, project_id: i64) -> Result<Vec<EnvVarView>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT key, value_enc, is_secret FROM project_env WHERE project_id = $1 ORDER BY key ASC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.db)
+        .await?;
 
-        let rows = stmt.query_map(params![project_id], |r| {
-            let key: String = r.get(0)?;
-            let is_secret: bool = r.get::<_, i64>(2)? != 0;
-            let val_enc: String = r.get(1)?;
-            let decrypted = self.vault.decrypt(&val_enc).unwrap_or_else(|_| "".to_string());
+        let mut res = Vec::with_capacity(rows.len());
+        for r in rows {
+            let key: String = r.try_get(0)?;
+            let val_enc: String = r.try_get(1)?;
+            let is_secret: bool = r.try_get(2)?;
+            let decrypted = self.vault.decrypt(&val_enc).unwrap_or_default();
             let value = if is_secret {
                 "********".to_string()
             } else {
                 decrypted.clone()
             };
-            Ok(EnvVarView {
+            res.push(EnvVarView {
                 key,
                 value,
                 real_value: decrypted,
                 is_secret,
-            })
-        })?;
-
-        let mut res = Vec::new();
-        for r in rows {
-            res.push(r?);
+            });
         }
         Ok(res)
     }
 
-    pub fn set_env_var(
+    pub async fn set_env_var(
         &self,
         project_id: i64,
         key: &str,
         value: &str,
         is_secret: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.set_env_var_with_rename(project_id, key, value, is_secret, None)
+        self.set_env_var_with_rename(project_id, key, value, is_secret, None).await
     }
 
-    pub fn set_env_var_with_rename(
+    pub async fn set_env_var_with_rename(
         &self,
         project_id: i64,
         key: &str,
@@ -247,70 +275,74 @@ impl Projects {
             return Err("Variable key cannot be empty".into());
         }
         let enc = self.vault.encrypt(value)?;
-        let mut conn = self.db.lock().unwrap();
-        let tx = conn.transaction()?;
+        let mut tx = self.db.begin().await?;
         if let Some(prev) = previous_key.map(|s| s.trim()).filter(|s| !s.is_empty()) {
             if prev != clean_key {
-                tx.execute(
-                    "DELETE FROM project_env WHERE project_id = ? AND key = ?",
-                    params![project_id, prev],
-                )?;
+                sqlx::query("DELETE FROM project_env WHERE project_id = $1 AND key = $2")
+                    .bind(project_id)
+                    .bind(prev)
+                    .execute(&mut *tx)
+                    .await?;
             }
         }
-        tx.execute(
-            "INSERT INTO project_env(project_id, key, value_enc, is_secret) VALUES(?, ?, ?, ?)
-             ON CONFLICT(project_id, key) DO UPDATE SET value_enc=excluded.value_enc, is_secret=excluded.is_secret",
-            params![project_id, clean_key, enc, if is_secret { 1 } else { 0 }],
-        )?;
-        tx.commit()?;
+        sqlx::query(
+            "INSERT INTO project_env(project_id, key, value_enc, is_secret) VALUES($1, $2, $3, $4)
+             ON CONFLICT(project_id, key) DO UPDATE SET value_enc=EXCLUDED.value_enc, is_secret=EXCLUDED.is_secret",
+        )
+        .bind(project_id)
+        .bind(clean_key)
+        .bind(enc)
+        .bind(is_secret)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
-    pub fn delete_env_var(&self, project_id: i64, key: &str) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            "DELETE FROM project_env WHERE project_id = ? AND key = ?",
-            params![project_id, key],
-        )?;
+    pub async fn delete_env_var(&self, project_id: i64, key: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM project_env WHERE project_id = $1 AND key = $2")
+            .bind(project_id)
+            .bind(key)
+            .execute(&self.db)
+            .await?;
         Ok(())
     }
 
-    pub fn reveal_env_var(&self, project_id: i64, key: &str) -> Option<String> {
-        let conn = self.db.lock().unwrap();
-        let enc: Result<String, _> = conn.query_row(
-            "SELECT value_enc FROM project_env WHERE project_id = ? AND key = ?",
-            params![project_id, key],
-            |r| r.get(0),
-        );
+    pub async fn reveal_env_var(&self, project_id: i64, key: &str) -> Option<String> {
+        let val_enc: String = sqlx::query_scalar(
+            "SELECT value_enc FROM project_env WHERE project_id = $1 AND key = $2",
+        )
+        .bind(project_id)
+        .bind(key)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten()?;
 
-        if let Ok(val_enc) = enc {
-            self.vault.decrypt(&val_enc).ok()
-        } else {
-            None
-        }
+        self.vault.decrypt(&val_enc).ok()
     }
 
-    pub fn get_env_map(&self, project_id: i64) -> std::collections::HashMap<String, String> {
+    pub async fn get_env_map(&self, project_id: i64) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
-        let conn = self.db.lock().unwrap();
-        let mut stmt = match conn.prepare("SELECT key, value_enc FROM project_env WHERE project_id = ?") {
-            Ok(s) => s,
-            Err(_) => return map,
+        let Ok(rows) = sqlx::query("SELECT key, value_enc FROM project_env WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_all(&self.db)
+            .await
+        else {
+            return map;
         };
 
-        if let Ok(rows) = stmt.query_map(params![project_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        }) {
-            for item in rows.flatten() {
-                if let Ok(dec) = self.vault.decrypt(&item.1) {
-                    map.insert(item.0, dec);
+        for row in rows {
+            if let (Ok(k), Ok(enc)) = (row.try_get::<String, _>(0), row.try_get::<String, _>(1)) {
+                if let Ok(dec) = self.vault.decrypt(&enc) {
+                    map.insert(k, dec);
                 }
             }
         }
         map
     }
 
-    pub fn set_bulk_env(
+    pub async fn set_bulk_env(
         &self,
         project_id: i64,
         raw_or_vars: &str,
@@ -322,39 +354,46 @@ impl Projects {
             return Ok(0);
         }
 
-        let mut conn = self.db.lock().unwrap();
-        let tx = conn.transaction()?;
-
+        let mut tx = self.db.begin().await?;
         if replace_all {
-            tx.execute("DELETE FROM project_env WHERE project_id = ?", params![project_id])?;
+            sqlx::query("DELETE FROM project_env WHERE project_id = $1")
+                .bind(project_id)
+                .execute(&mut *tx)
+                .await?;
         }
 
         let mut count = 0;
         for (k, v) in &pairs {
             let enc = self.vault.encrypt(v)?;
-            tx.execute(
-                "INSERT INTO project_env(project_id, key, value_enc, is_secret) VALUES(?, ?, ?, ?)
-                 ON CONFLICT(project_id, key) DO UPDATE SET value_enc=excluded.value_enc, is_secret=excluded.is_secret",
-                params![project_id, k, enc, if is_secret { 1 } else { 0 }],
-            )?;
+            sqlx::query(
+                "INSERT INTO project_env(project_id, key, value_enc, is_secret) VALUES($1, $2, $3, $4)
+                 ON CONFLICT(project_id, key) DO UPDATE SET value_enc=EXCLUDED.value_enc, is_secret=EXCLUDED.is_secret",
+            )
+            .bind(project_id)
+            .bind(k)
+            .bind(enc)
+            .bind(is_secret)
+            .execute(&mut *tx)
+            .await?;
             count += 1;
         }
 
-        tx.commit()?;
+        tx.commit().await?;
         Ok(count)
     }
 
-    pub fn set_batch_env_items(
+    pub async fn set_batch_env_items(
         &self,
         project_id: i64,
         items: &[EnvVarInput],
         replace_all: bool,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.db.lock().unwrap();
-        let tx = conn.transaction()?;
-
+        let mut tx = self.db.begin().await?;
         if replace_all {
-            tx.execute("DELETE FROM project_env WHERE project_id = ?", params![project_id])?;
+            sqlx::query("DELETE FROM project_env WHERE project_id = $1")
+                .bind(project_id)
+                .execute(&mut *tx)
+                .await?;
         }
 
         let mut count = 0;
@@ -364,32 +403,36 @@ impl Projects {
                 continue;
             }
             let enc = self.vault.encrypt(&item.value)?;
-            tx.execute(
-                "INSERT INTO project_env(project_id, key, value_enc, is_secret) VALUES(?, ?, ?, ?)
-                 ON CONFLICT(project_id, key) DO UPDATE SET value_enc=excluded.value_enc, is_secret=excluded.is_secret",
-                params![project_id, k, enc, if item.is_secret { 1 } else { 0 }],
-            )?;
+            sqlx::query(
+                "INSERT INTO project_env(project_id, key, value_enc, is_secret) VALUES($1, $2, $3, $4)
+                 ON CONFLICT(project_id, key) DO UPDATE SET value_enc=EXCLUDED.value_enc, is_secret=EXCLUDED.is_secret",
+            )
+            .bind(project_id)
+            .bind(k)
+            .bind(enc)
+            .bind(item.is_secret)
+            .execute(&mut *tx)
+            .await?;
             count += 1;
         }
 
-        tx.commit()?;
+        tx.commit().await?;
         Ok(count)
     }
 
-    pub fn export_raw_env(&self, project_id: i64) -> Result<String, rusqlite::Error> {
-        let conn = self.db.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT key, value_enc, is_secret FROM project_env WHERE project_id = ? ORDER BY key ASC")?;
-        let rows = stmt.query_map(params![project_id], |r| {
-            let key: String = r.get(0)?;
-            let val_enc: String = r.get(1)?;
-            let is_secret: bool = r.get::<_, i64>(2)? != 0;
-            let val = self.vault.decrypt(&val_enc).unwrap_or_default();
-            Ok((key, val, is_secret))
-        })?;
+    pub async fn export_raw_env(&self, project_id: i64) -> Result<String, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT key, value_enc FROM project_env WHERE project_id = $1 ORDER BY key ASC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.db)
+        .await?;
 
         let mut out = String::new();
         for r in rows {
-            let (k, v, _) = r?;
+            let k: String = r.try_get(0)?;
+            let enc: String = r.try_get(1)?;
+            let v = self.vault.decrypt(&enc).unwrap_or_default();
             if v.contains(' ') || v.contains('\n') || v.contains('"') {
                 out.push_str(&format!("{}=\"{}\"\n", k, v.replace('"', "\\\"")));
             } else {
@@ -450,11 +493,11 @@ mod tests {
         assert_eq!(proj_service.start_cmd, "node index.js");
     }
 
-    #[test]
-    fn test_project_db_roundtrip() {
+    #[tokio::test]
+    async fn test_project_db_roundtrip() {
         let temp_dir = std::env::temp_dir().join(format!("webdep-test-{}", now()));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        let pool = crate::db::open_db(&temp_dir).unwrap();
+        let pool = crate::pg_control::test_db::isolated_pool().await;
         let vault = Arc::new(crate::vault::Vault::new(&temp_dir).unwrap());
         let projects = Projects::new(pool, vault);
 
@@ -468,13 +511,13 @@ mod tests {
         }"#;
         let mut proj: Project = serde_json::from_str(json_service).unwrap();
         proj.deploy_dir = temp_dir.to_string_lossy().to_string();
-        let id = projects.create(&proj).unwrap();
-        let fetched = projects.get(id).unwrap().unwrap();
+        let id = projects.create(&proj).await.unwrap();
+        let fetched = projects.get(id).await.unwrap().unwrap();
         assert_eq!(fetched.project_kind, "service");
         assert_eq!(fetched.name, "Discord Music Bot");
         assert!(fetched.port.is_some() && fetched.port.unwrap() >= 8000);
 
-        let list = projects.list().unwrap();
+        let list = projects.list().await.unwrap();
         assert!(list.iter().any(|p| p.id == id && p.project_kind == "service"));
 
         std::fs::remove_dir_all(&temp_dir).ok();

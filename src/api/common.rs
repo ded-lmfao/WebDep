@@ -122,9 +122,10 @@ pub(crate) async fn security_middleware(
             if !is_public_auth {
                 let sid_opt = extract_session_id(req.headers());
                 let touch = should_touch_session_activity(path, req.method());
-                let session_pair = sid_opt
-                    .as_deref()
-                    .and_then(|sid| state.auth.get_session_with_touch(sid, touch));
+                let session_pair = match sid_opt.as_deref() {
+                    Some(sid) => state.auth.get_session_with_touch(sid, touch).await,
+                    None => None,
+                };
 
                 let Some((session, _user)) = session_pair else {
                     let mut res = (
@@ -242,21 +243,23 @@ pub(crate) fn extract_session_id(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-pub(crate) fn current_user(state: &AppState, headers: &HeaderMap) -> Option<User> {
+pub(crate) async fn current_user(state: &AppState, headers: &HeaderMap) -> Option<User> {
     let sid = extract_session_id(headers)?;
-    state.auth.get_session(&sid).map(|(_, u)| u)
+    state.auth.get_session(&sid).await.map(|(_, u)| u)
 }
 
-pub(crate) fn require_current_user(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
-    current_user(state, headers).ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))
+pub(crate) async fn require_current_user(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
+    current_user(state, headers)
+        .await
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))
 }
 
-pub(crate) fn verify_project_access(
+pub(crate) async fn verify_project_access(
     state: &AppState,
     headers: &HeaderMap,
     project_id: i64,
 ) -> Result<User, (StatusCode, String)> {
-    let u = require_current_user(state, headers)?;
+    let u = require_current_user(state, headers).await?;
     if !u.can_access_project(project_id) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -266,8 +269,8 @@ pub(crate) fn verify_project_access(
     Ok(u)
 }
 
-pub(crate) fn verify_main_admin(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
-    let u = require_current_user(state, headers)?;
+pub(crate) async fn verify_main_admin(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
+    let u = require_current_user(state, headers).await?;
     if !u.is_main_admin {
         return Err((
             StatusCode::FORBIDDEN,
@@ -277,13 +280,14 @@ pub(crate) fn verify_main_admin(state: &AppState, headers: &HeaderMap) -> Result
     Ok(u)
 }
 
-pub(crate) fn verify_power(
+pub(crate) async fn verify_power(
     state: &AppState,
     headers: &HeaderMap,
     power: &str,
     project_id: Option<i64>,
 ) -> Result<User, (StatusCode, String)> {
     let u = current_user(state, headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized session".to_string()))?;
     if let Some(pid) = project_id {
         if !u.can_access_project(pid) {
@@ -302,13 +306,14 @@ pub(crate) fn verify_power(
     Ok(u)
 }
 
-pub(crate) fn verify_any_power(
+pub(crate) async fn verify_any_power(
     state: &AppState,
     headers: &HeaderMap,
     powers: &[&str],
     project_id: Option<i64>,
 ) -> Result<User, (StatusCode, String)> {
     let u = current_user(state, headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized session".to_string()))?;
     if let Some(pid) = project_id {
         if !u.can_access_project(pid) {
@@ -327,35 +332,36 @@ pub(crate) fn verify_any_power(
     Ok(u)
 }
 
-pub(crate) fn get_authorized_project(
+pub(crate) async fn get_authorized_project(
     state: &AppState,
     headers: &HeaderMap,
     power: &str,
     project_id: i64,
 ) -> Result<(User, crate::projects::Project), (StatusCode, String)> {
-    get_authorized_project_any(state, headers, &[power], project_id)
+    get_authorized_project_any(state, headers, &[power], project_id).await
 }
 
-pub(crate) fn get_authorized_project_any(
+pub(crate) async fn get_authorized_project_any(
     state: &AppState,
     headers: &HeaderMap,
     powers: &[&str],
     project_id: i64,
 ) -> Result<(User, crate::projects::Project), (StatusCode, String)> {
-    let actor = verify_any_power(state, headers, powers, Some(project_id))?;
+    let actor = verify_any_power(state, headers, powers, Some(project_id)).await?;
     let p = state
         .projects
         .get(project_id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
     Ok((actor, p))
 }
 
-pub(crate) fn log_audit(state: &AppState, actor: &str, action: &str, target: Option<&str>, detail: Option<&str>) {
-    log_audit_project(state, None, actor, action, target, detail);
+pub(crate) async fn log_audit(state: &AppState, actor: &str, action: &str, target: Option<&str>, detail: Option<&str>) {
+    log_audit_project(state, None, actor, action, target, detail).await;
 }
 
-pub(crate) fn create_authenticated_response(
+pub(crate) async fn create_authenticated_response(
     state: &AppState,
     headers: &HeaderMap,
     user: User,
@@ -363,10 +369,11 @@ pub(crate) fn create_authenticated_response(
     let session = state
         .auth
         .create_session(user.id)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create session".to_string()))?;
 
-    let active_sessions = state.auth.count_active_sessions(user.id);
-    let passkey_count = state.auth.count_user_passkeys(user.id);
+    let active_sessions = state.auth.count_active_sessions(user.id).await;
+    let passkey_count = state.auth.count_user_passkeys(user.id).await;
     let secure_attr = if is_https_request(headers, state.auth.force_secure_cookies) {
         "; Secure"
     } else {
@@ -501,17 +508,18 @@ where
     json_bytes_response(bytes, false, "MISS")
 }
 
-pub(crate) fn fetch_project(
+pub(crate) async fn fetch_project(
     projects: &crate::projects::Projects,
     id: i64,
 ) -> Result<crate::projects::Project, (StatusCode, String)> {
     projects
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Project not found".to_string()))
 }
 
-pub(crate) fn verify_current_user_password(
+pub(crate) async fn verify_current_user_password(
     state: &AppState,
     user: &User,
     password: &str,
@@ -519,6 +527,7 @@ pub(crate) fn verify_current_user_password(
     let (_, current_hash) = state
         .auth
         .get_user_by_username(&user.username)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found".to_string()))?;
 
     if !verify_password(password, &current_hash) {
@@ -527,7 +536,7 @@ pub(crate) fn verify_current_user_password(
     Ok(())
 }
 
-pub(crate) fn apply_2fa_state_change(
+pub(crate) async fn apply_2fa_state_change(
     state: &AppState,
     username: &str,
     audit_desc: &str,
@@ -540,11 +549,12 @@ pub(crate) fn apply_2fa_state_change(
         "user.update",
         Some(username),
         Some(audit_desc),
-    );
+    )
+    .await;
 }
 
-pub(crate) fn insert_success_release(
-    conn: &rusqlite::Connection,
+pub(crate) async fn insert_success_release(
+    db: &crate::db::DbPool,
     project_id: i64,
     sha: &str,
     short_sha: &str,
@@ -552,13 +562,22 @@ pub(crate) fn insert_success_release(
     author: &str,
     dir: &str,
     ts: i64,
-) -> rusqlite::Result<i64> {
-    conn.execute(
-        "INSERT INTO releases(project_id, sha, short_sha, message, author, committed_at, dir, status, build_status, health_status, created_at, deployed_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, 'succeeded', 'success', 'ok', ?, ?)",
-        rusqlite::params![project_id, sha, short_sha, message, author, ts, dir, ts, ts],
-    )?;
-    Ok(conn.last_insert_rowid())
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO releases(project_id, sha, short_sha, message, author, committed_at, dir, status, build_status, health_status, created_at, deployed_at) \
+         VALUES($1, $2, $3, $4, $5, $6, $7, 'succeeded', 'success', 'ok', $8, $9) RETURNING id",
+    )
+    .bind(project_id)
+    .bind(sha)
+    .bind(short_sha)
+    .bind(message)
+    .bind(author)
+    .bind(ts)
+    .bind(dir)
+    .bind(ts)
+    .bind(ts)
+    .fetch_one(db)
+    .await
 }
 
 pub(crate) fn trigger_background_deploy(deployer: Arc<crate::deployer::Deployer>, project_id: i64, dep_id: i64) {
@@ -567,7 +586,7 @@ pub(crate) fn trigger_background_deploy(deployer: Arc<crate::deployer::Deployer>
     });
 }
 
-pub(crate) fn log_audit_project(
+pub(crate) async fn log_audit_project(
     state: &AppState,
     project_id: Option<i64>,
     actor: &str,
@@ -575,12 +594,17 @@ pub(crate) fn log_audit_project(
     target: Option<&str>,
     detail: Option<&str>,
 ) {
-    let conn = state.db.lock().unwrap();
-    conn.execute(
-        "INSERT INTO audit(project_id, ts, actor, action, target, detail, ip) VALUES(?, ?, ?, ?, ?, ?, '127.0.0.1')",
-        rusqlite::params![project_id, now(), actor, action, target, detail],
+    let _ = sqlx::query(
+        "INSERT INTO audit(project_id, ts, actor, action, target, detail, ip) VALUES($1, $2, $3, $4, $5, $6, '127.0.0.1')",
     )
-    .ok();
+    .bind(project_id)
+    .bind(now())
+    .bind(actor)
+    .bind(action)
+    .bind(target)
+    .bind(detail)
+    .execute(&state.db)
+    .await;
 }
 
 

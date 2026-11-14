@@ -328,7 +328,7 @@ impl Runtime {
         self.stop_maintenance_server(p.id);
         tokio::time::sleep(Duration::from_millis(40)).await;
 
-        let container = self.ensure_container(p);
+        let container = self.ensure_container(p).await;
         let mut pids_to_kill: HashSet<u32> = HashSet::new();
 
         // 1. In-memory Child handle: record PID, but DO NOT call start_kill() yet!
@@ -343,20 +343,22 @@ impl Runtime {
             }
         }
 
-        // 2. SQLite recorded PID
+        // 2. Database recorded PID
         if let Some(old_pid) = p.app_pid {
             if old_pid > 0 {
                 pids_to_kill.insert(old_pid);
             }
         }
-        if let Ok(conn) = self.db.lock() {
-            if let Ok(Some(db_pid)) = conn.query_row(
-                "SELECT app_pid FROM projects WHERE id = ?",
-                rusqlite::params![p.id],
-                |r| r.get::<_, Option<u32>>(0),
-            ) {
-                if db_pid > 0 {
-                    pids_to_kill.insert(db_pid);
+        if let Ok(Some(Some(db_pid))) = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT app_pid FROM projects WHERE id = $1",
+        )
+        .bind(p.id)
+        .fetch_optional(&self.db)
+        .await
+        {
+            if let Ok(pid) = u32::try_from(db_pid) {
+                if pid > 0 {
+                    pids_to_kill.insert(pid);
                 }
             }
         }

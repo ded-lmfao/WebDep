@@ -248,7 +248,8 @@ pub(crate) async fn write_file_in_root(
         audit_action,
         Some(audit_target),
         Some(&format!("Saved file '{}'", payload.path)),
-    );
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -305,7 +306,8 @@ pub(crate) async fn delete_in_root(
         audit_action,
         Some(audit_target),
         Some(&format!("Deleted '{}'", rel_path)),
-    );
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -359,7 +361,8 @@ pub(crate) async fn upload_in_root(
         audit_action,
         Some(audit_target),
         Some(&format!("Uploaded {} file(s) into '{}'", uploaded.len(), rel_path)),
-    );
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true, "uploaded": uploaded })))
 }
 
@@ -428,7 +431,8 @@ pub(crate) async fn rename_in_root(
         audit_action,
         Some(audit_target),
         Some(&format!("Renamed '{}' to '{}'", payload.old_path, payload.new_path)),
-    );
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -438,7 +442,7 @@ pub(crate) async fn files_list_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (_actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id)?;
+    let (_actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id).await?;
     let root = service_root(&p)?;
     list_entries_in_root(&root, &q.path).await
 }
@@ -449,7 +453,7 @@ pub(crate) async fn files_read_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id)?;
+    let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id).await?;
     let root = service_root(&p)?;
     read_file_in_root(&actor, &root, &q.path).await
 }
@@ -460,7 +464,7 @@ pub(crate) async fn files_write_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileWritePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
     let root = service_root(&p)?;
     write_file_in_root(&state, &actor, Some(id), &p.name, "file.write", &root, payload).await
 }
@@ -471,7 +475,7 @@ pub(crate) async fn files_mkdir_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileMkdirPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
     let root = service_root(&p)?;
     mkdir_in_root(&actor, &root, payload).await
 }
@@ -482,7 +486,7 @@ pub(crate) async fn files_delete_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
     let root = service_root(&p)?;
     delete_in_root(&state, &actor, Some(id), &p.name, "file.delete", &root, &q.path).await
 }
@@ -494,7 +498,7 @@ pub(crate) async fn files_upload_handler(
     Query(q): Query<FilesQuery>,
     multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
     let root = service_root(&p)?;
     upload_in_root(&state, &actor, Some(id), &p.name, "file.upload", &root, &q.path, multipart).await
 }
@@ -505,7 +509,7 @@ pub(crate) async fn files_download_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Response, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id)?;
+    let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id).await?;
     let root = service_root(&p)?;
     download_in_root(&actor, &root, &q.path).await
 }
@@ -516,7 +520,7 @@ pub(crate) async fn files_rename_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileRenamePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
     let root = service_root(&p)?;
     rename_in_root(&state, &actor, Some(id), &p.name, "file.rename", &root, payload).await
 }

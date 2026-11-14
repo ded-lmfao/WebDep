@@ -26,8 +26,8 @@ pub(crate) async fn project_commits_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Response, (StatusCode, String)> {
-    let _actor = verify_project_access(&state, &headers, id)?;
-    let p = fetch_project(&state.projects, id)?;
+    let _actor = verify_project_access(&state, &headers, id).await?;
+    let p = fetch_project(&state.projects, id).await?;
 
     let cache_key = format!(
         "commits:p{}:{}:{}",
@@ -52,7 +52,7 @@ pub(crate) async fn project_commits_handler(
     .await
     .unwrap_or_default();
 
-    let releases = state.deployer.list_releases(id);
+    let releases = state.deployer.list_releases(id).await;
 
     let views: Vec<CommitView> = raw_commits
         .into_iter()
@@ -91,8 +91,8 @@ pub(crate) async fn project_check_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<CheckGitResponse>, (StatusCode, String)> {
-    let _actor = verify_project_access(&state, &headers, id)?;
-    let p = fetch_project(&state.projects, id)?;
+    let _actor = verify_project_access(&state, &headers, id).await?;
+    let p = fetch_project(&state.projects, id).await?;
 
     let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
     let repo_url = p.repo_url.clone();
@@ -132,8 +132,8 @@ pub(crate) async fn project_fetch_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<FetchGitResponse>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "deploy", Some(id))?.username;
-    let p = fetch_project(&state.projects, id)?;
+    let actor = verify_power(&state, &headers, "deploy", Some(id)).await?.username;
+    let p = fetch_project(&state.projects, id).await?;
 
     let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
     let repo_url = p.repo_url.clone();
@@ -153,14 +153,11 @@ pub(crate) async fn project_fetch_handler(
 
     let needs_deploy = !sha.is_empty() && p.deployed_sha.as_deref() != Some(&sha);
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "UPDATE projects SET last_poll_at = ? WHERE id = ?",
-            rusqlite::params![now(), p.id],
-        )
-        .ok();
-    }
+    let _ = sqlx::query("UPDATE projects SET last_poll_at = $1 WHERE id = $2")
+        .bind(now())
+        .bind(p.id)
+        .execute(&state.db)
+        .await;
     state.cache.invalidate_project(p.id);
     state.cache.invalidate_all();
 
@@ -171,7 +168,8 @@ pub(crate) async fn project_fetch_handler(
         "git.fetch",
         Some(&p.name),
         Some(&format!("Fetched latest commits on branch '{}' -> {}", p.branch, &sha[..7.min(sha.len())])),
-    );
+    )
+    .await;
 
     state.logs.add(
         Some(p.id),
@@ -208,8 +206,9 @@ pub(crate) async fn detect_project_handler(
         &headers,
         &["deploy", "projects_manage", "services_manage"],
         Some(id),
-    )?;
-    let p = fetch_project(&state.projects, id)?;
+    )
+    .await?;
+    let p = fetch_project(&state.projects, id).await?;
 
     let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
     if !repo_dir.exists() {
@@ -257,20 +256,18 @@ pub(crate) async fn project_deploy_key_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<DeployKeyResponse>, (StatusCode, String)> {
-    let _actor = verify_power(&state, &headers, "deploy", Some(id))?;
-    // Check SQLite project_keys table first
+    let _actor = verify_power(&state, &headers, "deploy", Some(id)).await?;
+    if let Ok(Some(pub_key)) = sqlx::query_scalar::<_, String>(
+        "SELECT public_key FROM project_keys WHERE project_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
     {
-        let conn = state.db.lock().unwrap();
-        if let Ok(pub_key) = conn.query_row(
-            "SELECT public_key FROM project_keys WHERE project_id = ?",
-            rusqlite::params![id],
-            |r| r.get::<_, String>(0),
-        ) {
-            if !pub_key.trim().is_empty() {
-                return Ok(Json(DeployKeyResponse {
-                    public_key: pub_key.trim().to_string(),
-                }));
-            }
+        if !pub_key.trim().is_empty() {
+            return Ok(Json(DeployKeyResponse {
+                public_key: pub_key.trim().to_string(),
+            }));
         }
     }
 
@@ -300,14 +297,16 @@ pub(crate) async fn project_deploy_key_handler(
         .unwrap_or_else(|_| format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWebDepGeneratedKeyProject{} webdep", id));
     let private_key = tokio::fs::read_to_string(&key_path).await.unwrap_or_default();
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO project_keys(project_id, public_key, private_key, created_at) VALUES(?, ?, ?, ?)",
-            rusqlite::params![id, public_key.trim(), private_key, now()],
-        )
-        .ok();
-    }
+    let _ = sqlx::query(
+        "INSERT INTO project_keys(project_id, public_key, private_key, created_at) VALUES($1, $2, $3, $4) \
+         ON CONFLICT(project_id) DO UPDATE SET public_key = excluded.public_key, private_key = excluded.private_key, created_at = excluded.created_at",
+    )
+    .bind(id)
+    .bind(public_key.trim())
+    .bind(private_key)
+    .bind(now())
+    .execute(&state.db)
+    .await;
 
     Ok(Json(DeployKeyResponse {
         public_key: public_key.trim().to_string(),
@@ -325,19 +324,18 @@ pub(crate) async fn rotate_webhook_secret_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "deploy", Some(id))?;
+    let actor = verify_power(&state, &headers, "deploy", Some(id)).await?;
     use rand::RngCore;
     let mut bytes = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut bytes);
     let new_secret = hex::encode(bytes);
 
-    let conn = state.db.lock().unwrap();
-    conn.execute(
-        "UPDATE projects SET webhook_secret = ? WHERE id = ?",
-        rusqlite::params![new_secret, id],
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    drop(conn);
+    sqlx::query("UPDATE projects SET webhook_secret = $1 WHERE id = $2")
+        .bind(&new_secret)
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     log_audit_project(
         &state,
@@ -346,7 +344,8 @@ pub(crate) async fn rotate_webhook_secret_handler(
         "git.webhook_rotate",
         None,
         Some("Rotated GitHub webhook HMAC secret"),
-    );
+    )
+    .await;
 
     Ok(Json(RotateSecretResponse {
         webhook_secret: new_secret,

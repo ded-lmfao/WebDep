@@ -209,34 +209,36 @@ pub(crate) fn compute_database_disk_formatted(
 }
 
 fn row_to_overview_deployment(
-    r: &rusqlite::Row<'_>,
+    r: &sqlx::postgres::PgRow,
     project_name: &str,
-) -> rusqlite::Result<crate::deployer::Deployment> {
+) -> Result<crate::deployer::Deployment, sqlx::Error> {
+    use sqlx::Row;
     Ok(crate::deployer::Deployment {
-        id: r.get(0)?,
-        project_id: r.get(1)?,
+        id: r.try_get(0)?,
+        project_id: r.try_get(1)?,
         project_name: Some(project_name.to_string()),
-        release_id: r.get(2)?,
-        from_release_id: r.get(3)?,
-        kind: r.get(4)?,
-        status: r.get(5)?,
-        stage: r.get(6)?,
-        sha: r.get(7)?,
-        trigger: r.get(8)?,
-        actor: r.get(9)?,
-        error: r.get(10)?,
-        started_at: r.get(11)?,
-        finished_at: r.get(12)?,
+        release_id: r.try_get(2)?,
+        from_release_id: r.try_get(3)?,
+        kind: r.try_get(4)?,
+        status: r.try_get(5)?,
+        stage: r.try_get(6)?,
+        sha: r.try_get(7)?,
+        trigger: r.try_get(8)?,
+        actor: r.try_get(9)?,
+        error: r.try_get(10)?,
+        started_at: r.try_get(11)?,
+        finished_at: r.try_get(12)?,
     })
 }
 
-fn load_overview_deployments(
-    conn: &rusqlite::Connection,
+async fn load_overview_deployments(
+    pool: &crate::db::DbPool,
     projects: &[Project],
 ) -> (
     std::collections::HashMap<i64, crate::deployer::Deployment>,
     std::collections::HashMap<i64, crate::deployer::Deployment>,
 ) {
+    use sqlx::Row;
     let mut last_success_map = std::collections::HashMap::with_capacity(projects.len());
     let mut active_map = std::collections::HashMap::new();
     if projects.is_empty() {
@@ -246,43 +248,45 @@ fn load_overview_deployments(
     let proj_names: std::collections::HashMap<i64, &str> =
         projects.iter().map(|p| (p.id, p.name.as_str())).collect();
 
-    if let Ok(mut active_stmt) = conn.prepare_cached(
+    if let Ok(rows) = sqlx::query(
         "SELECT id, project_id, release_id, from_release_id, kind, status, stage, sha, trigger, actor, error, started_at, finished_at \
          FROM deployments WHERE status IN ('running', 'pending')",
-    ) {
-        if let Ok(rows) = active_stmt.query_map([], |r| {
-            let pid: i64 = r.get(1)?;
-            let pname = proj_names.get(&pid).copied().unwrap_or("");
-            row_to_overview_deployment(r, pname)
-        }) {
-            for dep in rows.flatten() {
-                if proj_names.contains_key(&dep.project_id) {
-                    active_map
-                        .entry(dep.project_id)
-                        .and_modify(|existing| {
-                            if dep.id > existing.id {
-                                *existing = dep.clone();
-                            }
-                        })
-                        .or_insert(dep);
+    )
+    .fetch_all(pool)
+    .await
+    {
+        for r in &rows {
+            if let Ok(pid) = r.try_get::<i64, _>(1) {
+                if let Some(&pname) = proj_names.get(&pid) {
+                    if let Ok(dep) = row_to_overview_deployment(r, pname) {
+                        active_map
+                            .entry(dep.project_id)
+                            .and_modify(|existing: &mut crate::deployer::Deployment| {
+                                if dep.id > existing.id {
+                                    *existing = dep.clone();
+                                }
+                            })
+                            .or_insert(dep);
+                    }
                 }
             }
         }
     }
 
-    if let Ok(mut success_stmt) = conn.prepare_cached(
+    if let Ok(rows) = sqlx::query(
         "SELECT d.id, d.project_id, d.release_id, d.from_release_id, d.kind, d.status, d.stage, d.sha, d.trigger, d.actor, d.error, d.started_at, d.finished_at \
          FROM deployments d \
          INNER JOIN (SELECT project_id, MAX(id) AS max_id FROM deployments WHERE status = 'success' GROUP BY project_id) latest ON latest.max_id = d.id",
-    ) {
-        if let Ok(rows) = success_stmt.query_map([], |r| {
-            let pid: i64 = r.get(1)?;
-            let pname = proj_names.get(&pid).copied().unwrap_or("");
-            row_to_overview_deployment(r, pname)
-        }) {
-            for dep in rows.flatten() {
-                if proj_names.contains_key(&dep.project_id) {
-                    last_success_map.insert(dep.project_id, dep);
+    )
+    .fetch_all(pool)
+    .await
+    {
+        for r in &rows {
+            if let Ok(pid) = r.try_get::<i64, _>(1) {
+                if let Some(&pname) = proj_names.get(&pid) {
+                    if let Ok(dep) = row_to_overview_deployment(r, pname) {
+                        last_success_map.insert(dep.project_id, dep);
+                    }
                 }
             }
         }
@@ -295,26 +299,54 @@ pub(crate) async fn overview_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let user = current_user(&state, &headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let user = current_user(&state, &headers).await.ok_or(StatusCode::UNAUTHORIZED)?;
     state.monitor.touch_activity();
     let cache_key = format!("overview:u{}", user.id);
 
     singleflight_json_bytes(&state.cache, cache_key, std::time::Duration::from_secs(2), &headers, || async {
-        let state = state.clone();
-        let user = user.clone();
-        tokio::task::spawn_blocking(move || compute_overview_bytes(&state, &user))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        compute_overview_bytes(&state, &user).await
     })
     .await
 }
 
-fn compute_overview_bytes(
+async fn compute_overview_bytes(
     state: &AppState,
     user: &crate::auth::User,
 ) -> Result<axum::body::Bytes, StatusCode> {
-    let mut projs = state.projects.list().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut projs = state.projects.list().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     projs.retain(|p| user.can_access_project(p.id));
+
+    let raw_dbs = if user.has_any_power(&["databases", "databases_manage"]) {
+        state.databases.list_overview_summaries().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let (last_success_map, active_map) = if projs.is_empty() {
+        (std::collections::HashMap::new(), std::collections::HashMap::new())
+    } else {
+        load_overview_deployments(&state.db, &projs).await
+    };
+    let mut recent = state.deployer.list_deployments(None, 25).await;
+
+    let state = state.clone();
+    let user = user.clone();
+    tokio::task::spawn_blocking(move || {
+        compute_overview_bytes_sync(&state, &user, projs, raw_dbs, last_success_map, active_map, &mut recent)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+fn compute_overview_bytes_sync(
+    state: &AppState,
+    user: &crate::auth::User,
+    projs: Vec<Project>,
+    mut raw_dbs: Vec<crate::databases::DatabaseOverviewSummary>,
+    mut last_success_map: std::collections::HashMap<i64, crate::deployer::Deployment>,
+    mut active_map: std::collections::HashMap<i64, crate::deployer::Deployment>,
+    recent: &mut Vec<crate::deployer::Deployment>,
+) -> Result<axum::body::Bytes, StatusCode> {
 
     let mut monitor = state.monitor.sample();
     let total_vps_mem = monitor.memory.total.max(1);
@@ -348,15 +380,14 @@ fn compute_overview_bytes(
     }
 
     let db_entries = if user.has_any_power(&["databases", "databases_manage"]) {
-        let mut raw = state.databases.list_overview_summaries().unwrap_or_default();
         let can_unlinked = user.all_projects || user.has_power("databases_manage");
-        raw.retain(|db| {
+        raw_dbs.retain(|db| {
             db.linked_project_id
                 .map(|pid| user.can_access_project(pid))
                 .unwrap_or(can_unlinked)
         });
-        let mut entries = Vec::with_capacity(raw.len());
-        for db in raw {
+        let mut entries = Vec::with_capacity(raw_dbs.len());
+        for db in raw_dbs {
             let mut d_pid = None;
             if let Some(ref cid) = db.container_id {
                 if let Some(p_str) = cid.strip_prefix("pid-") {
@@ -389,8 +420,8 @@ fn compute_overview_bytes(
     let panel_mem_pct = ((panel_mem as f64 / total_vps_mem as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 
     let panel_exe_size = cached_exe().map(crate::monitor::get_path_disk_size).unwrap_or(0);
-    let panel_db_size = crate::monitor::get_path_disk_size(&cwd.join("data").join("webdep.sqlite"))
-        .saturating_add(crate::monitor::get_path_disk_size(&cwd.join("data").join("webdep.sqlite-wal")));
+    let panel_db_size = crate::monitor::get_path_disk_size(&cwd.join("data").join("control-pg"))
+        .saturating_add(crate::monitor::get_path_disk_size(&cwd.join("data").join("webdep.sqlite")));
     let panel_disk = panel_exe_size.saturating_add(panel_db_size);
     let panel_disk_pct = ((panel_disk as f64 / total_vps_disk as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 
@@ -415,17 +446,6 @@ fn compute_overview_bytes(
         project_type: Some("panel".to_string()),
         start_cmd: None,
     });
-
-    let (mut last_success_map, mut active_map, mut recent) = {
-        let conn = state.db.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let (last_s, active_m) = if projs.is_empty() {
-            (std::collections::HashMap::new(), std::collections::HashMap::new())
-        } else {
-            load_overview_deployments(&conn, &projs)
-        };
-        let rec = crate::deployer::Deployer::list_deployments_conn(&conn, None, 25);
-        (last_s, active_m, rec)
-    };
 
     let mut items = Vec::with_capacity(projs.len());
 
@@ -598,7 +618,7 @@ fn compute_overview_bytes(
         projects: items,
         resources,
         summary,
-        recent,
+        recent: recent.clone(),
         monitor,
         network: crate::monitor::get_network_metrics(),
     };
@@ -611,7 +631,7 @@ pub(crate) async fn overview_network_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let _user = current_user(&state, &headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let _user = current_user(&state, &headers).await.ok_or(StatusCode::UNAUTHORIZED)?;
     state.monitor.touch_activity();
     let mut res = Json(crate::monitor::get_network_metrics()).into_response();
     res.headers_mut().insert(
@@ -625,7 +645,7 @@ pub(crate) async fn monitor_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let user = verify_power(&state, &headers, "monitor", None)?;
+    let user = verify_power(&state, &headers, "monitor", None).await?;
     let cache_key = format!("monitor:u{}", user.id);
 
     if let Some(res) = check_api_cache(&state.cache, &cache_key) {
@@ -633,7 +653,7 @@ pub(crate) async fn monitor_handler(
     }
 
     let sample = state.monitor.sample();
-    let mut projs = state.projects.list().unwrap_or_default();
+    let mut projs = state.projects.list().await.unwrap_or_default();
     projs.retain(|p| user.can_access_project(p.id));
     let now_ms = now();
 
@@ -699,11 +719,11 @@ pub(crate) async fn monitor_handler(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_load_overview_deployments_batch_picks_latest_per_status() {
+    #[tokio::test]
+    async fn test_load_overview_deployments_batch_picks_latest_per_status() {
         let dir = std::env::temp_dir().join(format!("webdep-ov-test-{}", crate::db::now()));
         std::fs::create_dir_all(&dir).unwrap();
-        let pool = crate::db::open_db(&dir).unwrap();
+        let pool = crate::pg_control::test_db::isolated_pool().await;
         let vault = std::sync::Arc::new(crate::vault::Vault::new(&dir).unwrap());
         let projects_mgr = crate::projects::Projects::new(pool.clone(), vault);
 
@@ -712,51 +732,56 @@ mod tests {
         )
         .unwrap();
         p1.deploy_dir = dir.to_string_lossy().to_string();
-        let id1 = projects_mgr.create(&p1).unwrap();
-        let p1 = projects_mgr.get(id1).unwrap().unwrap();
+        let id1 = projects_mgr.create(&p1).await.unwrap();
+        let p1 = projects_mgr.get(id1).await.unwrap().unwrap();
 
         let mut p2: Project = serde_json::from_str(
             r#"{"name":"Site Two","slug":"site-two","repo_url":"https://github.com/o/2"}"#,
         )
         .unwrap();
         p2.deploy_dir = dir.to_string_lossy().to_string();
-        let id2 = projects_mgr.create(&p2).unwrap();
-        let p2 = projects_mgr.get(id2).unwrap().unwrap();
+        let id2 = projects_mgr.create(&p2).await.unwrap();
+        let p2 = projects_mgr.get(id2).await.unwrap().unwrap();
 
-        {
-            let conn = pool.lock().unwrap();
-            conn.execute(
-                "INSERT INTO deployments (project_id, kind, status, stage, sha, trigger, actor, started_at)
-                 VALUES (?, 'deploy', 'success', 'done', 'sha1', 'manual', 'admin', 100)",
-                rusqlite::params![id1],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO deployments (project_id, kind, status, stage, sha, trigger, actor, started_at)
-                 VALUES (?, 'deploy', 'success', 'done', 'sha2', 'manual', 'admin', 200)",
-                rusqlite::params![id1],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO deployments (project_id, kind, status, stage, sha, trigger, actor, started_at)
-                 VALUES (?, 'deploy', 'running', 'build', 'sha3', 'manual', 'admin', 300)",
-                rusqlite::params![id1],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO deployments (project_id, kind, status, stage, sha, trigger, actor, started_at)
-                 VALUES (?, 'deploy', 'failed', 'error', 'sha4', 'manual', 'admin', 400)",
-                rusqlite::params![id2],
-            )
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO deployments (project_id, kind, status, stage, sha, trigger, actor, started_at)
+             VALUES ($1, 'deploy', 'success', 'done', 'sha1', 'manual', 'admin', 100)",
+        )
+        .bind(id1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployments (project_id, kind, status, stage, sha, trigger, actor, started_at)
+             VALUES ($1, 'deploy', 'success', 'done', 'sha2', 'manual', 'admin', 200)",
+        )
+        .bind(id1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployments (project_id, kind, status, stage, sha, trigger, actor, started_at)
+             VALUES ($1, 'deploy', 'running', 'build', 'sha3', 'manual', 'admin', 300)",
+        )
+        .bind(id1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployments (project_id, kind, status, stage, sha, trigger, actor, started_at)
+             VALUES ($1, 'deploy', 'failed', 'error', 'sha4', 'manual', 'admin', 400)",
+        )
+        .bind(id2)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-            let (succ, act) = load_overview_deployments(&conn, &[p1, p2]);
-            assert_eq!(succ.get(&id1).and_then(|d| d.sha.as_deref()), Some("sha2"));
-            assert_eq!(succ.get(&id1).and_then(|d| d.project_name.as_deref()), Some("Site One"));
-            assert_eq!(act.get(&id1).and_then(|d| d.sha.as_deref()), Some("sha3"));
-            assert!(succ.get(&id2).is_none());
-            assert!(act.get(&id2).is_none());
-        }
+        let (succ, act) = load_overview_deployments(&pool, &[p1, p2]).await;
+        assert_eq!(succ.get(&id1).and_then(|d| d.sha.as_deref()), Some("sha2"));
+        assert_eq!(succ.get(&id1).and_then(|d| d.project_name.as_deref()), Some("Site One"));
+        assert_eq!(act.get(&id1).and_then(|d| d.sha.as_deref()), Some("sha3"));
+        assert!(succ.get(&id2).is_none());
+        assert!(act.get(&id2).is_none());
 
         std::fs::remove_dir_all(&dir).ok();
     }

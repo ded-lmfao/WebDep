@@ -114,41 +114,42 @@ pub const SELECT_PROJECT_FIELDS: &str = "\
     app_pid, app_started_at, domains, ssl_email, \
     created_at, updated_at, project_kind, access_mode, allowed_ips";
 
-pub fn row_to_project(r: &rusqlite::Row) -> Result<Project, rusqlite::Error> {
-    let domains_str: String = r.get(23)?;
+pub fn pg_row_to_project(r: &sqlx::postgres::PgRow) -> Result<Project, sqlx::Error> {
+    use sqlx::Row;
+    let domains_str: String = r.try_get(23)?;
     let domains: Vec<String> = serde_json::from_str(&domains_str).unwrap_or_default();
 
     Ok(Project {
-        id: r.get(0)?,
-        name: r.get(1)?,
-        slug: r.get(2)?,
-        repo_url: r.get(3)?,
-        branch: r.get(4)?,
-        project_type: r.get(5)?,
-        deploy_method: r.get(6)?,
-        deploy_dir: r.get(7)?,
-        port: r.get::<_, Option<u32>>(8)?.map(|p| p as u16),
-        install_cmd: r.get(9)?,
-        build_cmd: r.get(10)?,
-        start_cmd: r.get(11)?,
-        health_url: r.get(12)?,
-        health_timeout_s: r.get(13)?,
-        stability_s: r.get(14)?,
-        auto_deploy: r.get::<_, i64>(15)? != 0,
-        webhook_secret: r.get(16)?,
-        current_release_id: r.get(17)?,
-        deployed_sha: r.get(18)?,
-        last_poll_at: r.get(19)?,
-        app_status: r.get(20)?,
-        app_pid: r.get::<_, Option<u32>>(21)?,
-        app_started_at: r.get(22)?,
+        id: r.try_get(0)?,
+        name: r.try_get(1)?,
+        slug: r.try_get(2)?,
+        repo_url: r.try_get(3)?,
+        branch: r.try_get(4)?,
+        project_type: r.try_get(5)?,
+        deploy_method: r.try_get(6)?,
+        deploy_dir: r.try_get(7)?,
+        port: r.try_get::<Option<i32>, _>(8)?.and_then(|p| u16::try_from(p).ok()),
+        install_cmd: r.try_get::<Option<String>, _>(9)?.unwrap_or_default(),
+        build_cmd: r.try_get::<Option<String>, _>(10)?.unwrap_or_default(),
+        start_cmd: r.try_get::<Option<String>, _>(11)?.unwrap_or_default(),
+        health_url: r.try_get::<Option<String>, _>(12)?.unwrap_or_default(),
+        health_timeout_s: r.try_get::<i32, _>(13)? as i64,
+        stability_s: r.try_get::<i32, _>(14)? as i64,
+        auto_deploy: r.try_get(15)?,
+        webhook_secret: r.try_get(16)?,
+        current_release_id: r.try_get(17)?,
+        deployed_sha: r.try_get(18)?,
+        last_poll_at: r.try_get(19)?,
+        app_status: r.try_get(20)?,
+        app_pid: r.try_get::<Option<i64>, _>(21)?.and_then(|p| u32::try_from(p).ok()),
+        app_started_at: r.try_get(22)?,
         domains,
-        ssl_email: r.get(24)?,
-        created_at: r.get(25)?,
-        updated_at: r.get(26)?,
-        project_kind: r.get::<_, Option<String>>(27)?.unwrap_or_else(default_project_kind),
-        access_mode: r.get::<_, Option<String>>(28)?.unwrap_or_else(default_access_mode),
-        allowed_ips: r.get::<_, Option<String>>(29)?.unwrap_or_default(),
+        ssl_email: r.try_get::<Option<String>, _>(24)?.unwrap_or_default(),
+        created_at: r.try_get(25)?,
+        updated_at: r.try_get(26)?,
+        project_kind: r.try_get::<Option<String>, _>(27)?.unwrap_or_else(default_project_kind),
+        access_mode: r.try_get::<Option<String>, _>(28)?.unwrap_or_else(default_access_mode),
+        allowed_ips: r.try_get::<Option<String>, _>(29)?.unwrap_or_default(),
     })
 }
 

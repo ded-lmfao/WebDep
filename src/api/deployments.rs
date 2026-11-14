@@ -19,9 +19,9 @@ pub(crate) async fn deploy_project_handler(
     AxPath(id): AxPath<i64>,
     body_bytes: axum::body::Bytes,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "deploy", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "deploy", id).await?;
 
-    if state.deployer.has_active_deployment(p.id) {
+    if state.deployer.has_active_deployment(p.id).await {
         return Err((
             StatusCode::CONFLICT,
             format!("Deployment already in progress for '{}'", p.name),
@@ -34,13 +34,13 @@ pub(crate) async fn deploy_project_handler(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let dep_id = state.deployer.create_deployment(&p, "deploy", &actor.username, "manual");
+    let dep_id = state.deployer.create_deployment(&p, "deploy", &actor.username, "manual").await;
     if let Some(ref sha) = target_sha {
-        let conn = state.db.lock().unwrap();
-        let _ = conn.execute(
-            "UPDATE deployments SET sha = ? WHERE id = ?",
-            rusqlite::params![sha, dep_id],
-        );
+        let _ = sqlx::query("UPDATE deployments SET sha = $1 WHERE id = $2")
+            .bind(sha)
+            .bind(dep_id)
+            .execute(&state.db)
+            .await;
     }
     log_audit_project(
         &state,
@@ -49,7 +49,8 @@ pub(crate) async fn deploy_project_handler(
         "deploy.trigger",
         Some(&p.name),
         Some(&format!("Triggered deployment #{} on branch '{}'", dep_id, p.branch)),
-    );
+    )
+    .await;
     trigger_background_deploy(state.deployer.clone(), p.id, dep_id);
 
     Ok(Json(ActionResponse { deployment_id: dep_id }))
@@ -68,9 +69,9 @@ pub(crate) async fn rollback_project_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<RollbackPayload>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "deploy", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "deploy", id).await?;
 
-    let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "manual");
+    let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "manual").await;
     let deployer = state.deployer.clone();
     let target_rel = payload.release_id;
     log_audit_project(
@@ -80,7 +81,8 @@ pub(crate) async fn rollback_project_handler(
         "rollback.trigger",
         Some(&p.name),
         Some(&format!("Triggered rollback #{} to Release #{}", dep_id, target_rel)),
-    );
+    )
+    .await;
 
     tokio::spawn(async move {
         deployer.run_rollback(p.id, dep_id, target_rel).await;
@@ -95,8 +97,8 @@ pub(crate) async fn list_releases_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<Vec<crate::deployer::Release>>, (StatusCode, String)> {
-    let _actor = verify_project_access(&state, &headers, id)?;
-    let list = state.deployer.list_releases(id);
+    let _actor = verify_project_access(&state, &headers, id).await?;
+    let list = state.deployer.list_releases(id).await;
     Ok(Json(list))
 }
 
@@ -112,7 +114,7 @@ pub(crate) async fn create_release_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<CreateReleasePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "deploy", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "deploy", id).await?;
 
     let source = payload.source.unwrap_or_else(|| "deploy".to_string());
     let note = payload.note.unwrap_or_else(|| "Manual Release".to_string());
@@ -136,34 +138,35 @@ pub(crate) async fn create_release_handler(
         let sha = p.deployed_sha.clone().unwrap_or_else(|| format!("{:x}", ts));
         let short_sha = sha[..7.min(sha.len())].to_string();
 
-        let rel_id = {
-            let conn = state.db.lock().unwrap();
-            insert_success_release(
-                &conn,
-                id,
-                &sha,
-                &short_sha,
-                &format!("Release: {}", note),
-                &actor.username,
-                rel_dir.to_str().unwrap_or(""),
-                ts,
-            )
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        };
+        let rel_id = insert_success_release(
+            &state.db,
+            id,
+            &sha,
+            &short_sha,
+            &format!("Release: {}", note),
+            &actor.username,
+            rel_dir.to_str().unwrap_or(""),
+            ts,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         // Also record in backups so it appears in Backups tab
-        {
-            let conn = state.db.lock().unwrap();
-            let p_str = rel_dir.to_string_lossy().to_string();
-            conn.execute(
-                "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at)
-                 VALUES(?, ?, 'release-snapshot', ?, 5242880, ?, ?)",
-                rusqlite::params![id, rel_id, &p_str, format!("Release #{} ({})", rel_id, note), ts],
-            ).ok();
-        }
+        let p_str = rel_dir.to_string_lossy().to_string();
+        let _ = sqlx::query(
+            "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at) \
+             VALUES($1, $2, 'release-snapshot', $3, 5242880, $4, $5)",
+        )
+        .bind(id)
+        .bind(rel_id)
+        .bind(&p_str)
+        .bind(format!("Release #{} ({})", rel_id, note))
+        .bind(ts)
+        .execute(&state.db)
+        .await;
 
         state.cache.invalidate_project(id);
-        log_audit_project(&state, Some(id), &actor.username, "release.create", Some(&p.name), Some(&note));
+        log_audit_project(&state, Some(id), &actor.username, "release.create", Some(&p.name), Some(&note)).await;
 
         Ok(Json(serde_json::json!({
             "ok": true,
@@ -172,7 +175,7 @@ pub(crate) async fn create_release_handler(
         })))
     } else {
         // Trigger a new deployment which builds and creates a live release
-        let dep_id = state.deployer.create_deployment(&p, "deploy", &actor.username, "manual");
+        let dep_id = state.deployer.create_deployment(&p, "deploy", &actor.username, "manual").await;
         trigger_background_deploy(state.deployer.clone(), p.id, dep_id);
 
         Ok(Json(serde_json::json!({
@@ -195,7 +198,7 @@ pub(crate) async fn list_deployments_handler(
     headers: HeaderMap,
     Query(q): Query<DeploymentQuery>,
 ) -> Result<Json<Vec<crate::deployer::Deployment>>, (StatusCode, String)> {
-    let user = require_current_user(&state, &headers)?;
+    let user = require_current_user(&state, &headers).await?;
     if let Some(pid) = q.project {
         if !user.can_access_project(pid) {
             return Err((
@@ -204,7 +207,7 @@ pub(crate) async fn list_deployments_handler(
             ));
         }
     }
-    let mut list = state.deployer.list_deployments(q.project, q.limit.unwrap_or(200));
+    let mut list = state.deployer.list_deployments(q.project, q.limit.unwrap_or(200)).await;
     if q.project.is_none() {
         list.retain(|d| user.can_access_project(d.project_id));
     }
@@ -222,10 +225,11 @@ pub(crate) async fn get_deployment_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<DeploymentDetailResponse>, (StatusCode, String)> {
-    let user = require_current_user(&state, &headers)?;
+    let user = require_current_user(&state, &headers).await?;
     let dep = state
         .deployer
         .get_deployment(id)
+        .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Deployment not found".to_string()))?;
     if !user.can_access_project(dep.project_id) {
         return Err((
@@ -234,7 +238,7 @@ pub(crate) async fn get_deployment_handler(
         ));
     }
     let logs = if user.has_power("logs") {
-        state.logs.list(None, Some(id), None, None, 1000)
+        state.logs.list(None, Some(id), None, None, 1000).await
     } else {
         Vec::new()
     };
@@ -252,9 +256,10 @@ pub(crate) async fn get_deployment_logs_handler(
     let dep = state
         .deployer
         .get_deployment(id)
+        .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Deployment not found".to_string()))?;
-    let _user = verify_power(&state, &headers, "logs", Some(dep.project_id))?;
-    let logs = state.logs.list(None, Some(id), None, None, 1000);
+    let _user = verify_power(&state, &headers, "logs", Some(dep.project_id)).await?;
+    let logs = state.logs.list(None, Some(id), None, None, 1000).await;
     Ok(Json(logs))
 }
 
@@ -264,7 +269,7 @@ pub(crate) async fn delete_release_handler(
     headers: HeaderMap,
     AxPath((id, release_id)): AxPath<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "deploy", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "deploy", id).await?;
 
     if p.current_release_id == Some(release_id) {
         return Err((
@@ -273,15 +278,15 @@ pub(crate) async fn delete_release_handler(
         ));
     }
 
-    let rel_dir: Option<String> = {
-        let conn = state.db.lock().unwrap();
-        conn.query_row(
-            "SELECT dir FROM releases WHERE id = ? AND project_id = ?",
-            rusqlite::params![release_id, id],
-            |r| r.get(0),
-        )
-        .ok()
-    };
+    let rel_dir: Option<String> = sqlx::query_scalar(
+        "SELECT dir FROM releases WHERE id = $1 AND project_id = $2",
+    )
+    .bind(release_id)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
     if let Some(d_str) = rel_dir {
         let path = std::path::Path::new(&d_str);
@@ -290,36 +295,43 @@ pub(crate) async fn delete_release_handler(
         }
     }
 
-    {
-        let conn = state.db.lock().unwrap();
-        let _ = conn.execute_batch("PRAGMA foreign_keys = OFF;");
-        let _ = conn.execute(
-            "UPDATE deployments SET release_id = NULL WHERE release_id = ?",
-            rusqlite::params![release_id],
-        );
-        let _ = conn.execute(
-            "UPDATE deployments SET from_release_id = NULL WHERE from_release_id = ?",
-            rusqlite::params![release_id],
-        );
-        let _ = conn.execute(
-            "DELETE FROM backups WHERE release_id = ? AND project_id = ?",
-            rusqlite::params![release_id, id],
-        );
-        let _ = conn.execute(
-            "UPDATE backups SET release_id = NULL WHERE release_id = ?",
-            rusqlite::params![release_id],
-        );
-        let _ = conn.execute(
-            "UPDATE projects SET current_release_id = NULL WHERE current_release_id = ?",
-            rusqlite::params![release_id],
-        );
-        let del_res = conn.execute(
-            "DELETE FROM releases WHERE id = ? AND project_id = ?",
-            rusqlite::params![release_id, id],
-        );
-        let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
-        del_res.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let _ = sqlx::query("UPDATE deployments SET release_id = NULL WHERE release_id = $1")
+        .bind(release_id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("UPDATE deployments SET from_release_id = NULL WHERE from_release_id = $1")
+        .bind(release_id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("DELETE FROM backups WHERE release_id = $1 AND project_id = $2")
+        .bind(release_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("UPDATE backups SET release_id = NULL WHERE release_id = $1")
+        .bind(release_id)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("UPDATE projects SET current_release_id = NULL WHERE current_release_id = $1")
+        .bind(release_id)
+        .execute(&mut *tx)
+        .await;
+    sqlx::query("DELETE FROM releases WHERE id = $1 AND project_id = $2")
+        .bind(release_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     state.cache.invalidate_project(id);
     log_audit_project(
@@ -329,7 +341,8 @@ pub(crate) async fn delete_release_handler(
         "release.delete",
         Some(&p.name),
         Some(&format!("Deleted release #{}", release_id)),
-    );
+    )
+    .await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

@@ -13,7 +13,7 @@ pub(crate) async fn admin_reset_user_2fa_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers)?;
+    let actor = verify_main_admin(&state, &headers).await?;
     if !actor.is_main_admin {
         return Err((
             StatusCode::FORBIDDEN,
@@ -24,16 +24,16 @@ pub(crate) async fn admin_reset_user_2fa_handler(
     let target = state
         .auth
         .get_user_by_id(id)
+        .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_enabled = 0, totp_backup_codes = '[]' WHERE id = ?",
-            rusqlite::params![id],
-        )
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string()))?;
-    }
+    sqlx::query(
+        "UPDATE users SET totp_secret = NULL, totp_pending_secret = NULL, totp_enabled = FALSE, totp_backup_codes = '[]' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string()))?;
 
     state.auth.invalidate_sessions();
     state.cache.invalidate_all();
@@ -44,21 +44,21 @@ pub(crate) async fn admin_reset_user_2fa_handler(
         "user.update",
         Some(&target.username),
         Some("Main Admin reset Two-Factor Authentication for user"),
-    );
+    )
+    .await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
-
-
 
 pub(crate) async fn list_users_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<User>>, (StatusCode, String)> {
-    let _actor = verify_main_admin(&state, &headers)?;
+    let _actor = verify_main_admin(&state, &headers).await?;
     let list = state
         .auth
         .list_users()
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string()))?;
     Ok(Json(list))
 }
@@ -79,7 +79,7 @@ pub(crate) async fn create_user_handler(
     headers: HeaderMap,
     Json(payload): Json<CreateUserPayload>,
 ) -> Result<Json<User>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers)?;
+    let actor = verify_main_admin(&state, &headers).await?;
 
     let uname = payload.username.trim().to_string();
     if uname.is_empty() || payload.password.len() < 6 {
@@ -101,16 +101,20 @@ pub(crate) async fn create_user_handler(
 
     let ts = now();
 
-    let id = {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO users(username, password_hash, disabled, permissions, allowed_projects, created_at) VALUES(?, ?, 0, ?, ?, ?)",
-            rusqlite::params![uname, hashed, perms_json, allowed_json, ts],
-        ).map_err(|e| (StatusCode::BAD_REQUEST, format!("Could not create user: {}", e)))?;
-        conn.last_insert_rowid()
-    };
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO users(username, password_hash, disabled, permissions, allowed_projects, created_at) \
+         VALUES($1, $2, FALSE, $3, $4, $5) RETURNING id",
+    )
+    .bind(&uname)
+    .bind(&hashed)
+    .bind(&perms_json)
+    .bind(&allowed_json)
+    .bind(ts)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::BAD_REQUEST, format!("Could not create user: {}", e)))?;
 
-    log_audit(&state, &actor.username, "user.create", Some(&uname), Some(&format!("perms={}", perms_json)));
+    log_audit(&state, &actor.username, "user.create", Some(&uname), Some(&format!("perms={}", perms_json))).await;
 
     Ok(Json(User::from_db(
         id,
@@ -140,25 +144,28 @@ pub(crate) async fn update_user_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<UpdateUserPayload>,
 ) -> Result<Json<User>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers)?;
+    let actor = verify_main_admin(&state, &headers).await?;
 
     let existing = state
         .auth
         .get_user_by_id(id)
+        .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     if existing.is_main_admin && !actor.is_main_admin {
         return Err((StatusCode::FORBIDDEN, "Only the Main Admin can modify the Main Admin account.".into()));
     }
 
-    let conn = state.db.lock().unwrap();
-
     if let Some(pwd) = payload.password.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         if pwd.len() < 6 {
             return Err((StatusCode::BAD_REQUEST, "Password must be at least 6 characters".into()));
         }
         let hashed = hash_password(pwd).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        conn.execute("UPDATE users SET password_hash=? WHERE id=?", rusqlite::params![hashed, id]).ok();
+        let _ = sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+            .bind(hashed)
+            .bind(id)
+            .execute(&state.db)
+            .await;
         if existing.is_main_admin {
             crate::config::Config::sync_dotenv_admin(Some(&existing.username), Some(pwd));
         }
@@ -172,19 +179,26 @@ pub(crate) async fn update_user_handler(
                 serde_json::Value::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
                 _ => false,
             };
-            conn.execute(
-                "UPDATE users SET disabled=? WHERE id=?",
-                rusqlite::params![if is_disabled { 1 } else { 0 }, id],
-            )
-            .ok();
+            let _ = sqlx::query("UPDATE users SET disabled = $1 WHERE id = $2")
+                .bind(is_disabled)
+                .bind(id)
+                .execute(&state.db)
+                .await;
             if is_disabled {
-                conn.execute("DELETE FROM sessions WHERE user_id=?", rusqlite::params![id]).ok();
+                let _ = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+                    .bind(id)
+                    .execute(&state.db)
+                    .await;
                 state.auth.clear_user_presence(id);
             }
         }
         if let Some(perms) = payload.permissions.as_ref() {
             let perms_json = serde_json::to_string(perms).unwrap_or_else(|_| "[]".into());
-            conn.execute("UPDATE users SET permissions=? WHERE id=?", rusqlite::params![perms_json, id]).ok();
+            let _ = sqlx::query("UPDATE users SET permissions = $1 WHERE id = $2")
+                .bind(perms_json)
+                .bind(id)
+                .execute(&state.db)
+                .await;
         }
         if payload.all_projects.is_some() || payload.allowed_projects.is_some() {
             let all_p = payload.all_projects.unwrap_or(false);
@@ -193,16 +207,20 @@ pub(crate) async fn update_user_handler(
             } else {
                 serde_json::to_string(&payload.allowed_projects.unwrap_or_default()).unwrap_or_else(|_| "[]".into())
             };
-            conn.execute("UPDATE users SET allowed_projects=? WHERE id=?", rusqlite::params![allowed_json, id]).ok();
+            let _ = sqlx::query("UPDATE users SET allowed_projects = $1 WHERE id = $2")
+                .bind(allowed_json)
+                .bind(id)
+                .execute(&state.db)
+                .await;
         }
     }
 
-    drop(conn);
-    log_audit(&state, &actor.username, "user.update", Some(&existing.username), None);
+    log_audit(&state, &actor.username, "user.update", Some(&existing.username), None).await;
 
     let updated = state
         .auth
         .get_user_by_id(id)
+        .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     Ok(Json(updated))
@@ -213,11 +231,12 @@ pub(crate) async fn delete_user_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers)?;
+    let actor = verify_main_admin(&state, &headers).await?;
 
     let target = state
         .auth
         .get_user_by_id(id)
+        .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     if target.is_main_admin {
@@ -227,15 +246,18 @@ pub(crate) async fn delete_user_handler(
         return Err((StatusCode::BAD_REQUEST, "Cannot delete your own currently logged-in account.".into()));
     }
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute("DELETE FROM sessions WHERE user_id = ?", rusqlite::params![id]).ok();
-        state.auth.clear_user_presence(id);
-        conn.execute("DELETE FROM users WHERE id = ?", rusqlite::params![id])
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
+    let _ = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await;
+    state.auth.clear_user_presence(id);
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    log_audit(&state, &actor.username, "user.delete", Some(&target.username), Some("Deleted user account"));
+    log_audit(&state, &actor.username, "user.delete", Some(&target.username), Some("Deleted user account")).await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

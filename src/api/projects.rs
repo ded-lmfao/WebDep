@@ -60,18 +60,19 @@ pub(crate) async fn list_projects_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let user = require_current_user(&state, &headers).map_err(|(c, _)| c)?;
+    let user = require_current_user(&state, &headers).await.map_err(|(c, _)| c)?;
     let cache_key = format!("projects:u{}", user.id);
 
     singleflight_json_bytes(&state.cache, cache_key, std::time::Duration::from_secs(4), &headers, || async {
-        let state = state.clone();
         let user = user.clone();
+        let all = state
+            .projects
+            .list()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         tokio::task::spawn_blocking(move || {
             let cwd = cached_cwd();
-            let list: Vec<ProjectResponse> = state
-                .projects
-                .list()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            let list: Vec<ProjectResponse> = all
                 .into_iter()
                 .filter(|p| user.can_access_project(p.id))
                 .map(|p| to_project_response(p, cwd))
@@ -90,13 +91,14 @@ pub(crate) async fn get_project_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<ProjectResponse>, StatusCode> {
-    let user = require_current_user(&state, &headers).map_err(|(c, _)| c)?;
+    let user = require_current_user(&state, &headers).await.map_err(|(c, _)| c)?;
     if !user.can_access_project(id) {
         return Err(StatusCode::FORBIDDEN);
     }
     let p = state
         .projects
         .get(id)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
@@ -116,7 +118,7 @@ pub(crate) async fn create_project_handler(
     headers: HeaderMap,
     Json(mut p): Json<Project>,
 ) -> Result<Json<Project>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, manage_power_for_kind(&p.project_kind), None)?;
+    let actor = verify_power(&state, &headers, manage_power_for_kind(&p.project_kind), None).await?;
     let is_service = p.project_kind == "service";
     if p.name.trim().is_empty() || p.slug.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Name and slug are required".into()));
@@ -146,9 +148,9 @@ pub(crate) async fn create_project_handler(
 
     // Always assign a guaranteed unique port across all workloads (websites, services, databases)
     let allocated_port = {
-        let conn = state.db.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let default_start = if is_service { 8000 } else { 3000 };
-        crate::db::allocate_global_unique_port(&conn, p.port, default_start, None, None)
+        crate::db::allocate_global_unique_port(&state.db, p.port, default_start, None, None)
+            .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
 
@@ -160,6 +162,7 @@ pub(crate) async fn create_project_handler(
     let id = state
         .projects
         .create(&p)
+        .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let audit_action = if is_service { "service.create" } else { "website.create" };
@@ -175,18 +178,20 @@ pub(crate) async fn create_project_handler(
         audit_action,
         Some(&p.name),
         Some(&audit_desc),
-    );
+    )
+    .await;
 
     let created = state
         .projects
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
 
-    let _ = state.runtime.ensure_container(&created);
+    let _ = state.runtime.ensure_container(&created).await;
 
     if !is_service || !created.domains.is_empty() {
-        if let Ok(all) = state.projects.list() {
+        if let Ok(all) = state.projects.list().await {
             let _ = state.caddy.write_config(&created, &all);
             let _ = state.caddy.reload();
         }
@@ -234,35 +239,31 @@ pub(crate) async fn update_project_handler(
     AxPath(id): AxPath<i64>,
     Json(mut p): Json<Project>,
 ) -> Result<Json<Project>, (StatusCode, String)> {
-    let prev = state.projects.get(id).ok().flatten();
+    let prev = state.projects.get(id).await.ok().flatten();
     let existing_kind = prev
         .as_ref()
         .map(|old| old.project_kind.as_str())
         .unwrap_or(p.project_kind.as_str());
-    let actor = verify_power(&state, &headers, manage_power_for_kind(existing_kind), Some(id))?;
+    let actor = verify_power(&state, &headers, manage_power_for_kind(existing_kind), Some(id)).await?;
     if p.project_kind != existing_kind {
-        let _ = verify_power(&state, &headers, manage_power_for_kind(&p.project_kind), Some(id))?;
+        let _ = verify_power(&state, &headers, manage_power_for_kind(&p.project_kind), Some(id)).await?;
     }
     p.domains = sanitize_domains(p.domains);
 
     // Ensure non-conflicting, valid port allocation across all workloads
     if let Some(port) = p.port {
-        let allocated_port = {
-            let conn = state.db.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            crate::db::allocate_global_unique_port(&conn, Some(port), port, Some(id), None)
-                .map_err(|e| (StatusCode::BAD_REQUEST, format!("Port allocation error: {}", e)))?
-        };
+        let allocated_port = crate::db::allocate_global_unique_port(&state.db, Some(port), port, Some(id), None)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Port allocation error: {}", e)))?;
         p.port = Some(allocated_port);
     } else if let Some(ref old_p) = prev {
         if let Some(old_port) = old_p.port {
             p.port = Some(old_port);
         } else {
             let default_start = if p.project_kind == "service" { 8000 } else { 3000 };
-            let allocated_port = {
-                let conn = state.db.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                crate::db::allocate_global_unique_port(&conn, None, default_start, Some(id), None)
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-            };
+            let allocated_port = crate::db::allocate_global_unique_port(&state.db, None, default_start, Some(id), None)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
             p.port = Some(allocated_port);
         }
     }
@@ -270,6 +271,7 @@ pub(crate) async fn update_project_handler(
     state
         .projects
         .update(id, &p)
+        .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     log_audit_project(
@@ -288,18 +290,20 @@ pub(crate) async fn update_project_handler(
                 p.domains
             )
         }),
-    );
+    )
+    .await;
 
     let updated = state
         .projects
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
 
-    let _ = state.runtime.ensure_container(&updated);
+    let _ = state.runtime.ensure_container(&updated).await;
 
     if updated.project_kind != "service" || !updated.domains.is_empty() {
-        if let Ok(all) = state.projects.list() {
+        if let Ok(all) = state.projects.list().await {
             let _ = state.caddy.write_config(&updated, &all);
             let _ = state.caddy.reload();
         }
@@ -330,12 +334,12 @@ pub(crate) async fn delete_project_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let deleted_proj = state.projects.get(id).ok().flatten();
+    let deleted_proj = state.projects.get(id).await.ok().flatten();
     let kind = deleted_proj
         .as_ref()
         .map(|p| p.project_kind.as_str())
         .unwrap_or("website");
-    let actor = verify_power(&state, &headers, manage_power_for_kind(kind), Some(id))?;
+    let actor = verify_power(&state, &headers, manage_power_for_kind(kind), Some(id)).await?;
     if let Some(ref p) = deleted_proj {
         log_audit_project(
             &state,
@@ -348,20 +352,22 @@ pub(crate) async fn delete_project_handler(
                 if p.project_kind == "service" { "service" } else { "website" },
                 p.name, p.slug
             )),
-        );
+        )
+        .await;
         let _ = state.runtime.stop_project(p).await;
         state.runtime.stop_maintenance_server(id);
     }
     state
         .projects
         .delete(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if let Some(ref p) = deleted_proj {
         if let Some(port) = p.port {
             crate::databases::Databases::remove_firewall_rules(port, &p.allowed_ips).await;
         }
-        if let Ok(remaining) = state.projects.list() {
+        if let Ok(remaining) = state.projects.list().await {
             state.runtime.cleanup_project_files(p, &remaining);
             state.caddy.remove_project_config(&p.slug, &remaining);
         }
@@ -384,7 +390,7 @@ pub(crate) async fn start_project_with_audit(
     action: &str,
     action_label: &str,
 ) -> Result<u32, (StatusCode, String)> {
-    let env = state.projects.get_env_map(p.id);
+    let env = state.projects.get_env_map(p.id).await;
     match state.runtime.start_project(p, env, None).await {
         Ok(pid) => {
             state.cache.invalidate_all();
@@ -399,7 +405,8 @@ pub(crate) async fn start_project_with_audit(
             } else {
                 format!("{} website container (PID {}, Port {})", action_label, pid, p.port.unwrap_or(3000))
             }),
-            );
+            )
+            .await;
             Ok(pid)
         }
         Err(e) if e == "NOT_DEPLOYED_YET" => Err((
@@ -415,7 +422,7 @@ pub(crate) async fn start_project_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "process", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "process", id).await?;
     let pid = start_project_with_audit(&state, &actor, &p, "container.start", "Started").await?;
     Ok(Json(serde_json::json!({
         "started": true,
@@ -428,7 +435,7 @@ pub(crate) async fn stop_project_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "process", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "process", id).await?;
 
     state
         .runtime
@@ -448,7 +455,8 @@ pub(crate) async fn stop_project_handler(
         } else {
             format!("Stopped website container and freed port {}", p.port.unwrap_or(3000))
         }),
-    );
+    )
+    .await;
 
     Ok(Json(serde_json::json!({ "stopped": true })))
 }
@@ -458,7 +466,7 @@ pub(crate) async fn restart_project_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "process", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "process", id).await?;
 
     let _ = state.runtime.stop_project(&p).await;
     let pid = start_project_with_audit(&state, &actor, &p, "container.restart", "Restarted").await?;
@@ -476,7 +484,7 @@ pub(crate) async fn toggle_maintenance_handler(
     AxPath(id): AxPath<i64>,
     payload: Option<Json<MaintenancePayload>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "process", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "process", id).await?;
 
     let target_enabled = payload
         .and_then(|Json(b)| b.enabled)
@@ -489,8 +497,8 @@ pub(crate) async fn toggle_maintenance_handler(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-        if let Ok(all) = state.projects.list() {
-            if let Ok(Some(updated_p)) = state.projects.get(id) {
+        if let Ok(all) = state.projects.list().await {
+            if let Ok(Some(updated_p)) = state.projects.get(id).await {
                 let _ = state.caddy.write_config(&updated_p, &all);
                 let _ = state.caddy.reload();
             }
@@ -506,7 +514,8 @@ pub(crate) async fn toggle_maintenance_handler(
                 "Enabled Maintenance Mode on port {} (Maintenance page active)",
                 p.port.unwrap_or(3000)
             )),
-        );
+        )
+        .await;
         state.cache.invalidate_all();
 
         Ok(Json(serde_json::json!({
@@ -516,11 +525,11 @@ pub(crate) async fn toggle_maintenance_handler(
         })))
     } else {
         let _ = state.runtime.set_maintenance_mode(&p, false).await;
-        let env = state.projects.get_env_map(id);
+        let env = state.projects.get_env_map(id).await;
         match state.runtime.start_project(&p, env, None).await {
             Ok(pid) => {
-                if let Ok(all) = state.projects.list() {
-                    if let Ok(Some(updated_p)) = state.projects.get(id) {
+                if let Ok(all) = state.projects.list().await {
+                    if let Ok(Some(updated_p)) = state.projects.get(id).await {
                         let _ = state.caddy.write_config(&updated_p, &all);
                         let _ = state.caddy.reload();
                     }
@@ -536,7 +545,8 @@ pub(crate) async fn toggle_maintenance_handler(
                         pid,
                         p.port.unwrap_or(3000)
                     )),
-                );
+                )
+                .await;
                 state.cache.invalidate_all();
                 Ok(Json(serde_json::json!({
                     "ok": true,

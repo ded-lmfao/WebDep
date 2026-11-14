@@ -4,7 +4,6 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -236,17 +235,16 @@ fn read_git_origin_slug() -> Option<&'static str> {
         .as_deref()
 }
 
-fn resolve_repo_slug_from_db(db: Option<&DbPool>) -> String {
+async fn resolve_repo_slug_from_db(db: Option<&DbPool>) -> String {
     if let Some(pool) = db {
-        if let Ok(conn) = pool.lock() {
-            if let Ok(val) = conn.query_row(
-                "SELECT value FROM settings WHERE key = 'update_repo'",
-                [],
-                |r| r.get::<_, String>(0),
-            ) {
-                if let Some(slug) = Git::extract_github_slug(&val) {
-                    return slug;
-                }
+        if let Ok(Some(val)) = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM settings WHERE key = 'update_repo'",
+        )
+        .fetch_optional(pool)
+        .await
+        {
+            if let Some(slug) = Git::extract_github_slug(&val) {
+                return slug;
             }
         }
     }
@@ -256,16 +254,17 @@ fn resolve_repo_slug_from_db(db: Option<&DbPool>) -> String {
     env!("WEBDEP_DEFAULT_REPO").to_string()
 }
 
-fn resolve_github_token_from_db(db: Option<&DbPool>) -> Option<String> {
+async fn resolve_github_token_from_db(db: Option<&DbPool>) -> Option<String> {
     if let Some(pool) = db {
-        if let Ok(conn) = pool.lock() {
-            if let Some(first) = Git::read_github_tokens_from_conn(&conn).into_iter().next() {
-                return Some(first.token);
-            }
-            return None;
+        if let Some(first) = Git::read_github_tokens(pool).await.into_iter().next() {
+            return Some(first.token);
         }
+        return None;
     }
-    Git::get_sqlite_github_tokens().into_iter().next().map(|t| t.token)
+    Git::get_stored_github_tokens()
+        .into_iter()
+        .next()
+        .map(|t| t.token)
 }
 
 fn curl_get_text(url: &str, token: Option<&str>, accept: &str, timeout_secs: u64) -> Result<(u16, String), String> {
@@ -420,7 +419,7 @@ impl Updater {
         self.status.lock().unwrap().clone()
     }
 
-    fn get_latest_release_cached(&self, repo_slug: &str, force_refresh: bool) -> Result<GhReleaseResponse, String> {
+    async fn get_latest_release_cached(&self, repo_slug: &str, force_refresh: bool) -> Result<GhReleaseResponse, String> {
         if !force_refresh {
             if let Ok(guard) = self.release_cache.lock() {
                 if let Some(cached) = guard.as_ref() {
@@ -431,8 +430,14 @@ impl Updater {
             }
         }
 
-        let token = resolve_github_token_from_db(self.db.as_ref());
-        let result = fetch_github_release(repo_slug, None, token.as_deref());
+        let token = resolve_github_token_from_db(self.db.as_ref()).await;
+        let slug_owned = repo_slug.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            fetch_github_release(&slug_owned, None, token.as_deref())
+        })
+        .await
+        .map_err(|e| format!("Failed to check releases: {}", e))?;
+
         if let Ok(mut guard) = self.release_cache.lock() {
             *guard = Some(CachedReleaseCheck {
                 fetched_at: Instant::now(),
@@ -443,7 +448,7 @@ impl Updater {
         result
     }
 
-    pub fn get_version_info(&self, force_refresh: bool) -> GitVersionInfo {
+    pub async fn get_version_info(&self, force_refresh: bool) -> GitVersionInfo {
         let (is_updating, ready_to_restart) = {
             let st = self.status.lock().unwrap();
             (st.status == "in_progress", st.status == "ready_to_restart")
@@ -454,7 +459,7 @@ impl Updater {
         let current_release_tag = env!("WEBDEP_RELEASE_TAG").to_string();
         let commit_message = env!("WEBDEP_COMMIT_MSG").to_string();
 
-        let repo_slug = resolve_repo_slug_from_db(self.db.as_ref());
+        let repo_slug = resolve_repo_slug_from_db(self.db.as_ref()).await;
         let remote_url = format!("https://github.com/{}", repo_slug);
         let desired_asset = display_asset_name();
 
@@ -468,7 +473,7 @@ impl Updater {
             asset_size_bytes,
             published_at,
             check_error,
-        ) = match self.get_latest_release_cached(&repo_slug, force_refresh) {
+        ) = match self.get_latest_release_cached(&repo_slug, force_refresh).await {
             Ok(rel) => {
                 let sha = extract_short_sha_from_release(&rel);
                 let matched_asset = rel
@@ -528,7 +533,7 @@ impl Updater {
         }
     }
 
-    pub fn set_remote_repo(&self, repo_input: &str) -> Result<String, String> {
+    pub async fn set_remote_repo(&self, repo_input: &str) -> Result<String, String> {
         let trimmed = repo_input.trim();
         if trimmed.is_empty() {
             return Err("Repository name or URL cannot be empty".to_string());
@@ -541,13 +546,14 @@ impl Updater {
             .ok_or_else(|| "Enter a valid GitHub repo (e.g. owner/repo or https://github.com/owner/repo)".to_string())?;
 
         if let Some(pool) = &self.db {
-            if let Ok(conn) = pool.lock() {
-                conn.execute(
-                    "INSERT INTO settings(key, value) VALUES('update_repo', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![&slug],
-                )
-                .map_err(|e| format!("Failed to save update repository setting: {}", e))?;
-            }
+            sqlx::query(
+                "INSERT INTO settings(key, value) VALUES('update_repo', $1) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(&slug)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to save update repository setting: {}", e))?;
         }
 
         // Keep local git origin synchronized on best-effort basis in live binaries (never mutate repo remote during tests)
@@ -573,30 +579,33 @@ impl Updater {
         Ok(format!("https://github.com/{}", slug))
     }
 
-    pub fn start_update(&self, tag_override: Option<String>) -> Result<(), String> {
-        let mut st = self.status.lock().unwrap();
-        if st.status == "in_progress" {
-            return Err("An update is already running in background".to_string());
-        }
+    pub async fn start_update(&self, tag_override: Option<String>) -> Result<(), String> {
+        {
+            let mut st = self.status.lock().unwrap();
+            if st.status == "in_progress" {
+                return Err("An update is already running in background".to_string());
+            }
 
-        *st = UpdateStatus {
-            status: "in_progress".to_string(),
-            step: "Initializing release update...".to_string(),
-            progress: 5,
-            logs: vec![format!(
-                "[{}] Starting WebDep prebuilt GitHub Release update...",
-                now_time_str()
-            )],
-            error: None,
-            started_at: Some(now_secs()),
-            finished_at: None,
-        };
+            *st = UpdateStatus {
+                status: "in_progress".to_string(),
+                step: "Initializing release update...".to_string(),
+                progress: 5,
+                logs: vec![format!(
+                    "[{}] Starting WebDep prebuilt GitHub Release update...",
+                    now_time_str()
+                )],
+                error: None,
+                started_at: Some(now_secs()),
+                finished_at: None,
+            };
+        }
 
         let status_arc = self.status.clone();
         let cache_arc = self.release_cache.clone();
-        let db = self.db.clone();
+        let repo_slug = resolve_repo_slug_from_db(self.db.as_ref()).await;
+        let token = resolve_github_token_from_db(self.db.as_ref()).await;
         tokio::task::spawn_blocking(move || {
-            Self::run_update_pipeline(status_arc, cache_arc, db, tag_override);
+            Self::run_update_pipeline(status_arc, cache_arc, repo_slug, token, tag_override);
         });
 
         Ok(())
@@ -632,7 +641,8 @@ impl Updater {
     fn run_update_pipeline(
         status_arc: Arc<Mutex<UpdateStatus>>,
         cache_arc: Arc<Mutex<Option<CachedReleaseCheck>>>,
-        db: Option<DbPool>,
+        repo_slug: String,
+        token: Option<String>,
         tag_override: Option<String>,
     ) {
         // STEP 1: Verify platform support, target binary path, and preserve .env/data
@@ -678,12 +688,10 @@ impl Updater {
                 Self::append_log(&status_arc, "[Safety] Backed up .env configuration before binary swap");
             }
         }
-        Self::append_log(&status_arc, "[Safety] data/ directory and SQLite databases remain untouched");
+        Self::append_log(&status_arc, "[Safety] data/ directory and databases remain untouched");
 
         // STEP 2: Query GitHub Releases API
         Self::set_step(&status_arc, "Fetching latest GitHub Release metadata...", 25);
-        let repo_slug = resolve_repo_slug_from_db(db.as_ref());
-        let token = resolve_github_token_from_db(db.as_ref());
         Self::append_log(&status_arc, &format!("[GitHub] Checking releases on {}...", repo_slug));
 
         let release = match fetch_github_release(&repo_slug, tag_override.as_deref(), token.as_deref()) {
@@ -1054,18 +1062,15 @@ ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep-li
         assert_eq!(extract_short_sha_from_release(&tagged).as_deref(), Some("abc1234"));
     }
 
-    #[test]
-    fn test_set_remote_repo_persists_slug_in_db() {
-        let dir = std::env::temp_dir().join(format!("webdep-updater-repo-{}", now_secs()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::db::open_db(&dir).unwrap();
+    #[tokio::test]
+    async fn test_set_remote_repo_persists_slug_in_db() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
         let updater = Updater::with_db(db);
-        let saved = updater.set_remote_repo("acme/webdep-panel.git").unwrap();
+        let saved = updater.set_remote_repo("acme/webdep-panel.git").await.unwrap();
         assert_eq!(saved, "https://github.com/acme/webdep-panel");
         assert_eq!(
-            resolve_repo_slug_from_db(updater.db.as_ref()),
+            resolve_repo_slug_from_db(updater.db.as_ref()).await,
             "acme/webdep-panel"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

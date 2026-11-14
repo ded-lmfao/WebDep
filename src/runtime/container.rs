@@ -40,7 +40,7 @@ fn copy_dir_files_if_missing(src_dir: &Path, dst_dir: &Path) {
 impl Runtime {
     /// Provision an isolated container directory structure for a website (`data/containers/<slug>/`)
     /// so its database, uploads, temp files, caches, and environment never clash with any other website.
-    pub fn ensure_container(&self, p: &Project) -> WebsiteContainer {
+    pub async fn ensure_container(&self, p: &Project) -> WebsiteContainer {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let safe_slug = if p.slug.trim().is_empty() {
             format!("site-{}", p.id)
@@ -73,14 +73,15 @@ impl Runtime {
             p_port
         } else {
             let default_start = if p.project_kind == "service" { 8000 } else { 3000 };
-            let allocated = if let Ok(conn) = self.db.lock() {
-                let alloc = crate::db::allocate_global_unique_port(&conn, None, default_start, Some(p.id), None).unwrap_or(default_start);
-                let _ = conn.execute("UPDATE projects SET port = ? WHERE id = ?", rusqlite::params![alloc as u32, p.id]);
-                alloc
-            } else {
-                default_start
-            };
-            allocated
+            let alloc = crate::db::allocate_global_unique_port(&self.db, None, default_start, Some(p.id), None)
+                .await
+                .unwrap_or(default_start);
+            let _ = sqlx::query("UPDATE projects SET port = $1 WHERE id = $2")
+                .bind(alloc as i32)
+                .bind(p.id)
+                .execute(&self.db)
+                .await;
+            alloc
         };
         self.allow_firewall_port(port, Some(p.id));
 
