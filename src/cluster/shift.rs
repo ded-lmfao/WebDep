@@ -108,19 +108,13 @@ pub async fn verify_cross_node_shift_rbac(
     if user.is_main_admin {
         return Ok(());
     }
-    let has_target_node = state
-        .auth
-        .has_any_power_for_scope(
-            user,
-            &["nodes_manage", "projects_manage", "deploy", "*"],
-            "node",
-            Some(target_node_id),
-        )
-        .await;
+    let _ = target_node_id;
+    let has_target_node = !user.disabled
+        && user.has_any_power(&["nodes_manage", "projects_manage", "deploy", "*"]);
     if !has_target_node {
         return Err((
             StatusCode::FORBIDDEN,
-            format!("Cross-node shift denied: no grant for target node #{target_node_id}"),
+            "Cross-node shift denied: missing deploy/manage permission".to_string(),
         ));
     }
     Ok(())
@@ -1305,7 +1299,7 @@ mod tests {
 
     #[tokio::test]
     async fn cross_node_rbac_and_7_step_shift_abort_failure_and_cutover() {
-        let state = crate::api::access::tests_state_helper().await;
+        let state = crate::api::common::tests_state_helper().await;
         let local_manifest = state
             .cluster
             .pair_local_node("http://127.0.0.1:8080", "ws://127.0.0.1:8080/api/cluster/node-ws", "core-node")
@@ -1342,21 +1336,12 @@ mod tests {
             .await
             .unwrap();
 
-        // 1. Cross-node RBAC: developer with project deploy power only is forbidden from shifting to unauthorized node
+        // 1. Cross-node RBAC: user without project assignment is forbidden; assigning the project with deploy allows shift
         let dev_id: i64 = sqlx::query_scalar(
             "INSERT INTO users(username, password_hash, permissions, allowed_projects, created_at)
-             VALUES('shift_dev', 'hash', '[]', '[]', 1700000000) RETURNING id",
+             VALUES('shift_dev', 'hash', '[\"deploy\",\"projects_manage\"]', '[]', 1700000000) RETURNING id",
         )
         .fetch_one(&state.db)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO access_grants(user_id, scope_type, scope_id, role_preset, powers_json, created_at, updated_at)
-             VALUES($1, 'project', $2, 'developer', '[\"deploy\",\"projects_manage\"]', 1700000000, 1700000000)",
-        )
-        .bind(dev_id)
-        .bind(proj.id)
-        .execute(&state.db)
         .await
         .unwrap();
         let dev_user = state
@@ -1372,17 +1357,22 @@ mod tests {
             .unwrap_err();
         assert_eq!(rbac_err.0, StatusCode::FORBIDDEN);
 
-        // Granting target node access allows cross-node shift
-        sqlx::query(
-            "INSERT INTO access_grants(user_id, scope_type, scope_id, role_preset, powers_json, created_at, updated_at)
-             VALUES($1, 'node', $2, 'operator', '[\"deploy\"]', 1700000000, 1700000000)",
-        )
-        .bind(dev_id)
-        .bind(good_target_id)
-        .execute(&state.db)
-        .await
-        .unwrap();
-        verify_cross_node_shift_rbac(&state, &dev_user, proj.id, good_target_id)
+        // Assigning project access on user allows cross-node shift
+        sqlx::query("UPDATE users SET allowed_projects = $1 WHERE id = $2")
+            .bind(format!("[{}]", proj.id))
+            .bind(dev_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let dev_user_allowed = state
+            .auth
+            .list_users()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.id == dev_id)
+            .unwrap();
+        verify_cross_node_shift_rbac(&state, &dev_user_allowed, proj.id, good_target_id)
             .await
             .unwrap();
 
@@ -1439,7 +1429,7 @@ mod tests {
 
     #[tokio::test]
     async fn off_node_backup_and_cross_node_restore_moves_app_to_healthy_node() {
-        let state = crate::api::access::tests_state_helper().await;
+        let state = crate::api::common::tests_state_helper().await;
         let local_manifest = state
             .cluster
             .pair_local_node("http://127.0.0.1:8080", "ws://127.0.0.1:8080/api/cluster/node-ws", "core-node")

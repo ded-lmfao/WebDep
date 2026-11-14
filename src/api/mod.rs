@@ -1,6 +1,5 @@
 pub mod common;
 pub mod auth;
-pub mod access;
 pub mod cluster;
 pub mod projects;
 pub mod files;
@@ -49,7 +48,6 @@ async fn healthz_handler() -> (StatusCode, [(&'static str, &'static str); 3], &'
 }
 
 use self::auth::*;
-use self::access::*;
 use self::cluster::*;
 use self::projects::*;
 use self::files::*;
@@ -162,13 +160,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/users", get(list_users_handler).post(create_user_handler))
         .route("/api/users/:id", put(update_user_handler).patch(update_user_handler).delete(delete_user_handler))
         .route("/api/users/:id/reset-2fa", post(admin_reset_user_2fa_handler))
-        // Granular Access Control & Role Templates
-        .route("/api/access/overview", get(access_overview_handler))
-        .route("/api/access/my", get(my_access_handler))
-        .route("/api/access/grants", get(list_grants_handler).post(upsert_grant_handler))
-        .route("/api/access/grants/:id", delete(delete_grant_handler))
-        .route("/api/access/users/:id/revoke-sessions", post(revoke_user_sessions_handler))
-        .route("/api/access/audit", get(access_audit_handler))
         // Multi-Node Cluster Mesh & Enrollment
         .route("/api/cluster/enroll", post(enroll_node_handler))
         .route("/api/cluster/node-ws", get(node_ws_handler))

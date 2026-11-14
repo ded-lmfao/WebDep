@@ -87,8 +87,6 @@ pub(crate) async fn list_projects_handler(
 
     singleflight_json_bytes(&state.cache, cache_key, std::time::Duration::from_secs(4), &headers, || async {
         let user = user.clone();
-        let grants = state.auth.active_grants_for_user(user.id).await;
-        let now_s = now();
         let all = state
             .projects
             .list()
@@ -105,7 +103,7 @@ pub(crate) async fn list_projects_handler(
             .collect();
         let filtered: Vec<Project> = all
             .into_iter()
-            .filter(|p| crate::auth::access::evaluate_project_access(&user, &grants, p.id, now_s))
+            .filter(|p| !user.disabled && user.can_access_project(p.id))
             .collect();
         let mut disk_map = std::collections::HashMap::new();
         for p in &filtered {

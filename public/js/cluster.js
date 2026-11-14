@@ -120,8 +120,12 @@ export function renderNodesView(enrollTokens = null) {
 
   const addBtn = document.getElementById('add-node-header-btn');
   if (addBtn) addBtn.style.display = isMainAdmin ? '' : 'none';
+  const genTokenBtn = document.getElementById('nodes-generate-token-btn');
+  if (genTokenBtn) genTokenBtn.style.display = isMainAdmin ? '' : 'none';
   const fleetBtn = document.getElementById('fleet-update-header-btn');
   if (fleetBtn) fleetBtn.style.display = isMainAdmin ? '' : 'none';
+
+  const barTone = (pct) => (pct >= 85 ? 'rose' : pct >= 65 ? 'amber' : 'green');
 
   if (!nodes.length) {
     setHtmlIfChanged(
@@ -149,13 +153,13 @@ export function renderNodesView(enrollTokens = null) {
           ? '<span class="badge badge-warning">Draining</span>'
           : '<span class="badge badge-danger">Offline</span>';
 
-      const cpuPct = Number(m.cpuPct || 0);
+      const cpuPct = Math.max(0, Math.min(100, Number(m.cpuPct || 0)));
       const memUsed = Number(m.memUsed || 0);
       const memTotal = Number(m.memTotal || 0);
-      const memPct = memTotal > 0 ? Math.round((memUsed / memTotal) * 100) : 0;
+      const memPct = memTotal > 0 ? Math.min(100, Math.round((memUsed / memTotal) * 100)) : 0;
       const diskUsed = Number(m.diskUsed || 0);
       const diskTotal = Number(m.diskTotal || 0);
-      const diskPct = diskTotal > 0 ? Math.round((diskUsed / diskTotal) * 100) : 0;
+      const diskPct = diskTotal > 0 ? Math.min(100, Math.round((diskUsed / diskTotal) * 100)) : 0;
 
       const capBadges = [
         caps.cpuCores ? `${caps.cpuCores} vCPU` : '',
@@ -171,8 +175,8 @@ export function renderNodesView(enrollTokens = null) {
       const isSelectedFilter = String(state.selectedNodeFilter || 'all') === String(n.id);
 
       return `
-        <div class="project-card" style="display: flex; flex-direction: column; gap: 12px;">
-          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;">
+        <div class="node-card">
+          <div class="node-card-head">
             <div style="min-width: 0;">
               <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                 <span class="status-dot ${statusDot}"></span>
@@ -180,30 +184,33 @@ export function renderNodesView(enrollTokens = null) {
                 ${n.isLocal ? '<span class="badge badge-info" style="font-size: 10.5px;">Control Node</span>' : '<span class="badge badge-neutral" style="font-size: 10.5px;">Worker</span>'}
                 ${statusBadge}
               </div>
-              <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
-                Region: <strong style="color: var(--text-main);">${escapeHtml(n.region || 'default')}</strong>
-                &bull; Mesh <code style="font-size: 11.5px;">${escapeHtml(n.meshIp || '--')}</code>
-                ${n.publicIp ? `&bull; IP <code>${escapeHtml(n.publicIp)}</code>` : ''}
+              <div class="node-card-meta">
+                <span class="node-meta-item">Region <strong style="color: var(--text-main);">${escapeHtml(n.region || 'default')}</strong></span>
+                <span class="node-meta-item">Mesh <code>${escapeHtml(n.meshIp || '--')}</code></span>
+                ${n.publicIp ? `<span class="node-meta-item">IP <code>${escapeHtml(n.publicIp)}</code></span>` : ''}
               </div>
             </div>
             <div style="text-align: right; font-size: 11.5px; color: var(--text-dim); white-space: nowrap;">
-              <div>v${escapeHtml(n.nodeVersion || '--')}</div>
+              <div style="color: var(--text-muted); font-family: var(--font-mono);">v${escapeHtml(n.nodeVersion || '--')}</div>
               <div>${n.lastSeenAt ? `Seen ${formatRelativeTime(n.lastSeenAt)}` : 'Never seen'}</div>
             </div>
           </div>
 
-          <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 10px; background: var(--bg-input); border-radius: var(--radius-md); border: 1px solid var(--border-subtle);">
-            <div>
-              <div style="font-size: 11px; color: var(--text-dim);">CPU</div>
-              <div style="font-size: 13.5px; font-weight: 600; color: var(--text-main);">${cpuPct.toFixed(1)}%</div>
+          <div class="node-metrics-grid">
+            <div class="node-metric-box">
+              <div class="node-metric-label"><span>CPU</span><span>${cpuPct.toFixed(1)}%</span></div>
+              <div class="node-metric-val">${cpuPct.toFixed(1)}%</div>
+              <div class="progress-bar"><div class="progress-fill ${barTone(cpuPct)}" style="width: ${cpuPct.toFixed(1)}%;"></div></div>
             </div>
-            <div>
-              <div style="font-size: 11px; color: var(--text-dim);">Memory</div>
-              <div style="font-size: 13.5px; font-weight: 600; color: var(--text-main);">${memTotal > 0 ? `${memPct}% (${formatBytesHuman(memUsed)})` : '--'}</div>
+            <div class="node-metric-box">
+              <div class="node-metric-label"><span>Memory</span><span>${memTotal > 0 ? `${memPct}%` : '--'}</span></div>
+              <div class="node-metric-val">${memTotal > 0 ? `${formatBytesHuman(memUsed)} / ${formatBytesHuman(memTotal)}` : '--'}</div>
+              <div class="progress-bar"><div class="progress-fill ${barTone(memPct)}" style="width: ${memPct}%;"></div></div>
             </div>
-            <div>
-              <div style="font-size: 11px; color: var(--text-dim);">Disk / Uptime</div>
-              <div style="font-size: 13.5px; font-weight: 600; color: var(--text-main);">${diskTotal > 0 ? `${diskPct}%` : '--'} &bull; ${formatUptimeShort(m.uptimeS)}</div>
+            <div class="node-metric-box">
+              <div class="node-metric-label"><span>Disk</span><span>Uptime ${formatUptimeShort(m.uptimeS)}</span></div>
+              <div class="node-metric-val">${diskTotal > 0 ? `${diskPct}% (${formatBytesHuman(diskUsed)})` : '--'}</div>
+              <div class="progress-bar"><div class="progress-fill ${barTone(diskPct)}" style="width: ${diskPct}%;"></div></div>
             </div>
           </div>
 
@@ -211,9 +218,10 @@ export function renderNodesView(enrollTokens = null) {
             ${capBadges}
           </div>
 
-          <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; padding-top: 6px; border-top: 1px solid var(--border-subtle); flex-wrap: wrap;">
+          <div class="node-card-footer">
             <div style="font-size: 12px; color: var(--text-muted);">
-              <strong>${Number(n.projectCount || 0)}</strong> apps &bull; <strong>${Number(n.databaseCount || 0)}</strong> databases
+              <strong style="color: var(--text-main);">${Number(n.projectCount || 0)}</strong> apps &bull;
+              <strong style="color: var(--text-main);">${Number(n.databaseCount || 0)}</strong> databases
             </div>
             <div style="display: flex; gap: 6px; flex-wrap: wrap;">
               <button class="btn btn-secondary btn-sm" onclick="setGlobalNodeFilter('${isSelectedFilter ? 'all' : n.id}')">
@@ -242,25 +250,48 @@ export function renderNodesView(enrollTokens = null) {
   if (tokensEl && Array.isArray(enrollTokens)) {
     const nowS = Math.floor(Date.now() / 1000);
     if (!enrollTokens.length) {
-      setHtmlIfChanged(tokensEl, '<div style="color: var(--text-dim); font-size: 12.5px;">No enrollment tokens generated yet.</div>');
+      setHtmlIfChanged(
+        tokensEl,
+        '<div style="padding: 20px; color: var(--text-dim); font-size: 13px;">No enrollment tokens generated yet. Click <strong>+ Add Node</strong> to create a single-use join command.</div>',
+      );
     } else {
       const rows = enrollTokens.slice(0, 8).map((t) => {
         let status = '<span class="badge badge-success">Active</span>';
         if (t.usedAt) status = '<span class="badge badge-neutral">Used</span>';
         else if (t.expiresAt <= nowS) status = '<span class="badge badge-danger">Expired</span>';
+
+        const resultCell = t.usedNodeId
+          ? `<span class="badge badge-info">Enrolled &bull; Node #${t.usedNodeId}</span>`
+          : (t.expiresAt > nowS ? `Expires ${formatRelativeTime(t.expiresAt)}` : 'Expired');
+
         return `
           <tr>
             <td><strong>${escapeHtml(t.label || '(unlabeled)')}</strong></td>
-            <td>${escapeHtml(t.region || 'default')}</td>
+            <td><span class="badge badge-neutral">${escapeHtml(t.region || 'default')}</span></td>
             <td>${status}</td>
-            <td>${formatRelativeTime(t.createdAt)}</td>
-            <td>${t.usedNodeId ? `Node #${t.usedNodeId}` : (t.expiresAt > nowS ? `Expires ${formatRelativeTime(t.expiresAt)}` : 'Expired')}</td>
+            <td style="color: var(--text-dim);">${formatRelativeTime(t.createdAt)}</td>
+            <td style="text-align: right;">${resultCell}</td>
           </tr>
         `;
       }).join('');
       setHtmlIfChanged(
         tokensEl,
-        `<table class="data-table"><thead><tr><th>Label</th><th>Region</th><th>Status</th><th>Created</th><th>Result / Expiry</th></tr></thead><tbody>${rows}</tbody></table>`,
+        `
+          <div class="table-responsive" style="padding-bottom: 0;">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Label</th>
+                  <th>Region</th>
+                  <th>Status</th>
+                  <th>Created</th>
+                  <th style="text-align: right;">Result / Expiry</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        `,
       );
     }
   }
@@ -287,6 +318,10 @@ export function setGlobalNodeFilter(nodeId) {
 export function setAddNodeTargetIp(ip) {
   const el = document.getElementById('add-node-target-ip');
   if (el) el.value = ip;
+  if (ip === '127.0.0.1' || ip === '::1') {
+    const coreEl = document.getElementById('add-node-core-url');
+    if (coreEl) coreEl.value = window.location.origin;
+  }
 }
 
 export async function openAddNodeModal() {
@@ -367,10 +402,18 @@ export async function generateNodeEnrollToken() {
     const freshEl = document.getElementById('add-node-fresh-cmd');
     const svcEl = document.getElementById('add-node-service-cmd');
     const cmdEl = document.getElementById('add-node-join-cmd');
+    const psEl = document.getElementById('add-node-ps-cmd');
     const tokEl = document.getElementById('add-node-raw-token');
     if (freshEl) freshEl.value = res.freshVpsCommand || '';
     if (svcEl) svcEl.value = res.serviceCommand || '';
     if (cmdEl) cmdEl.value = res.joinCommand || '';
+    if (psEl) {
+      const idx = Math.max(2, (state.nodes || []).length + 1);
+      const safeDir = `C:\\tmp\\webdep-node${idx}`;
+      const port = 4690 + idx;
+      const flags = (res.joinCommand || '').replace(/^webdep\s+/, '');
+      psEl.value = `mkdir ${safeDir} -Force | Out-Null; cd ${safeDir}; Set-Content .env @("DATA_DIR=${safeDir}\\data", "PORT=${port}"); $env:WEBDEP_NODE_P2P_BIND="127.0.0.1"; $env:WEBDEP_NODE_P2P_PORT="0"; webdep.exe ${flags}`;
+    }
     if (tokEl) tokEl.textContent = res.token || '';
     if (outEl) outEl.style.display = 'block';
     toast('Complete VPS join command generated', 'success');

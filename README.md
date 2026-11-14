@@ -195,8 +195,7 @@ Move a website or backend service from one VPS to another directly from its work
 | **Services** | 24/7 background daemons (Lavalink/Java, Python workers, Node bots, Go/Rust binaries) with live PID tracking and log streaming. |
 | **Databases** | Isolated native PostgreSQL clusters on any node with SCRAM-SHA-256 auth, local/mesh/CIDR/public rules, and 1-click `DATABASE_URL` linking. |
 | **Nodes** | Cluster Nodes & Mesh Topology view with node telemetry, `+ Add Node` token/command generator, drain/evacuate, and `Update Fleet`. |
-| **Access** | Granular `global`, `node`, `project`, and `database` RBAC grants, role templates, expiring grants, and live **Online / Idle / Offline** session presence. |
-| **Platform Settings** | WebAuthn Passkeys, TOTP 2FA, GitHub tokens, SHA-256 verified Core/Fleet updates, server cache/restart controls, and theme settings. |
+| **Platform Settings** | WebAuthn Passkeys, TOTP 2FA, User Accounts & Permissions, GitHub tokens, SHA-256 verified Core/Fleet updates, server cache/restart controls, and theme settings. |
 
 ### Website & Service Workspace Tabs
 Opening any website or service exposes its workspace toolbar (**Start / Stop / Restart**, **Deploy**, **Move Node**) and tab bar:

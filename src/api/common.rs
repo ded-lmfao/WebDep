@@ -380,7 +380,6 @@ pub(crate) async fn create_authenticated_response(
 
     let active_sessions = state.auth.count_active_sessions(user.id).await;
     let passkey_count = state.auth.count_user_passkeys(user.id).await;
-    let grants = state.auth.active_grants_for_user(user.id).await;
     let secure_attr = if is_https_request(headers, state.auth.force_secure_cookies) {
         "; Secure"
     } else {
@@ -396,7 +395,6 @@ pub(crate) async fn create_authenticated_response(
         csrf: session.csrf_token,
         active_sessions,
         passkey_count,
-        grants,
     });
 
     let mut res = body.into_response();
@@ -624,8 +622,6 @@ pub(crate) struct LoginResponse {
     pub(crate) active_sessions: usize,
     #[serde(rename = "passkeyCount")]
     pub(crate) passkey_count: usize,
-    #[serde(default)]
-    pub(crate) grants: Vec<crate::auth::access::AccessGrant>,
 }
 
 
@@ -686,5 +682,62 @@ mod security_tests {
         assert!(!should_touch_session_activity("/api/auth/presence", &Method::POST));
         assert!(should_touch_session_activity("/api/projects", &Method::GET));
         assert!(should_touch_session_activity("/api/projects/1/deploy", &Method::POST));
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn tests_state_helper() -> AppState {
+    use std::sync::Arc;
+
+    let base = std::env::temp_dir().join(format!(
+        "webdep_test_state_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let db = crate::pg_control::test_db::isolated_pool().await;
+    let vault = Arc::new(crate::vault::Vault::new(&base).unwrap());
+    let auth = Arc::new(crate::auth::Auth::new(db.clone(), 3600));
+    auth.ensure_admin().await;
+    let projects = Arc::new(crate::projects::Projects::new(db.clone(), vault.clone()));
+    let logs = Arc::new(crate::logs::Logs::new(db.clone()));
+    let monitor = Arc::new(crate::monitor::Monitor::new());
+    let cache = Arc::new(crate::cache::AppCache::new());
+    let caddy = Arc::new(crate::caddy::Caddy::new(&base));
+    let runtime = Arc::new(crate::runtime::Runtime::new(db.clone(), (*logs).clone()));
+    let deployer = Arc::new(
+        crate::deployer::Deployer::new(
+            db.clone(),
+            (*logs).clone(),
+            projects.clone(),
+            runtime.clone(),
+            cache.clone(),
+        )
+        .await,
+    );
+    let databases = Arc::new(crate::databases::Databases::new(
+        db.clone(),
+        vault,
+        (*logs).clone(),
+        &base,
+    ));
+    let updater = Arc::new(crate::updater::Updater::with_db(db.clone()));
+    let cluster = Arc::new(crate::cluster::ClusterManager::new(db.clone(), base.clone()));
+
+    AppState {
+        db,
+        auth,
+        projects,
+        logs,
+        monitor,
+        cache,
+        caddy,
+        runtime,
+        deployer,
+        databases,
+        updater,
+        cluster,
     }
 }

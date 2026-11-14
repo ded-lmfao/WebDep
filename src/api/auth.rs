@@ -204,13 +204,11 @@ pub(crate) async fn me_handler(
     };
     let active_sessions = state.auth.count_active_sessions(user.id).await;
     let passkey_count = state.auth.count_user_passkeys(user.id).await;
-    let grants = state.auth.active_grants_for_user(user.id).await;
     Ok(Json(LoginResponse {
         user,
         csrf: session.csrf_token,
         active_sessions,
         passkey_count,
-        grants,
     }))
 }
 

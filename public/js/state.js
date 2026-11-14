@@ -13,7 +13,6 @@ const PAGE_SIZE = 20;
 const state = {
   user: null,
   csrf: null,
-  grants: [],
   currentView: 'overview',
   selectedEntityKind: 'project',
   selectedProjectId: null,
@@ -566,15 +565,39 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+function normalizeTimestampMs(ts) {
+  if (ts === null || ts === undefined || ts === '') return NaN;
+  if (typeof ts === 'number') {
+    if (!Number.isFinite(ts) || ts <= 0) return NaN;
+    return ts < 1e12 ? ts * 1000 : ts;
+  }
+  const raw = String(ts).trim();
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return NaN;
+    return n < 1e12 ? n * 1000 : n;
+  }
+  return new Date(raw).getTime();
+}
+
 function formatDate(ts) {
-  if (!ts) return '--';
-  const d = new Date(ts);
+  const ms = normalizeTimestampMs(ts);
+  if (!Number.isFinite(ms)) return '--';
+  const d = new Date(ms);
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function formatRelativeTime(ts) {
-  if (!ts) return '--';
-  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  const ms = normalizeTimestampMs(ts);
+  if (!Number.isFinite(ms)) return '--';
+  const diff = Math.floor((Date.now() - ms) / 1000);
+  if (diff < 0) {
+    const rem = Math.abs(diff);
+    if (rem < 60) return `in ${rem}s`;
+    if (rem < 3600) return `in ${Math.floor(rem / 60)}m`;
+    if (rem < 86400) return `in ${Math.floor(rem / 3600)}h`;
+    return `in ${Math.floor(rem / 86400)}d`;
+  }
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;

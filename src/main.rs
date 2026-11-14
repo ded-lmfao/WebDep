@@ -274,7 +274,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 interval.tick().await;
                 mem_cache.prune_expired();
                 mem_auth.purge_expired_sessions().await;
-                mem_auth.purge_expired_grants().await;
                 mem_auth.prune_in_memory();
                 crate::db::prune_old_logs(&mem_db, 20_000).await;
                 trim_process_heap();

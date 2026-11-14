@@ -141,13 +141,10 @@ pub(crate) async fn list_databases_handler(
             "Permission denied: Requires one of [databases, databases_manage].".to_string(),
         ));
     }
-    let grants = state.auth.active_grants_for_user(user.id).await;
-    let now_s = now();
-    let cache_key = format!("databases:u{}:g{}", user.id, grants.len());
+    let cache_key = format!("databases:u{}", user.id);
 
     singleflight_json_bytes(&state.cache, cache_key, std::time::Duration::from_secs(4), &headers, || async {
         let user = user.clone();
-        let grants = grants.clone();
         let all = state
             .databases
             .list_with_secrets(true)
@@ -158,23 +155,15 @@ pub(crate) async fn list_databases_handler(
             let list: Vec<DatabaseResponse> = all
                 .into_iter()
                 .filter(|db| {
-                    crate::auth::access::evaluate_database_power(
+                    crate::auth::Auth::user_has_database_power(
                         &user,
-                        &grants,
                         &["databases", "databases_manage"],
-                        db.id,
                         db.linked_project_id,
-                        now_s,
                     )
                 })
                 .map(|mut db| {
-                    let can_creds = crate::auth::access::can_view_db_credentials(
-                        &user,
-                        &grants,
-                        db.id,
-                        db.linked_project_id,
-                        now_s,
-                    );
+                    let can_creds =
+                        crate::auth::Auth::user_can_view_db_credentials(&user, db.linked_project_id);
                     if !can_creds {
                         db.db_password = None;
                     }

@@ -1,18 +1,37 @@
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::DbPool;
-use super::access::{
-    can_list_databases, can_view_db_credentials, delete_expired_grants, evaluate_database_power,
-    evaluate_project_access, evaluate_scoped_powers, list_active_user_grants, publish_revocation,
-    AccessGrant, AccessRevocationEvent, ACCESS_REVOKE_CHANNEL,
-};
 use super::password::{constant_time_eq, hash_password, random_token, verify_password};
 use super::session::Session;
 use super::totp::{sync_real_utc_offset, verify_totp_code};
 use super::user::User;
+
+pub const ACCESS_REVOKE_CHANNEL: &str = "webdep_access_revoke";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessRevocationEvent {
+    pub kind: String,
+    pub user_id: i64,
+    pub scope_type: Option<String>,
+    pub scope_id: Option<i64>,
+    pub reason: String,
+    pub ts: i64,
+}
+
+async fn publish_revocation(db: &DbPool, event: &AccessRevocationEvent) {
+    if let Ok(payload) = serde_json::to_string(event) {
+        let _ = sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(ACCESS_REVOKE_CHANNEL)
+            .bind(&payload)
+            .execute(db)
+            .await;
+    }
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct FailureRecord {
@@ -641,22 +660,8 @@ impl Auth {
         });
     }
 
-    pub async fn active_grants_for_user(&self, user_id: i64) -> Vec<AccessGrant> {
-        let now_s = Self::now_secs() as i64;
-        list_active_user_grants(&self.db, user_id, now_s)
-            .await
-            .unwrap_or_default()
-    }
-
     pub async fn can_access_project_for_user(&self, user: &User, project_id: i64) -> bool {
-        if user.disabled {
-            return false;
-        }
-        if user.is_main_admin {
-            return true;
-        }
-        let grants = self.active_grants_for_user(user.id).await;
-        evaluate_project_access(user, &grants, project_id, Self::now_secs() as i64)
+        !user.disabled && user.can_access_project(project_id)
     }
 
     pub async fn has_power_for_scope(
@@ -683,22 +688,19 @@ impl Auth {
         if user.is_main_admin {
             return true;
         }
-        let grants = self.active_grants_for_user(user.id).await;
-        evaluate_scoped_powers(
-            user,
-            &grants,
-            powers,
-            scope_type,
-            scope_id,
-            Self::now_secs() as i64,
-        )
+        if scope_type == "project" {
+            if let Some(pid) = scope_id {
+                if !user.can_access_project(pid) {
+                    return false;
+                }
+            }
+        }
+        user.has_any_power(powers)
     }
 
-    pub async fn has_database_power_for_user(
-        &self,
+    pub fn user_has_database_power(
         user: &User,
         powers: &[&str],
-        db_id: i64,
         linked_project_id: Option<i64>,
     ) -> bool {
         if user.disabled {
@@ -707,26 +709,28 @@ impl Auth {
         if user.is_main_admin {
             return true;
         }
-        let grants = self.active_grants_for_user(user.id).await;
-        evaluate_database_power(
-            user,
-            &grants,
-            powers,
-            db_id,
-            linked_project_id,
-            Self::now_secs() as i64,
-        )
+        if let Some(pid) = linked_project_id {
+            return user.can_access_project(pid) && user.has_any_power(powers);
+        }
+        user.has_any_power(powers) && (user.all_projects || user.has_power("databases_manage"))
+    }
+
+    pub fn user_can_view_db_credentials(user: &User, linked_project_id: Option<i64>) -> bool {
+        Self::user_has_database_power(user, &["databases_manage", "env"], linked_project_id)
+    }
+
+    pub async fn has_database_power_for_user(
+        &self,
+        user: &User,
+        powers: &[&str],
+        _db_id: i64,
+        linked_project_id: Option<i64>,
+    ) -> bool {
+        Self::user_has_database_power(user, powers, linked_project_id)
     }
 
     pub async fn can_list_databases_for_user(&self, user: &User) -> bool {
-        if user.disabled {
-            return false;
-        }
-        if user.is_main_admin {
-            return true;
-        }
-        let grants = self.active_grants_for_user(user.id).await;
-        can_list_databases(user, &grants, Self::now_secs() as i64)
+        !user.disabled && user.has_any_power(&["databases", "databases_manage"])
     }
 
     pub async fn can_view_db_credentials_for_user(
@@ -735,37 +739,8 @@ impl Auth {
         db_id: i64,
         linked_project_id: Option<i64>,
     ) -> bool {
-        if user.disabled {
-            return false;
-        }
-        if user.is_main_admin {
-            return true;
-        }
-        let grants = self.active_grants_for_user(user.id).await;
-        can_view_db_credentials(
-            user,
-            &grants,
-            db_id,
-            linked_project_id,
-            Self::now_secs() as i64,
-        )
-    }
-
-    pub async fn purge_expired_grants(&self) {
-        let now_s = Self::now_secs() as i64;
-        if let Ok(expired) = delete_expired_grants(&self.db, now_s).await {
-            for grant in expired {
-                self.notify_revocation(AccessRevocationEvent {
-                    kind: "grant_revoked".to_string(),
-                    user_id: grant.user_id,
-                    scope_type: Some(grant.scope_type),
-                    scope_id: grant.scope_id,
-                    reason: "Access grant expired".to_string(),
-                    ts: now_s,
-                })
-                .await;
-            }
-        }
+        let _ = db_id;
+        Self::user_can_view_db_credentials(user, linked_project_id)
     }
 
     pub async fn count_active_sessions(&self, user_id: i64) -> usize {

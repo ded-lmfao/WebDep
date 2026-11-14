@@ -214,7 +214,7 @@ pub(crate) async fn update_user_handler(
         }
         state
             .auth
-            .notify_revocation(crate::auth::access::AccessRevocationEvent {
+            .notify_revocation(crate::auth::manager::AccessRevocationEvent {
                 kind: "grant_updated".to_string(),
                 user_id: id,
                 scope_type: None,

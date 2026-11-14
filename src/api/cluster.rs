@@ -714,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn cluster_api_auth_enrollment_drain_and_delete() {
-        let state = crate::api::access::tests_state_helper().await;
+        let state = crate::api::common::tests_state_helper().await;
         let users = state.auth.list_users().await.unwrap();
         let admin = users.into_iter().find(|u| u.is_main_admin).unwrap();
         let admin_sess = state.auth.create_session(admin.id).await.unwrap();
@@ -855,25 +855,25 @@ mod tests {
         assert_eq!(enrolled.mesh_ip, "10.200.0.1");
         assert_eq!(enrolled.region, "us-west");
 
-        // Access overview lists real cluster node
-        let ov_res = router
+        // Cluster nodes listing includes enrolled node
+        let nodes_res = router
             .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/api/access/overview")
+                    .uri("/api/cluster/nodes")
                     .header(header::COOKIE, format!("nd_session={admin_sid}"))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(ov_res.status(), StatusCode::OK);
-        let ov_bytes = axum::body::to_bytes(ov_res.into_body(), 1024 * 64)
+        assert_eq!(nodes_res.status(), StatusCode::OK);
+        let nodes_bytes = axum::body::to_bytes(nodes_res.into_body(), 1024 * 64)
             .await
             .unwrap();
-        let ov_text = String::from_utf8_lossy(&ov_bytes);
-        assert!(ov_text.contains("us-west-1"));
+        let nodes_text = String::from_utf8_lossy(&nodes_bytes);
+        assert!(nodes_text.contains("us-west-1"));
 
         // Drain node & delete node
         let drain_res = router
@@ -922,7 +922,7 @@ mod tests {
 
     #[tokio::test]
     async fn phase4_ws_rpc_streaming_and_remote_http_proxy() {
-        let state = crate::api::access::tests_state_helper().await;
+        let state = crate::api::common::tests_state_helper().await;
         let users = state.auth.list_users().await.unwrap();
         let admin = users.into_iter().find(|u| u.is_main_admin).unwrap();
         let admin_sess = state.auth.create_session(admin.id).await.unwrap();
