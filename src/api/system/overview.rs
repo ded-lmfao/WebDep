@@ -313,11 +313,24 @@ async fn compute_overview_bytes(
     state: &AppState,
     user: &crate::auth::User,
 ) -> Result<axum::body::Bytes, StatusCode> {
+    let grants = state.auth.active_grants_for_user(user.id).await;
+    let now_s = now();
     let mut projs = state.projects.list().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    projs.retain(|p| user.can_access_project(p.id));
+    projs.retain(|p| crate::auth::access::evaluate_project_access(user, &grants, p.id, now_s));
 
-    let raw_dbs = if user.has_any_power(&["databases", "databases_manage"]) {
-        state.databases.list_overview_summaries().await.unwrap_or_default()
+    let raw_dbs = if crate::auth::access::can_list_databases(user, &grants, now_s) {
+        let mut list = state.databases.list_overview_summaries().await.unwrap_or_default();
+        list.retain(|db| {
+            crate::auth::access::evaluate_database_power(
+                user,
+                &grants,
+                &["databases", "databases_manage"],
+                db.id,
+                db.linked_project_id,
+                now_s,
+            )
+        });
+        list
     } else {
         Vec::new()
     };
@@ -328,11 +341,12 @@ async fn compute_overview_bytes(
         load_overview_deployments(&state.db, &projs).await
     };
     let mut recent = state.deployer.list_deployments(None, 25).await;
+    recent.retain(|d| crate::auth::access::evaluate_project_access(user, &grants, d.project_id, now_s));
 
     let state = state.clone();
     let user = user.clone();
     tokio::task::spawn_blocking(move || {
-        compute_overview_bytes_sync(&state, &user, projs, raw_dbs, last_success_map, active_map, &mut recent)
+        compute_overview_bytes_sync(&state, &user, &grants, now_s, projs, raw_dbs, last_success_map, active_map, &mut recent)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -341,8 +355,10 @@ async fn compute_overview_bytes(
 fn compute_overview_bytes_sync(
     state: &AppState,
     user: &crate::auth::User,
+    grants: &[crate::auth::access::AccessGrant],
+    now_s: i64,
     projs: Vec<Project>,
-    mut raw_dbs: Vec<crate::databases::DatabaseOverviewSummary>,
+    raw_dbs: Vec<crate::databases::DatabaseOverviewSummary>,
     mut last_success_map: std::collections::HashMap<i64, crate::deployer::Deployment>,
     mut active_map: std::collections::HashMap<i64, crate::deployer::Deployment>,
     recent: &mut Vec<crate::deployer::Deployment>,
@@ -379,13 +395,7 @@ fn compute_overview_bytes_sync(
         }
     }
 
-    let db_entries = if user.has_any_power(&["databases", "databases_manage"]) {
-        let can_unlinked = user.all_projects || user.has_power("databases_manage");
-        raw_dbs.retain(|db| {
-            db.linked_project_id
-                .map(|pid| user.can_access_project(pid))
-                .unwrap_or(can_unlinked)
-        });
+    let db_entries = if !raw_dbs.is_empty() {
         let mut entries = Vec::with_capacity(raw_dbs.len());
         for db in raw_dbs {
             let mut d_pid = None;
@@ -611,7 +621,7 @@ fn compute_overview_bytes_sync(
         total_workloads_count: total_count,
     };
 
-    recent.retain(|d| user.can_access_project(d.project_id));
+    recent.retain(|d| crate::auth::access::evaluate_project_access(user, grants, d.project_id, now_s));
     recent.truncate(10);
 
     let payload = OverviewResponse {
@@ -652,9 +662,11 @@ pub(crate) async fn monitor_handler(
         return Ok(res);
     }
 
+    let grants = state.auth.active_grants_for_user(user.id).await;
+    let now_s = now();
     let sample = state.monitor.sample();
     let mut projs = state.projects.list().await.unwrap_or_default();
-    projs.retain(|p| user.can_access_project(p.id));
+    projs.retain(|p| crate::auth::access::evaluate_project_access(&user, &grants, p.id, now_s));
     let now_ms = now();
 
     let proj_metrics: Vec<serde_json::Value> = projs

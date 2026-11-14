@@ -13,6 +13,7 @@ const PAGE_SIZE = 20;
 const state = {
   user: null,
   csrf: null,
+  grants: [],
   currentView: 'overview',
   selectedEntityKind: 'project',
   selectedProjectId: null,

@@ -185,11 +185,10 @@ pub(crate) async fn update_user_handler(
                 .execute(&state.db)
                 .await;
             if is_disabled {
-                let _ = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-                    .bind(id)
-                    .execute(&state.db)
+                let _ = state
+                    .auth
+                    .revoke_all_user_sessions(id, "User account disabled")
                     .await;
-                state.auth.clear_user_presence(id);
             }
         }
         if let Some(perms) = payload.permissions.as_ref() {
@@ -213,6 +212,17 @@ pub(crate) async fn update_user_handler(
                 .execute(&state.db)
                 .await;
         }
+        state
+            .auth
+            .notify_revocation(crate::auth::access::AccessRevocationEvent {
+                kind: "grant_updated".to_string(),
+                user_id: id,
+                scope_type: None,
+                scope_id: None,
+                reason: "User account permissions updated".to_string(),
+                ts: now(),
+            })
+            .await;
     }
 
     log_audit(&state, &actor.username, "user.update", Some(&existing.username), None).await;
@@ -246,11 +256,10 @@ pub(crate) async fn delete_user_handler(
         return Err((StatusCode::BAD_REQUEST, "Cannot delete your own currently logged-in account.".into()));
     }
 
-    let _ = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-        .bind(id)
-        .execute(&state.db)
+    let _ = state
+        .auth
+        .revoke_all_user_sessions(id, "User account deleted")
         .await;
-    state.auth.clear_user_presence(id);
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(id)
         .execute(&state.db)

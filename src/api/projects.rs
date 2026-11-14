@@ -65,6 +65,8 @@ pub(crate) async fn list_projects_handler(
 
     singleflight_json_bytes(&state.cache, cache_key, std::time::Duration::from_secs(4), &headers, || async {
         let user = user.clone();
+        let grants = state.auth.active_grants_for_user(user.id).await;
+        let now_s = now();
         let all = state
             .projects
             .list()
@@ -74,7 +76,7 @@ pub(crate) async fn list_projects_handler(
             let cwd = cached_cwd();
             let list: Vec<ProjectResponse> = all
                 .into_iter()
-                .filter(|p| user.can_access_project(p.id))
+                .filter(|p| crate::auth::access::evaluate_project_access(&user, &grants, p.id, now_s))
                 .map(|p| to_project_response(p, cwd))
                 .collect();
             let json = serde_json::to_string(&list).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -92,7 +94,7 @@ pub(crate) async fn get_project_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<ProjectResponse>, StatusCode> {
     let user = require_current_user(&state, &headers).await.map_err(|(c, _)| c)?;
-    if !user.can_access_project(id) {
+    if !state.auth.can_access_project_for_user(&user, id).await {
         return Err(StatusCode::FORBIDDEN);
     }
     let p = state

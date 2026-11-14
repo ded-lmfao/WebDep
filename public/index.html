@@ -241,6 +241,13 @@
         </a>
 
         <div class="nav-section-title">Administration</div>
+        <a class="nav-item" data-view="access" id="nav-access-item" style="display: none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+          </svg>
+          <span>Access</span>
+        </a>
         <a class="nav-item" data-view="settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <circle cx="12" cy="12" r="3"></circle>
@@ -1910,6 +1917,54 @@
           </div>
         </section>
 
+        <!-- ==================== 11B. ACCESS CONTROL VIEW ==================== -->
+        <section id="view-access" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Access Control &amp; Role Grants</h1>
+              <p>Per-user, per-app, per-node &amp; time-bound RBAC policies with instant live revocation</p>
+            </div>
+            <div class="view-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button class="btn btn-secondary btn-sm" onclick="window.loadAccessView && window.loadAccessView()">Refresh</button>
+              <button class="btn btn-primary btn-sm" id="access-new-grant-btn">+ New Access Grant</button>
+            </div>
+          </div>
+
+          <div class="stats-grid" style="margin-bottom: 16px;">
+            <div class="stat-card">
+              <div class="stat-label">Platform Users</div>
+              <div class="stat-value" id="access-stat-users">0</div>
+              <div class="stat-meta">Registered accounts</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Active Grants</div>
+              <div class="stat-value" id="access-stat-grants">0</div>
+              <div class="stat-meta">Explicit scoped overrides</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Expiring (&lt; 24h)</div>
+              <div class="stat-value" id="access-stat-expiring">0</div>
+              <div class="stat-meta">Auto-revoked on expiry</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Active Sessions</div>
+              <div class="stat-value" id="access-stat-sessions">0</div>
+              <div class="stat-meta">Live authenticated browsers</div>
+            </div>
+          </div>
+
+          <div style="margin-bottom: 16px;">
+            <div class="filter-pills" id="access-subtabs">
+              <button type="button" class="pill active" data-subtab="by-user">By User</button>
+              <button type="button" class="pill" data-subtab="by-resource">By App / Resource</button>
+              <button type="button" class="pill" data-subtab="templates">Role Templates</button>
+              <button type="button" class="pill" data-subtab="audit">Expiring &amp; Audit</button>
+            </div>
+          </div>
+
+          <div id="access-content-panel"></div>
+        </section>
+
         <!-- ==================== 12. ACTIVITY VIEW ==================== -->
         <section id="view-audit" class="view-section">
           <div class="view-header">
@@ -2613,6 +2668,69 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" data-close-modal>Cancel</button>
         <button class="btn btn-primary" id="save-new-user-btn">Save User</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- GRANULAR ACCESS GRANT MODAL -->
+  <div class="modal-overlay" id="modal-access-grant">
+    <div class="modal-container" style="max-width: 580px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Assign Scoped Access Grant</h3>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="access-grant-form" autocomplete="off">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="grant-user-id">Target User</label>
+              <select id="grant-user-id" class="form-control"></select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="grant-scope-type">Scope</label>
+              <select id="grant-scope-type" class="form-control">
+                <option value="project">App / Service</option>
+                <option value="database">Managed Database</option>
+                <option value="node">Node / Server</option>
+                <option value="global">Global Override</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group" id="grant-scope-id-group">
+              <label class="form-label" for="grant-scope-id">Target Resource</label>
+              <select id="grant-scope-id" class="form-control"></select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="grant-role-preset">Role Preset</label>
+              <select id="grant-role-preset" class="form-control"></select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="grant-expiry-preset">Grant Expiration</label>
+            <select id="grant-expiry-preset" class="form-control">
+              <option value="permanent">Permanent (Until Revoked)</option>
+              <option value="1h">Expires in 1 Hour</option>
+              <option value="24h">Expires in 24 Hours</option>
+              <option value="7d">Expires in 7 Days</option>
+              <option value="30d">Expires in 30 Days</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <span class="form-label">Effective Powers in This Scope</span>
+            <div id="grant-powers-checklist" class="modal-grid-2"
+              style="max-height: 220px; overflow-y: auto; background: var(--bg-input); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-subtle); display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+            </div>
+            <span class="form-hint">Explicit resource grants override global &amp; legacy user permissions (supporting both elevation and read-only downgrade). Unchecking all powers explicitly denies access to this resource.</span>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-close-modal>Cancel</button>
+        <button class="btn btn-primary" id="save-access-grant-btn">Save Grant</button>
       </div>
     </div>
   </div>

@@ -180,6 +180,7 @@ export async function initAuth() {
       }
       state.user = me.user;
       state.csrf = me.csrf;
+      state.grants = Array.isArray(me.grants) ? me.grants : [];
       state.activeSessions = me.activeSessions || 1;
       state.passkeyCount = me.passkeyCount || 0;
       await onAuthenticated(false);
@@ -218,6 +219,7 @@ export function showLogin(skipIntro = false) {
 
   state.user = null;
   state.csrf = null;
+  state.grants = [];
   state.pendingMfaToken = null;
   state.projects = [];
   state.databases = [];
@@ -296,15 +298,40 @@ export function toggleLoginPasswordVisibility() {
   togglePasswordField('login-password', document.getElementById('toggle-pw-visibility'));
 }
 
-export function hasPower(power) {
-  if (!state.user) return false;
-  if (state.user.isMainAdmin) return true;
-  const perms = state.user.permissions || [];
-  return perms.includes('*') || perms.includes(power);
+function activeUserGrants() {
+  const nowS = Math.floor(Date.now() / 1000);
+  return (state.grants || []).filter((g) => !g.expiresAt || g.expiresAt > nowS);
 }
 
-export function hasAnyPower(powers) {
-  return Array.isArray(powers) && powers.some((p) => hasPower(p));
+export function hasPower(power, scopeType = null, scopeId = null) {
+  if (!state.user) return false;
+  if (state.user.isMainAdmin) return true;
+  const grants = activeUserGrants();
+  if (scopeType && scopeId != null) {
+    const explicit = grants.find((g) => g.scopeType === scopeType && Number(g.scopeId) === Number(scopeId));
+    if (explicit) {
+      const gp = explicit.powers || [];
+      return gp.includes('*') || gp.includes(power);
+    }
+  }
+  const globalGrant = grants.find((g) => g.scopeType === 'global' && g.scopeId == null);
+  if (globalGrant) {
+    const gp = globalGrant.powers || [];
+    if (gp.includes('*') || gp.includes(power)) return true;
+  }
+  const perms = state.user.permissions || [];
+  if (perms.includes('*') || perms.includes(power)) return true;
+  if (!scopeType && scopeId == null) {
+    return grants.some((g) => {
+      const gp = g.powers || [];
+      return gp.includes('*') || gp.includes(power);
+    });
+  }
+  return false;
+}
+
+export function hasAnyPower(powers, scopeType = null, scopeId = null) {
+  return Array.isArray(powers) && powers.some((p) => hasPower(p, scopeType, scopeId));
 }
 
 export async function onAuthenticated(isFreshLogin = false) {
@@ -330,6 +357,8 @@ export async function onAuthenticated(isFreshLogin = false) {
     const navEl = document.querySelector(`.nav-item[data-view="${view}"]`);
     if (navEl) navEl.style.display = hasAnyPower(pwrs) ? '' : 'none';
   });
+  const accessNavEl = document.querySelector('.nav-item[data-view="access"]');
+  if (accessNavEl) accessNavEl.style.display = state.user.isMainAdmin ? '' : 'none';
 
   const addSiteBtn = document.getElementById('add-website-header-btn');
   if (addSiteBtn) addSiteBtn.style.display = hasPower('projects_manage') ? '' : 'none';
@@ -383,6 +412,7 @@ export async function applyAuthSuccess(res) {
   state.pendingMfaToken = null;
   state.user = res.user;
   state.csrf = res.csrf;
+  state.grants = Array.isArray(res.grants) ? res.grants : [];
   state.activeSessions = res.activeSessions || 1;
   state.passkeyCount = res.passkeyCount || 0;
   await onAuthenticated(true);

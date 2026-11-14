@@ -1,5 +1,6 @@
 pub mod common;
 pub mod auth;
+pub mod access;
 pub mod projects;
 pub mod files;
 pub mod deployments;
@@ -47,6 +48,7 @@ async fn healthz_handler() -> (StatusCode, [(&'static str, &'static str); 3], &'
 }
 
 use self::auth::*;
+use self::access::*;
 use self::projects::*;
 use self::files::*;
 use self::deployments::*;
@@ -158,6 +160,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/users", get(list_users_handler).post(create_user_handler))
         .route("/api/users/:id", put(update_user_handler).patch(update_user_handler).delete(delete_user_handler))
         .route("/api/users/:id/reset-2fa", post(admin_reset_user_2fa_handler))
+        // Granular Access Control & Role Templates
+        .route("/api/access/overview", get(access_overview_handler))
+        .route("/api/access/my", get(my_access_handler))
+        .route("/api/access/grants", get(list_grants_handler).post(upsert_grant_handler))
+        .route("/api/access/grants/:id", delete(delete_grant_handler))
+        .route("/api/access/users/:id/revoke-sessions", post(revoke_user_sessions_handler))
+        .route("/api/access/audit", get(access_audit_handler))
         // Managed Databases (PostgreSQL)
         .route("/api/databases", get(list_databases_handler).post(create_database_handler))
         .route("/api/databases/:id", get(get_database_handler).delete(delete_database_handler))

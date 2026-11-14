@@ -26,6 +26,7 @@ import { loadMonitorView } from './js/settings.js';
 // Explorer & Logs Subsystems (Initialize listeners & exports)
 import './js/files.js';
 import './js/logs.js';
+import './js/access.js';
 
 // ============================================================================
 // Global Polling & Live Updates (Low Resource & Page Visibility Aware)

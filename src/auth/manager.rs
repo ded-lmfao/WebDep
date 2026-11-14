@@ -4,6 +4,11 @@ use std::sync::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::DbPool;
+use super::access::{
+    can_list_databases, can_view_db_credentials, delete_expired_grants, evaluate_database_power,
+    evaluate_project_access, evaluate_scoped_powers, list_active_user_grants, publish_revocation,
+    AccessGrant, AccessRevocationEvent, ACCESS_REVOKE_CHANNEL,
+};
 use super::password::{constant_time_eq, hash_password, random_token, verify_password};
 use super::session::Session;
 use super::totp::{sync_real_utc_offset, verify_totp_code};
@@ -28,6 +33,7 @@ pub struct Auth {
     pub(crate) failures: Mutex<HashMap<String, FailureRecord>>,
     pub(crate) session_cache: RwLock<HashMap<String, (Session, User, u64)>>,
     pub(crate) session_presence: Mutex<HashMap<String, (i64, u64, bool)>>,
+    pub(crate) revocation_tx: tokio::sync::broadcast::Sender<AccessRevocationEvent>,
 }
 
 impl Auth {
@@ -40,6 +46,7 @@ impl Auth {
         std::thread::spawn(|| {
             sync_real_utc_offset();
         });
+        let (revocation_tx, _) = tokio::sync::broadcast::channel(128);
         Self {
             db,
             session_ttl_s,
@@ -50,6 +57,7 @@ impl Auth {
             failures: Mutex::new(HashMap::new()),
             session_cache: RwLock::new(HashMap::new()),
             session_presence: Mutex::new(HashMap::new()),
+            revocation_tx,
         }
     }
 
@@ -565,6 +573,199 @@ impl Auth {
             .await
             .map(|r| r.rows_affected() as usize)
             .unwrap_or(0)
+    }
+
+    pub async fn revoke_all_user_sessions(&self, user_id: i64, reason: &str) -> usize {
+        self.invalidate_sessions();
+        self.clear_user_presence(user_id);
+        let removed = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.db)
+            .await
+            .map(|r| r.rows_affected() as usize)
+            .unwrap_or(0);
+        self.notify_revocation(AccessRevocationEvent {
+            kind: "session_revoked".to_string(),
+            user_id,
+            scope_type: None,
+            scope_id: None,
+            reason: reason.to_string(),
+            ts: Self::now_secs() as i64,
+        })
+        .await;
+        removed
+    }
+
+    pub fn subscribe_revocations(&self) -> tokio::sync::broadcast::Receiver<AccessRevocationEvent> {
+        self.revocation_tx.subscribe()
+    }
+
+    pub async fn notify_revocation(&self, event: AccessRevocationEvent) {
+        self.invalidate_sessions();
+        let _ = self.revocation_tx.send(event.clone());
+        publish_revocation(&self.db, &event).await;
+    }
+
+    pub fn start_revocation_listener(&self) {
+        let db = self.db.clone();
+        let tx = self.revocation_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match sqlx::postgres::PgListener::connect_with(&db).await {
+                    Ok(mut listener) => {
+                        if let Err(err) = listener.listen(ACCESS_REVOKE_CHANNEL).await {
+                            tracing::warn!("PgListener subscribe {} failed: {}", ACCESS_REVOKE_CHANNEL, err);
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                        loop {
+                            match listener.recv().await {
+                                Ok(notif) => {
+                                    if let Ok(ev) = serde_json::from_str::<AccessRevocationEvent>(notif.payload()) {
+                                        let _ = tx.send(ev);
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::warn!("PgListener recv error: {}", err);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("PgListener connect error: {}", err);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    pub async fn active_grants_for_user(&self, user_id: i64) -> Vec<AccessGrant> {
+        let now_s = Self::now_secs() as i64;
+        list_active_user_grants(&self.db, user_id, now_s)
+            .await
+            .unwrap_or_default()
+    }
+
+    pub async fn can_access_project_for_user(&self, user: &User, project_id: i64) -> bool {
+        if user.disabled {
+            return false;
+        }
+        if user.is_main_admin {
+            return true;
+        }
+        let grants = self.active_grants_for_user(user.id).await;
+        evaluate_project_access(user, &grants, project_id, Self::now_secs() as i64)
+    }
+
+    pub async fn has_power_for_scope(
+        &self,
+        user: &User,
+        power: &str,
+        scope_type: &str,
+        scope_id: Option<i64>,
+    ) -> bool {
+        self.has_any_power_for_scope(user, &[power], scope_type, scope_id)
+            .await
+    }
+
+    pub async fn has_any_power_for_scope(
+        &self,
+        user: &User,
+        powers: &[&str],
+        scope_type: &str,
+        scope_id: Option<i64>,
+    ) -> bool {
+        if user.disabled {
+            return false;
+        }
+        if user.is_main_admin {
+            return true;
+        }
+        let grants = self.active_grants_for_user(user.id).await;
+        evaluate_scoped_powers(
+            user,
+            &grants,
+            powers,
+            scope_type,
+            scope_id,
+            Self::now_secs() as i64,
+        )
+    }
+
+    pub async fn has_database_power_for_user(
+        &self,
+        user: &User,
+        powers: &[&str],
+        db_id: i64,
+        linked_project_id: Option<i64>,
+    ) -> bool {
+        if user.disabled {
+            return false;
+        }
+        if user.is_main_admin {
+            return true;
+        }
+        let grants = self.active_grants_for_user(user.id).await;
+        evaluate_database_power(
+            user,
+            &grants,
+            powers,
+            db_id,
+            linked_project_id,
+            Self::now_secs() as i64,
+        )
+    }
+
+    pub async fn can_list_databases_for_user(&self, user: &User) -> bool {
+        if user.disabled {
+            return false;
+        }
+        if user.is_main_admin {
+            return true;
+        }
+        let grants = self.active_grants_for_user(user.id).await;
+        can_list_databases(user, &grants, Self::now_secs() as i64)
+    }
+
+    pub async fn can_view_db_credentials_for_user(
+        &self,
+        user: &User,
+        db_id: i64,
+        linked_project_id: Option<i64>,
+    ) -> bool {
+        if user.disabled {
+            return false;
+        }
+        if user.is_main_admin {
+            return true;
+        }
+        let grants = self.active_grants_for_user(user.id).await;
+        can_view_db_credentials(
+            user,
+            &grants,
+            db_id,
+            linked_project_id,
+            Self::now_secs() as i64,
+        )
+    }
+
+    pub async fn purge_expired_grants(&self) {
+        let now_s = Self::now_secs() as i64;
+        if let Ok(expired) = delete_expired_grants(&self.db, now_s).await {
+            for grant in expired {
+                self.notify_revocation(AccessRevocationEvent {
+                    kind: "grant_revoked".to_string(),
+                    user_id: grant.user_id,
+                    scope_type: Some(grant.scope_type),
+                    scope_id: grant.scope_id,
+                    reason: "Access grant expired".to_string(),
+                    ts: now_s,
+                })
+                .await;
+            }
+        }
     }
 
     pub async fn count_active_sessions(&self, user_id: i64) -> usize {

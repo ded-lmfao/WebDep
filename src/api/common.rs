@@ -260,7 +260,7 @@ pub(crate) async fn verify_project_access(
     project_id: i64,
 ) -> Result<User, (StatusCode, String)> {
     let u = require_current_user(state, headers).await?;
-    if !u.can_access_project(project_id) {
+    if !state.auth.can_access_project_for_user(&u, project_id).await {
         return Err((
             StatusCode::FORBIDDEN,
             "Access denied: You are not assigned to this website.".to_string(),
@@ -286,24 +286,7 @@ pub(crate) async fn verify_power(
     power: &str,
     project_id: Option<i64>,
 ) -> Result<User, (StatusCode, String)> {
-    let u = current_user(state, headers)
-        .await
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized session".to_string()))?;
-    if let Some(pid) = project_id {
-        if !u.can_access_project(pid) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Access denied: You are not assigned to this website.".to_string(),
-            ));
-        }
-    }
-    if !u.has_power(power) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            format!("Permission denied: Missing '{}' privilege.", power),
-        ));
-    }
-    Ok(u)
+    verify_any_power_for_scope(state, headers, &[power], "project", project_id).await
 }
 
 pub(crate) async fn verify_any_power(
@@ -312,21 +295,41 @@ pub(crate) async fn verify_any_power(
     powers: &[&str],
     project_id: Option<i64>,
 ) -> Result<User, (StatusCode, String)> {
+    verify_any_power_for_scope(state, headers, powers, "project", project_id).await
+}
+
+pub(crate) async fn verify_any_power_for_scope(
+    state: &AppState,
+    headers: &HeaderMap,
+    powers: &[&str],
+    scope_type: &str,
+    scope_id: Option<i64>,
+) -> Result<User, (StatusCode, String)> {
     let u = current_user(state, headers)
         .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized session".to_string()))?;
-    if let Some(pid) = project_id {
-        if !u.can_access_project(pid) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Access denied: You are not assigned to this website.".to_string(),
-            ));
+    if scope_type == "project" {
+        if let Some(pid) = scope_id {
+            if !state.auth.can_access_project_for_user(&u, pid).await {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Access denied: You are not assigned to this website.".to_string(),
+                ));
+            }
         }
     }
-    if !u.has_any_power(powers) {
+    if !state
+        .auth
+        .has_any_power_for_scope(&u, powers, scope_type, scope_id)
+        .await
+    {
         return Err((
             StatusCode::FORBIDDEN,
-            format!("Permission denied: Requires one of [{}].", powers.join(", ")),
+            if powers.len() == 1 {
+                format!("Permission denied: Missing '{}' privilege.", powers[0])
+            } else {
+                format!("Permission denied: Requires one of [{}].", powers.join(", "))
+            },
         ));
     }
     Ok(u)
@@ -374,6 +377,7 @@ pub(crate) async fn create_authenticated_response(
 
     let active_sessions = state.auth.count_active_sessions(user.id).await;
     let passkey_count = state.auth.count_user_passkeys(user.id).await;
+    let grants = state.auth.active_grants_for_user(user.id).await;
     let secure_attr = if is_https_request(headers, state.auth.force_secure_cookies) {
         "; Secure"
     } else {
@@ -389,6 +393,7 @@ pub(crate) async fn create_authenticated_response(
         csrf: session.csrf_token,
         active_sessions,
         passkey_count,
+        grants,
     });
 
     let mut res = body.into_response();
@@ -616,6 +621,8 @@ pub(crate) struct LoginResponse {
     pub(crate) active_sessions: usize,
     #[serde(rename = "passkeyCount")]
     pub(crate) passkey_count: usize,
+    #[serde(default)]
+    pub(crate) grants: Vec<crate::auth::access::AccessGrant>,
 }
 
 

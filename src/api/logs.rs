@@ -12,7 +12,6 @@ use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::convert::Infallible;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use super::common::*;
@@ -78,11 +77,11 @@ pub(crate) async fn logs_sse_handler(
     headers: HeaderMap,
     Query(q): Query<LogsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
-    if let Some(pid) = q.project {
-        let _actor = verify_power(&state, &headers, "logs", Some(pid)).await?;
+    let actor = if let Some(pid) = q.project {
+        verify_power(&state, &headers, "logs", Some(pid)).await?
     } else {
-        let _actor = require_current_user(&state, &headers).await?;
-    }
+        require_current_user(&state, &headers).await?
+    };
     let backlog_limit = q.backlog.unwrap_or(200).min(1000);
     let initial_logs = match q.project {
         Some(pid) => {
@@ -110,27 +109,84 @@ pub(crate) async fn logs_sse_handler(
         None
     };
 
-    let rx = state.logs.subscribe();
-    let live_stream = BroadcastStream::new(rx).filter_map(move |msg| {
-        if let Ok(entry) = msg {
-            // Strict per-app console isolation: only emit `app` channel logs for this exact project.
-            let Some(pid) = project_filter else {
-                return None;
-            };
-            if entry.project_id != Some(pid) || entry.channel != "app" {
-                return None;
-            }
-            if let Some(ref lvl) = level_filter {
-                if !lvl.is_empty() && &entry.level != lvl {
+    let log_rx = state.logs.subscribe();
+    let rev_rx = state.auth.subscribe_revocations();
+    let rev_state = state.clone();
+    let rev_user = actor;
+    let live_stream = futures_util::stream::unfold(
+        (log_rx, rev_rx, false),
+        move |(mut log_rx, mut rev_rx, done)| {
+            let state = rev_state.clone();
+            let user = rev_user.clone();
+            let level_filter = level_filter.clone();
+            async move {
+                if done {
                     return None;
                 }
+                loop {
+                    tokio::select! {
+                        biased;
+                        rev = rev_rx.recv() => {
+                            match rev {
+                                Ok(ev) if ev.user_id == user.id => {
+                                    let revoked = if matches!(ev.kind.as_str(), "session_revoked" | "user_disabled") {
+                                        true
+                                    } else if let Some(pid) = project_filter {
+                                        !state.auth.has_power_for_scope(&user, "logs", "project", Some(pid)).await
+                                    } else {
+                                        false
+                                    };
+                                    if revoked {
+                                        let payload = serde_json::json!({
+                                            "reason": ev.reason,
+                                            "kind": ev.kind,
+                                        }).to_string();
+                                        let evt = Event::default().event("revoked").data(payload);
+                                        return Some((Ok::<Event, Infallible>(evt), (log_rx, rev_rx, true)));
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    if let Some(pid) = project_filter {
+                                        if !state.auth.has_power_for_scope(&user, "logs", "project", Some(pid)).await {
+                                            let evt = Event::default()
+                                                .event("revoked")
+                                                .data(r#"{"reason":"Access revoked","kind":"grant_revoked"}"#);
+                                            return Some((Ok::<Event, Infallible>(evt), (log_rx, rev_rx, true)));
+                                        }
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                                _ => {}
+                            }
+                        }
+                        msg = log_rx.recv() => {
+                            match msg {
+                                Ok(entry) => {
+                                    // Strict per-app console isolation: only emit `app` channel logs for this exact project.
+                                    let Some(pid) = project_filter else {
+                                        continue;
+                                    };
+                                    if entry.project_id != Some(pid) || entry.channel != "app" {
+                                        continue;
+                                    }
+                                    if let Some(ref lvl) = level_filter {
+                                        if !lvl.is_empty() && &entry.level != lvl {
+                                            continue;
+                                        }
+                                    }
+                                    if let Ok(json) = serde_json::to_string(&vec![entry]) {
+                                        return Some((Ok(Event::default().data(json)), (log_rx, rev_rx, false)));
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                            }
+                        }
+                    }
+                }
             }
-            if let Ok(json) = serde_json::to_string(&vec![entry]) {
-                return Some(Ok(Event::default().data(json)));
-            }
-        }
-        None
-    });
+        },
+    );
 
     let combined = futures_util::stream::iter(initial_event.into_iter()).chain(live_stream);
     Ok(Sse::new(combined).keep_alive(KeepAlive::default()))

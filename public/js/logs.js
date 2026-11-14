@@ -176,6 +176,25 @@ function startLogStream() {
       }
     } catch { /* keepalive or malformed */ }
   };
+  es.addEventListener('revoked', (e) => {
+    let reason = 'Your access to this live log stream was revoked.';
+    try {
+      const info = JSON.parse(e.data);
+      if (info && info.reason) reason = info.reason;
+    } catch (_) {}
+    toast(reason, 'warning');
+    const term = document.getElementById('log-terminal-output');
+    if (term) {
+      const notice = document.createElement('div');
+      notice.className = 'log-line log-empty-placeholder';
+      notice.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString()}</span><span class="log-lvl-warn">${escapeHtml(reason)}</span>`;
+      term.appendChild(notice);
+    }
+    if (state.logEventSource === es) {
+      es.close();
+      state.logEventSource = null;
+    }
+  });
   es.onerror = () => {
     // EventSource automatically retries
   };

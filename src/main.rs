@@ -103,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     auth_mgr.force_secure_cookies = config.force_secure_cookies;
     let auth = Arc::new(auth_mgr);
     auth.ensure_admin().await;
+    auth.start_revocation_listener();
     let projects = Arc::new(Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(Logs::new(db.clone()));
     let _ = crate::git::Git::read_github_tokens(&db).await;
@@ -142,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 interval.tick().await;
                 mem_cache.prune_expired();
                 mem_auth.purge_expired_sessions().await;
+                mem_auth.purge_expired_grants().await;
                 mem_auth.prune_in_memory();
                 crate::db::prune_old_logs(&mem_db, 20_000).await;
                 trim_process_heap();

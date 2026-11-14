@@ -16,6 +16,7 @@ import {
   isDatabaseRunning,
 } from './state.js';
 import { prefetchWebsiteWorkspace, prefetchDatabaseWorkspace } from './api.js';
+import { loadAccessView } from './access.js';
 import {
   animateViewEnter,
   animateWorkspaceBanner,
@@ -824,6 +825,7 @@ function renderCurrentView() {
       }
       break;
     case 'audit': void loadAuditView(); break;
+    case 'access': void loadAccessView(); break;
   }
 }
 

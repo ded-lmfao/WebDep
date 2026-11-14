@@ -17,22 +17,22 @@ use axum::extract::{Multipart, Query};
 // ---------------------------------------------------------------------------
 // Managed Databases (PostgreSQL)
 // ---------------------------------------------------------------------------
-fn can_access_db(user: &crate::auth::user::User, db: &crate::databases::ManagedDatabase) -> bool {
-    let can_unlinked = user.all_projects || user.has_power("databases_manage");
-    db.linked_project_id
-        .map(|pid| user.can_access_project(pid))
-        .unwrap_or(can_unlinked)
-}
-
 pub(crate) async fn verify_db_access(
     state: &AppState,
     headers: &HeaderMap,
     powers: &[&str],
     db: &crate::databases::ManagedDatabase,
 ) -> Result<crate::auth::user::User, (StatusCode, String)> {
-    let user = verify_any_power(state, headers, powers, db.linked_project_id).await?;
-    if !can_access_db(&user, db) {
-        return Err((StatusCode::FORBIDDEN, "Access to unlinked database is restricted".to_string()));
+    let user = require_current_user(state, headers).await?;
+    if !state
+        .auth
+        .has_database_power_for_user(&user, powers, db.id, db.linked_project_id)
+        .await
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access denied: Insufficient permissions for this database.".to_string(),
+        ));
     }
     Ok(user)
 }
@@ -134,23 +134,52 @@ pub(crate) async fn list_databases_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let user = verify_any_power(&state, &headers, &["databases", "databases_manage"], None).await?;
-    let can_creds = user.has_any_power(&["databases_manage", "env"]);
-    let cache_key = format!("databases:u{}:c{}", user.id, u8::from(can_creds));
+    let user = require_current_user(&state, &headers).await?;
+    if !state.auth.can_list_databases_for_user(&user).await {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Permission denied: Requires one of [databases, databases_manage].".to_string(),
+        ));
+    }
+    let grants = state.auth.active_grants_for_user(user.id).await;
+    let now_s = now();
+    let cache_key = format!("databases:u{}:g{}", user.id, grants.len());
 
     singleflight_json_bytes(&state.cache, cache_key, std::time::Duration::from_secs(4), &headers, || async {
         let user = user.clone();
+        let grants = grants.clone();
         let all = state
             .databases
-            .list_with_secrets(can_creds)
+            .list_with_secrets(true)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         tokio::task::spawn_blocking(move || {
             let cwd = cached_cwd();
             let list: Vec<DatabaseResponse> = all
                 .into_iter()
-                .filter(|db| can_access_db(&user, db))
-                .map(|db| to_database_response(db, can_creds, cwd))
+                .filter(|db| {
+                    crate::auth::access::evaluate_database_power(
+                        &user,
+                        &grants,
+                        &["databases", "databases_manage"],
+                        db.id,
+                        db.linked_project_id,
+                        now_s,
+                    )
+                })
+                .map(|mut db| {
+                    let can_creds = crate::auth::access::can_view_db_credentials(
+                        &user,
+                        &grants,
+                        db.id,
+                        db.linked_project_id,
+                        now_s,
+                    );
+                    if !can_creds {
+                        db.db_password = None;
+                    }
+                    to_database_response(db, can_creds, cwd)
+                })
                 .collect();
             let json = serde_json::to_string(&list).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             Ok(axum::body::Bytes::from(json))
@@ -172,7 +201,10 @@ pub(crate) async fn get_database_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
     let user = verify_db_access(&state, &headers, &["databases", "databases_manage"], &db).await?;
-    let can_creds = user.has_any_power(&["databases_manage", "env"]);
+    let can_creds = state
+        .auth
+        .can_view_db_credentials_for_user(&user, db.id, db.linked_project_id)
+        .await;
     Ok(Json(to_database_response(db, can_creds, cached_cwd())))
 }
 

@@ -16,13 +16,22 @@ fn build_migrator() -> sqlx::migrate::Migrator {
     use std::borrow::Cow;
 
     Migrator {
-        migrations: Cow::Owned(vec![Migration::new(
-            1,
-            Cow::Borrowed("initial"),
-            MigrationType::Simple,
-            Cow::Borrowed(include_str!("../migrations/0001_initial.sql")),
-            false,
-        )]),
+        migrations: Cow::Owned(vec![
+            Migration::new(
+                1,
+                Cow::Borrowed("initial"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../migrations/0001_initial.sql")),
+                false,
+            ),
+            Migration::new(
+                2,
+                Cow::Borrowed("access_grants"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../migrations/0002_access_grants.sql")),
+                false,
+            ),
+        ]),
         ignore_missing: false,
         locking: true,
         no_tx: false,
