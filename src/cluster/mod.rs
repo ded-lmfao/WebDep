@@ -1,8 +1,10 @@
+pub mod archive;
 pub mod manager;
 pub mod mesh;
 pub mod models;
 pub mod node_agent;
 pub mod node_exec;
+pub mod shift;
 pub mod ws;
 
 pub use manager::ClusterManager;

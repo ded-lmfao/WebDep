@@ -941,6 +941,45 @@
               <div class="pagination-bar" id="releases-pagination"></div>
             </div>
           </div>
+
+          <div class="card" style="margin-top: 16px;">
+            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+              <div>
+                <span class="card-title">Snapshots &amp; Off-Node Backups</span>
+                <span style="font-size: 12px; color: var(--text-dim); margin-left: 8px;">Off-Node archives are stored on Web-Core for cross-node disaster recovery</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); cursor: pointer;">
+                  <input type="checkbox" id="backup-offnode-checkbox" checked>
+                  <span>Off-Node Archive (Web-Core)</span>
+                </label>
+                <button class="btn btn-secondary btn-sm" id="create-backup-snapshot-btn" onclick="createProjectBackupSnapshot()">
+                  + Take Snapshot
+                </button>
+              </div>
+            </div>
+            <div class="card-body" style="padding: 0;">
+              <div class="table-responsive">
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th>Backup</th>
+                      <th>Storage</th>
+                      <th>Size</th>
+                      <th>Note</th>
+                      <th>Created</th>
+                      <th>Restore Target &amp; Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="backups-table-body">
+                    <tr>
+                      <td colspan="6" style="text-align: center; padding: 20px;">Select a website to view backups.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </section>
 
         <!-- ==================== 6. ROLLBACKS VIEW ==================== -->
@@ -1987,6 +2026,7 @@
             </div>
             <div class="view-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
               <button class="btn btn-secondary btn-sm" onclick="window.loadNodesView && window.loadNodesView(true)">Refresh</button>
+              <button class="btn btn-secondary btn-sm" id="fleet-update-header-btn" onclick="window.triggerFleetUpdate && window.triggerFleetUpdate()" style="display: none;">Update Fleet</button>
               <button class="btn btn-primary btn-sm" id="add-node-header-btn" onclick="openAddNodeModal()" style="display: none;">+ Add Node</button>
             </div>
           </div>
@@ -3426,6 +3466,56 @@
       </div>
       <div class="modal-footer" style="padding: 12px 20px; justify-content: flex-end;" id="update-modal-footer">
         <button class="btn btn-secondary btn-sm" id="update-dismiss-btn" data-close-modal disabled>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: MOVE TO NODE & LIVE P2P SHIFT -->
+  <div class="modal-overlay" id="modal-move-project-node">
+    <div class="modal-container" style="max-width: 620px;">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title" id="shift-modal-title">Move Website to Node</h3>
+          <div style="font-size: 11.5px; color: var(--text-dim); margin-top: 2px;" id="shift-modal-subtitle">
+            Direct P2P VPS-to-VPS tarball transfer with zero-downtime warm-start &amp; DNS cutover
+          </div>
+        </div>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 14px;">
+        <div id="shift-setup-panel">
+          <div class="form-group" style="margin-bottom: 10px;">
+            <label class="form-label" for="shift-target-node-select">Destination Web-Node</label>
+            <select id="shift-target-node-select" class="form-control"></select>
+            <span class="form-hint">Only healthy online nodes you have shift permissions for are eligible.</span>
+          </div>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-muted); cursor: pointer;">
+            <input type="checkbox" id="shift-skip-dns-checkbox">
+            <span>Skip DNS Wait &amp; Auto-Complete Cutover Immediately (internal/no-domain cutover)</span>
+          </label>
+        </div>
+
+        <div id="shift-active-panel" style="display: none; flex-direction: column; gap: 12px;">
+          <div id="shift-stage-banner" style="padding: 12px 14px; border-radius: var(--radius-md); background: var(--bg-input); border: 1px solid var(--border-subtle);"></div>
+
+          <div id="shift-dns-card" style="display: none; padding: 14px; border-radius: var(--radius-md); background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.35);">
+            <div style="font-weight: 600; font-size: 13.5px; color: var(--warning-light); margin-bottom: 6px;">
+              DNS Cutover Required Before Finalizing Target SSL
+            </div>
+            <div id="shift-dns-records" style="font-size: 12.5px; color: var(--text-normal); margin-bottom: 10px;"></div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button type="button" class="btn btn-secondary btn-sm" id="shift-check-dns-btn" onclick="checkShiftDns()">Check DNS</button>
+              <button type="button" class="btn btn-primary btn-sm" id="shift-complete-cutover-btn" onclick="completeShiftCutover()">Complete Cutover Now</button>
+              <button type="button" class="btn btn-danger btn-sm" id="shift-abort-btn" onclick="abortShiftMigration()">Abort Shift</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="shift-history-box" style="font-size: 12px; color: var(--text-dim);"></div>
+      </div>
+      <div class="modal-footer" style="justify-content: flex-end; gap: 8px;">
+        <button class="btn btn-secondary btn-sm" data-close-modal>Close</button>
+        <button class="btn btn-primary btn-sm" id="shift-start-btn" onclick="confirmStartProjectShift()">Start Live P2P Shift</button>
       </div>
     </div>
   </div>

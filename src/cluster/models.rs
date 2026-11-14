@@ -70,6 +70,8 @@ pub struct NodeCapabilities {
     pub has_caddy: bool,
     #[serde(default)]
     pub has_postgres: bool,
+    #[serde(default)]
+    pub p2p_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -265,6 +265,183 @@ pub(crate) async fn delete_cluster_node_handler(
     Ok(Json(serde_json::json!({ "ok": true, "deletedId": id })))
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EvacuateNodePayload {
+    #[serde(default)]
+    pub target_node_id: Option<i64>,
+}
+
+pub(crate) async fn evacuate_cluster_node_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+    payload: Option<Json<EvacuateNodePayload>>,
+) -> Result<Json<crate::cluster::shift::EvacuateNodeResult>, (StatusCode, String)> {
+    let admin = verify_main_admin(&state, &headers).await?;
+    let pref = payload.and_then(|p| p.target_node_id);
+    let res = crate::cluster::shift::evacuate_node_workloads(&state, &admin.username, id, pref).await?;
+    let id_str = id.to_string();
+    log_audit_project(
+        &state,
+        None,
+        &admin.username,
+        "cluster.node.evacuate",
+        Some(&id_str),
+        Some(&format!(
+            "Evacuated node #{id}: shifted={}, awaiting_dns={}, failed={}",
+            res.shifted.len(),
+            res.awaiting_dns.len(),
+            res.failed.len()
+        )),
+    )
+    .await;
+    Ok(Json(res))
+}
+
+pub(crate) async fn move_project_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+    Json(payload): Json<crate::cluster::shift::StartShiftPayload>,
+) -> Result<Json<crate::cluster::shift::AppMigrationView>, (StatusCode, String)> {
+    let actor = require_current_user(&state, &headers).await?;
+    crate::cluster::shift::verify_cross_node_shift_rbac(
+        &state,
+        &actor,
+        id,
+        payload.target_node_id,
+    )
+    .await?;
+
+    let mig = crate::cluster::shift::start_project_shift(
+        &state,
+        &actor.username,
+        id,
+        payload.target_node_id,
+        false,
+        payload.auto_cutover_without_dns.unwrap_or(false),
+    )
+    .await?;
+
+    log_audit_project(
+        &state,
+        Some(id),
+        &actor.username,
+        "project.shift.start",
+        Some(&mig.project_name),
+        Some(&format!(
+            "Started live shift to node #{} (status: {})",
+            payload.target_node_id, mig.status
+        )),
+    )
+    .await;
+    Ok(Json(mig))
+}
+
+pub(crate) async fn list_project_migrations_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+) -> Result<Json<Vec<crate::cluster::shift::AppMigrationView>>, (StatusCode, String)> {
+    let _user = verify_any_power(&state, &headers, &["projects_view", "projects_manage", "deploy"], Some(id)).await?;
+    let list = crate::cluster::shift::list_project_migrations(&state, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(list))
+}
+
+pub(crate) async fn get_migration_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(mid): AxPath<i64>,
+) -> Result<Json<crate::cluster::shift::AppMigrationView>, (StatusCode, String)> {
+    let mig = crate::cluster::shift::get_migration(&state, mid)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Migration #{mid} not found")))?;
+    let _user = verify_any_power(
+        &state,
+        &headers,
+        &["projects_view", "projects_manage", "deploy"],
+        Some(mig.project_id),
+    )
+    .await?;
+    Ok(Json(mig))
+}
+
+pub(crate) async fn check_migration_dns_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(mid): AxPath<i64>,
+) -> Result<Json<crate::cluster::shift::CheckDnsResponse>, (StatusCode, String)> {
+    let mig = crate::cluster::shift::get_migration(&state, mid)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Migration #{mid} not found")))?;
+    let _user = verify_any_power(
+        &state,
+        &headers,
+        &["deploy", "projects_manage", "domains"],
+        Some(mig.project_id),
+    )
+    .await?;
+    let res = crate::cluster::shift::check_migration_dns(&state, mid).await?;
+    Ok(Json(res))
+}
+
+pub(crate) async fn complete_migration_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(mid): AxPath<i64>,
+) -> Result<Json<crate::cluster::shift::AppMigrationView>, (StatusCode, String)> {
+    let actor = require_current_user(&state, &headers).await?;
+    let mig = crate::cluster::shift::get_migration(&state, mid)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Migration #{mid} not found")))?;
+    if let Some(to_nid) = mig.to_node_id {
+        crate::cluster::shift::verify_cross_node_shift_rbac(&state, &actor, mig.project_id, to_nid)
+            .await?;
+    }
+    let cutover_mode = if mig.dns_verified { "dns" } else { "manual" };
+    let completed =
+        crate::cluster::shift::complete_migration_cutover(&state, &actor.username, mid, cutover_mode)
+            .await?;
+    Ok(Json(completed))
+}
+
+pub(crate) async fn abort_migration_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(mid): AxPath<i64>,
+) -> Result<Json<crate::cluster::shift::AppMigrationView>, (StatusCode, String)> {
+    let actor = require_current_user(&state, &headers).await?;
+    let mig = crate::cluster::shift::get_migration(&state, mid)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Migration #{mid} not found")))?;
+    let _user = verify_any_power(
+        &state,
+        &headers,
+        &["deploy", "projects_manage", "services_manage"],
+        Some(mig.project_id),
+    )
+    .await?;
+    let aborted = crate::cluster::shift::abort_migration(&state, &actor.username, mid).await?;
+    Ok(Json(aborted))
+}
+
+pub(crate) async fn fleet_update_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Option<Json<crate::updater::TriggerUpdatePayload>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_main_admin(&state, &headers).await?;
+    let tag = payload.and_then(|p| p.tag.clone());
+    crate::api::system::settings::trigger_fleet_and_core_update(&state, &actor.username, tag).await
+}
+
 pub(crate) async fn node_ws_handler(
     State(state): State<AppState>,
     req: Request,

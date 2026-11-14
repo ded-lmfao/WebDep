@@ -1163,6 +1163,129 @@ impl ClusterManager {
             )
             .await;
     }
+
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
+    pub async fn used_ports_on_node(&self, node_id: i64) -> Vec<u16> {
+        let mut ports = Vec::new();
+        if let Ok(rows) = sqlx::query(
+            "SELECT port, assigned_port FROM projects WHERE node_id = $1",
+        )
+        .bind(node_id)
+        .fetch_all(&self.db)
+        .await
+        {
+            for r in rows {
+                if let Ok(Some(p)) = r.try_get::<Option<i64>, _>(0) {
+                    if let Ok(u) = u16::try_from(p) {
+                        ports.push(u);
+                    }
+                }
+                if let Ok(Some(ap)) = r.try_get::<Option<i64>, _>(1) {
+                    if let Ok(u) = u16::try_from(ap) {
+                        ports.push(u);
+                    }
+                }
+            }
+        }
+        if let Ok(db_rows) = sqlx::query("SELECT port FROM databases WHERE node_id = $1")
+            .bind(node_id)
+            .fetch_all(&self.db)
+            .await
+        {
+            for r in db_rows {
+                if let Ok(p) = r.try_get::<i64, _>(0) {
+                    if let Ok(u) = u16::try_from(p) {
+                        ports.push(u);
+                    }
+                }
+            }
+        }
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
+    /// Ensures any managed PostgreSQL database linked to `project_id` remains reachable
+    /// after shifting onto `target_node_id` (rewrites `DATABASE_URL` / `PGHOST` to `127.0.0.1`
+    /// when co-located or `db_node.mesh_ip` across the WireGuard mesh).
+    pub async fn rewrite_linked_db_env_for_node(
+        &self,
+        projects: &Projects,
+        project_id: i64,
+        target_node_id: i64,
+    ) -> Result<bool, String> {
+        let db_row = sqlx::query(
+            "SELECT db_user, db_password, port, db_name, node_id
+             FROM databases
+             WHERE linked_project_id = $1
+             ORDER BY id ASC
+             LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Failed checking linked database: {e}"))?;
+
+        let Some(row) = db_row else {
+            return Ok(false);
+        };
+
+        let db_user: String = row.try_get(0).map_err(|e| e.to_string())?;
+        let db_password: String = row.try_get(1).map_err(|e| e.to_string())?;
+        let port: i32 = row.try_get(2).map_err(|e| e.to_string())?;
+        let db_name: String = row.try_get(3).map_err(|e| e.to_string())?;
+        let db_node_id: Option<i64> = row.try_get(4).ok().flatten();
+
+        let target_host = match db_node_id {
+            Some(dnid) if dnid != target_node_id => self
+                .get_node(dnid)
+                .await?
+                .map(|n| n.mesh_ip)
+                .filter(|ip| !ip.trim().is_empty())
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            _ => "127.0.0.1".to_string(),
+        };
+
+        let port_u16 = u16::try_from(port).unwrap_or(5432);
+        let url = crate::databases::build_postgres_url(
+            &db_user,
+            &db_password,
+            &target_host,
+            port_u16,
+            &db_name,
+            false,
+        );
+        let _ = projects.set_env_var(project_id, "DATABASE_URL", &url, true).await;
+        let _ = projects.set_env_var(project_id, "PGHOST", &target_host, false).await;
+        Ok(true)
+    }
+
+    pub fn build_p2p_target_urls(node: &ClusterNode, port_override: Option<u16>) -> Vec<String> {
+        let port = port_override
+            .filter(|&p| p > 0)
+            .or(node.capabilities.p2p_port)
+            .unwrap_or(4601);
+        let mut urls = Vec::new();
+        let mesh = node.mesh_ip.trim();
+        let pub_ip = node.public_ip.trim();
+        if !pub_ip.is_empty() && (pub_ip == "127.0.0.1" || pub_ip == "::1") {
+            urls.push(format!("http://{pub_ip}:{port}"));
+        }
+        if !mesh.is_empty() {
+            urls.push(format!("http://{mesh}:{port}"));
+        }
+        if !pub_ip.is_empty() && pub_ip != "127.0.0.1" && pub_ip != "::1" {
+            urls.push(format!("http://{pub_ip}:{port}"));
+        }
+        if urls.is_empty() {
+            urls.push(format!("http://127.0.0.1:{port}"));
+        }
+        urls.dedup();
+        urls
+    }
 }
 
 #[cfg(test)]

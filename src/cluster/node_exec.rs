@@ -1,11 +1,23 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::{
+    body::Body,
+    extract::{DefaultBodyLimit, Path as AxPath, State},
+    http::StatusCode,
+    routing::{get, put},
+    Json, Router,
+};
 use base64::Engine;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
@@ -15,6 +27,8 @@ use crate::api::system::app_usage::{
     collect_project_seed_pids_pure, compute_entity_usage_with_monitor, EntityUsageInput,
 };
 use crate::caddy::Caddy;
+use crate::cluster::archive::{pack_dir_to_tar_gz, pack_subdirs_to_tar_gz, unpack_tar_gz_safe};
+use crate::cluster::mesh::detect_capabilities_with_p2p;
 use crate::deployer::builder::{merge_copy_dir, run_shell_cmd_with_logger, switch_current};
 use crate::git::{CommitInfo, Git, StoredGithubToken};
 use crate::monitor::{get_path_disk_size, Monitor};
@@ -43,6 +57,13 @@ pub struct RemoteContextPayload {
     pub github_tokens: Vec<StoredGithubToken>,
 }
 
+#[derive(Debug, Clone)]
+pub struct P2pTransferTicket {
+    pub dest_dir: PathBuf,
+    pub expires_at: i64,
+    pub max_bytes: u64,
+}
+
 pub struct NodeExecState {
     pub data_dir: PathBuf,
     pub processes: Arc<Mutex<HashMap<i64, Child>>>,
@@ -53,6 +74,8 @@ pub struct NodeExecState {
     pub deploy_queue: Arc<tokio::sync::Semaphore>,
     pub monitor: Monitor,
     pub manifest: RwLock<NodeStateManifest>,
+    pub p2p_port: AtomicU16,
+    pub p2p_tokens: RwLock<HashMap<String, P2pTransferTicket>>,
 }
 
 impl NodeExecState {
@@ -67,6 +90,40 @@ impl NodeExecState {
             deploy_queue: Arc::new(tokio::sync::Semaphore::new(1)),
             monitor: Monitor::new(),
             manifest: RwLock::new(manifest),
+            p2p_port: AtomicU16::new(0),
+            p2p_tokens: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub async fn issue_p2p_ticket(
+        &self,
+        dest_dir: PathBuf,
+        max_bytes: u64,
+        ttl_secs: i64,
+    ) -> String {
+        let mut raw = [0u8; 24];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut raw);
+        let token = format!("p2p_{}", hex::encode(raw));
+        let now = now_secs();
+        let ticket = P2pTransferTicket {
+            dest_dir,
+            expires_at: now + ttl_secs.clamp(30, 3600),
+            max_bytes,
+        };
+        let mut guard = self.p2p_tokens.write().await;
+        guard.retain(|_, v| v.expires_at > now);
+        guard.insert(token.clone(), ticket);
+        token
+    }
+
+    pub async fn consume_p2p_ticket(&self, token: &str) -> Option<P2pTransferTicket> {
+        let now = now_secs();
+        let mut guard = self.p2p_tokens.write().await;
+        let ticket = guard.remove(token)?;
+        if ticket.expires_at < now {
+            None
+        } else {
+            Some(ticket)
         }
     }
 
@@ -1219,6 +1276,417 @@ pub async fn execute_rpc(
                 Err(e) => err_resp(req_id, 500, e.to_string()),
             }
         }
+        "node.allocate_free_port" => {
+            let preferred = params["preferredPort"].as_u64().and_then(|v| u16::try_from(v).ok());
+            let used: Vec<u16> = params["usedPorts"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().and_then(|n| u16::try_from(n).ok()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match allocate_free_port_on_node(preferred, &used) {
+                Ok(port) => ok_resp(req_id, json!({ "port": port })),
+                Err(e) => err_resp(req_id, 500, e),
+            }
+        }
+        "shift.preflight" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let preferred = params["preferredPort"]
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .or(p.assigned_port.or(p.port));
+            let used: Vec<u16> = params["usedPorts"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().and_then(|n| u16::try_from(n).ok()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let allocated_port = match allocate_free_port_on_node(preferred, &used) {
+                Ok(port) => port,
+                Err(e) => return err_resp(req_id, 500, e),
+            };
+            let caps = detect_capabilities_with_p2p(
+                match exec.p2p_port.load(Ordering::Relaxed) {
+                    0 => None,
+                    v => Some(v),
+                },
+            );
+            let mut sys = sysinfo::System::new();
+            sys.refresh_memory();
+            let avail_mem = sys.available_memory();
+            let total_mem = sys.total_memory();
+            let target_deploy_dir = resolve_target_deploy_dir(&exec.data_dir, &p);
+            ok_resp(
+                req_id,
+                json!({
+                    "ok": true,
+                    "allocatedPort": allocated_port,
+                    "targetDeployDir": target_deploy_dir.to_string_lossy().to_string(),
+                    "freeMemBytes": avail_mem,
+                    "totalMemBytes": total_mem,
+                    "capabilities": caps,
+                }),
+            )
+        }
+        "shift.prepare_receive" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let dest_dir = params["destDir"]
+                .as_str()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| resolve_target_deploy_dir(&exec.data_dir, &p));
+            let max_bytes = params["maxBytes"].as_u64().unwrap_or(8 * 1024 * 1024 * 1024);
+            let ttl_secs = params["ttlSecs"].as_i64().unwrap_or(900);
+            let token = exec.issue_p2p_ticket(dest_dir.clone(), max_bytes, ttl_secs).await;
+            let p2p_port = exec.p2p_port.load(Ordering::Relaxed);
+            ok_resp(
+                req_id,
+                json!({
+                    "token": token,
+                    "p2pPort": p2p_port,
+                    "targetDeployDir": dest_dir.to_string_lossy().to_string(),
+                }),
+            )
+        }
+        "shift.push_tar" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let token = params["token"].as_str().unwrap_or("").trim().to_string();
+            if token.is_empty() {
+                return err_resp(req_id, 400, "Missing P2P transfer token");
+            }
+            let target_urls: Vec<String> = params["targetUrls"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if target_urls.is_empty() {
+                return err_resp(req_id, 400, "Missing targetUrls for P2P transfer");
+            }
+
+            let tmp_tgz = exec
+                .data_dir
+                .join("tmp")
+                .join(format!("shift-push-{}-{}.tar.gz", p.id, now_secs()));
+            let deploy_dir = PathBuf::from(&p.deploy_dir);
+            let container_dir = exec.data_dir.join("containers").join(&p.slug);
+            let tgz_pack = tmp_tgz.clone();
+
+            let pack_res = tokio::task::spawn_blocking(move || {
+                // Stage external container dir alongside deploy_dir if present outside deploy_dir
+                let subdirs = ["current", "containers", "backups"];
+                let (comp, raw) = pack_subdirs_to_tar_gz(&deploy_dir, &subdirs, &tgz_pack, &[])?;
+                let _ = container_dir;
+                Ok::<(u64, u64), String>((comp, raw))
+            })
+            .await;
+
+            let (compressed_bytes, raw_bytes) = match pack_res {
+                Ok(Ok(sizes)) => sizes,
+                Ok(Err(e)) => return err_resp(req_id, 500, format!("Failed packing archive: {e}")),
+                Err(e) => return err_resp(req_id, 500, format!("Pack worker panicked: {e}")),
+            };
+
+            let mut last_err = String::from("No reachable P2P endpoint");
+            let mut transfer_result = None;
+            for base_url in &target_urls {
+                match stream_tar_gz_to_target(base_url, &token, &tmp_tgz).await {
+                    Ok(extracted_bytes) => {
+                        transfer_result = Some((base_url.clone(), extracted_bytes));
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = format!("{base_url}: {e}");
+                    }
+                }
+            }
+            let _ = tokio::fs::remove_file(&tmp_tgz).await;
+
+            match transfer_result {
+                Some((used_url, extracted_bytes)) => {
+                    send_log(
+                        &ws_tx,
+                        Some(p.id),
+                        None,
+                        "shift",
+                        "info",
+                        &format!(
+                            "Streamed {} bytes compressed directly to Target via {}",
+                            compressed_bytes, used_url
+                        ),
+                    );
+                    ok_resp(
+                        req_id,
+                        json!({
+                            "ok": true,
+                            "bytesTransferred": compressed_bytes,
+                            "rawBytes": raw_bytes,
+                            "extractedBytes": extracted_bytes,
+                            "usedUrl": used_url,
+                        }),
+                    )
+                }
+                None => err_resp(req_id, 502, format!("Direct P2P transfer failed: {last_err}")),
+            }
+        }
+        "shift.warm_start" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let ctx: RemoteContextPayload =
+                serde_json::from_value(params["context"].clone()).unwrap_or_default();
+            let health_timeout_ms = params["healthTimeoutMs"].as_u64().unwrap_or(5000);
+            let skip_port_probe = params["skipPortProbe"].as_bool().unwrap_or(false);
+            let _ = tokio::fs::create_dir_all(&p.deploy_dir).await;
+            let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
+            apply_and_cache_context(&exec, &p, ctx.clone()).await;
+
+            match start_project_local(&exec, &p, ctx.env, None, &ws_tx).await {
+                Ok(pid) => {
+                    if !skip_port_probe {
+                        if let Some(port) = p.port {
+                            let deadline = tokio::time::Instant::now()
+                                + Duration::from_millis(health_timeout_ms.clamp(250, 30_000));
+                            let mut healthy = false;
+                            while tokio::time::Instant::now() < deadline {
+                                if Runtime::is_port_accepting(port).await {
+                                    healthy = true;
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(120)).await;
+                            }
+                            if !healthy {
+                                stop_project_local(&exec, &p, &container).await;
+                                return err_resp(
+                                    req_id,
+                                    502,
+                                    format!(
+                                        "Target warm-start health probe failed: port {port} did not accept connections"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    ok_resp(req_id, json!({ "ok": true, "pid": pid, "port": p.port }))
+                }
+                Err(e) => {
+                    stop_project_local(&exec, &p, &container).await;
+                    err_resp(req_id, 502, format!("Target warm-start failed: {e}"))
+                }
+            }
+        }
+        "shift.cleanup" | "shift.cleanup_source" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let remaining: Vec<Project> =
+                serde_json::from_value(params["remainingProjects"].clone()).unwrap_or_default();
+            let remove_files = params["removeFiles"].as_bool().unwrap_or(true);
+            let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
+            stop_project_local(&exec, &p, &container).await;
+            let caddy = Caddy::new(&exec.data_dir);
+            caddy.remove_project_config(&p.slug, &remaining);
+            if remove_files {
+                cleanup_project_files_dirs(&p, &remaining);
+            }
+            exec.remove_workload(p.id).await;
+            exec.env_cache.write().await.remove(&p.id);
+            ok_resp(req_id, json!({ "ok": true }))
+        }
+        "caddy.stage_http" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let mut projects: Vec<Project> =
+                serde_json::from_value(params["projects"].clone()).unwrap_or_default();
+            if !projects.iter().any(|item| item.id == p.id) {
+                projects.push(p.clone());
+            }
+            let caddy = Caddy::new(&exec.data_dir);
+            if let Err(e) = caddy.write_staging_http_config(&p, &projects) {
+                return err_resp(req_id, 500, format!("Caddy stage HTTP write failed: {e}"));
+            }
+            let _ = caddy.reload();
+            ok_resp(req_id, json!({ "ok": true, "mode": "http-staging" }))
+        }
+        "caddy.enable_https" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let mut projects: Vec<Project> =
+                serde_json::from_value(params["projects"].clone()).unwrap_or_default();
+            if !projects.iter().any(|item| item.id == p.id) {
+                projects.push(p.clone());
+            }
+            let caddy = Caddy::new(&exec.data_dir);
+            if let Err(e) = caddy.write_config(&p, &projects) {
+                return err_resp(req_id, 500, format!("Caddy enable HTTPS write failed: {e}"));
+            }
+            if let Err(e) = caddy.reload() {
+                return err_resp(req_id, 500, format!("Caddy reload failed: {e}"));
+            }
+            ok_resp(req_id, json!({ "ok": true, "mode": "auto-https" }))
+        }
+        "node.self_update" => {
+            let repo_slug = params["repoSlug"]
+                .as_str()
+                .unwrap_or("abhishek737/web-dep")
+                .trim()
+                .to_string();
+            let tag = params["tag"].as_str().map(|s| s.to_string());
+            let token = params["githubToken"].as_str().map(|s| s.to_string());
+            let restart = params["restart"].as_bool().unwrap_or(true);
+
+            let res = tokio::task::spawn_blocking(move || {
+                crate::updater::perform_binary_swap_sync(
+                    &repo_slug,
+                    tag.as_deref(),
+                    token.as_deref(),
+                    false,
+                    None,
+                )
+            })
+            .await;
+
+            match res {
+                Ok(Ok(new_tag)) => {
+                    if restart {
+                        crate::updater::restart_node_service_delayed(800);
+                    }
+                    ok_resp(
+                        req_id,
+                        json!({ "ok": true, "tag": new_tag, "restarting": restart }),
+                    )
+                }
+                Ok(Err(e)) => err_resp(req_id, 500, e),
+                Err(e) => err_resp(req_id, 500, format!("Self-update worker failed: {e}")),
+            }
+        }
+        "project.fetch_backup_tar" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let backup_path = params["backupPath"].as_str().unwrap_or("").trim().to_string();
+            let b_dir = if backup_path.is_empty() {
+                PathBuf::from(&p.deploy_dir)
+            } else {
+                PathBuf::from(&backup_path)
+            };
+            if !b_dir.exists() {
+                return err_resp(req_id, 404, "Backup snapshot path does not exist on node");
+            }
+            let tmp_tgz = exec
+                .data_dir
+                .join("tmp")
+                .join(format!("backup-fetch-{}-{}.tar.gz", p.id, now_secs()));
+            let tgz_c = tmp_tgz.clone();
+            let res = tokio::task::spawn_blocking(move || pack_dir_to_tar_gz(&b_dir, &tgz_c, &[])).await;
+            let (comp, raw) = match res {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => return err_resp(req_id, 500, e),
+                Err(e) => return err_resp(req_id, 500, e.to_string()),
+            };
+            let bytes = match tokio::fs::read(&tmp_tgz).await {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&tmp_tgz).await;
+                    return err_resp(req_id, 500, e.to_string());
+                }
+            };
+            let _ = tokio::fs::remove_file(&tmp_tgz).await;
+            if bytes.len() > 32 * 1024 * 1024 {
+                return err_resp(
+                    req_id,
+                    413,
+                    "Off-node RPC snapshot payload exceeds 32 MiB; configure P2P upload streaming",
+                );
+            }
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            ok_resp(
+                req_id,
+                json!({
+                    "ok": true,
+                    "size": comp,
+                    "rawSize": raw,
+                    "tarGzBase64": b64,
+                }),
+            )
+        }
+        "project.restore_backup_tar" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let b64 = params["tarGzBase64"].as_str().unwrap_or("");
+            if b64.is_empty() {
+                return err_resp(req_id, 400, "Missing tarGzBase64 archive payload");
+            }
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(b) => b,
+                Err(e) => return err_resp(req_id, 400, format!("Invalid base64 archive: {e}")),
+            };
+            let tmp_dir = exec
+                .data_dir
+                .join("tmp")
+                .join(format!("restore-unpack-{}-{}", p.id, now_secs()));
+            let tmp_tgz = tmp_dir.with_extension("tar.gz");
+            if let Some(parent) = tmp_tgz.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            if let Err(e) = tokio::fs::write(&tmp_tgz, &bytes).await {
+                return err_resp(req_id, 500, format!("Failed writing restore archive: {e}"));
+            }
+            let tgz_c = tmp_tgz.clone();
+            let dir_c = tmp_dir.clone();
+            let unpack_res = tokio::task::spawn_blocking(move || unpack_tar_gz_safe(&tgz_c, &dir_c)).await;
+            let _ = tokio::fs::remove_file(&tmp_tgz).await;
+            if let Ok(Err(e)) = unpack_res {
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return err_resp(req_id, 400, e);
+            } else if let Err(e) = unpack_res {
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return err_resp(req_id, 500, e.to_string());
+            }
+
+            let raw_env = tokio::fs::read_to_string(tmp_dir.join("backup.env"))
+                .await
+                .unwrap_or_default();
+            let deploy_dir = PathBuf::from(&p.deploy_dir);
+            let target_current = deploy_dir.join("current");
+            let _ = tokio::fs::create_dir_all(&target_current).await;
+            let src_files = if tmp_dir.join("files").exists() {
+                tmp_dir.join("files")
+            } else if tmp_dir.join("current").exists() {
+                tmp_dir.join("current")
+            } else {
+                tmp_dir.clone()
+            };
+            let tgt_c = target_current.clone();
+            let _ = tokio::task::spawn_blocking(move || copy_backup_files(&src_files, &tgt_c)).await;
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+            ok_resp(
+                req_id,
+                json!({
+                    "ok": true,
+                    "rawEnv": raw_env,
+                    "targetDeployDir": deploy_dir.to_string_lossy().to_string(),
+                }),
+            )
+        }
         other => err_resp(req_id, 404, format!("Unknown remote RPC op '{other}'")),
     }
 }
@@ -1481,6 +1949,221 @@ async fn handle_files_upload(req_id: String, params: Value) -> ClusterWsMessage 
     ok_resp(req_id, json!({ "ok": true, "uploaded": uploaded }))
 }
 
+pub fn resolve_target_deploy_dir(data_dir: &Path, p: &Project) -> PathBuf {
+    let clean_slug: String = p
+        .slug
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let folder = if clean_slug.is_empty() {
+        format!("project-{}", p.id)
+    } else {
+        clean_slug
+    };
+    data_dir.join("sites").join(folder)
+}
+
+pub fn allocate_free_port_on_node(preferred: Option<u16>, used_ports: &[u16]) -> Result<u16, String> {
+    let blocked: HashSet<u16> = used_ports.iter().copied().collect();
+    if let Some(pref) = preferred {
+        if pref >= 1024 && !blocked.contains(&pref) {
+            if std::net::TcpListener::bind(("127.0.0.1", pref)).is_ok() {
+                return Ok(pref);
+            }
+        }
+    }
+    for port in 43000u16..=44999u16 {
+        if blocked.contains(&port) {
+            continue;
+        }
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Ok(port);
+        }
+    }
+    if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", 0)) {
+        if let Ok(addr) = listener.local_addr() {
+            let port = addr.port();
+            if !blocked.contains(&port) {
+                return Ok(port);
+            }
+        }
+    }
+    Err("No free TCP port available on target Web-Node".to_string())
+}
+
+pub async fn start_p2p_server(
+    exec: Arc<NodeExecState>,
+    bind_host: &str,
+    preferred_port: u16,
+) -> Result<(u16, tokio::task::JoinHandle<()>), String> {
+    let addr: SocketAddr = format!("{bind_host}:{preferred_port}")
+        .parse()
+        .map_err(|e| format!("Invalid P2P bind address: {e}"))?;
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(_) => {
+            let fallback: SocketAddr = format!("{bind_host}:0")
+                .parse()
+                .map_err(|e| format!("Invalid fallback P2P bind address: {e}"))?;
+            TcpListener::bind(fallback)
+                .await
+                .map_err(|e| format!("Failed binding P2P listener: {e}"))?
+        }
+    };
+    let bound_port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed reading P2P local_addr: {e}"))?
+        .port();
+    exec.p2p_port.store(bound_port, Ordering::Relaxed);
+
+    let router = Router::new()
+        .route("/p2p/health", get(|| async { "ok" }))
+        .route(
+            "/p2p/shift/:token",
+            put(p2p_receive_shift_tar).post(p2p_receive_shift_tar),
+        )
+        .layer(DefaultBodyLimit::disable())
+        .with_state(exec);
+
+    let handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, router).await {
+            eprintln!("Web-Node P2P HTTP receiver exited: {e}");
+        }
+    });
+
+    Ok((bound_port, handle))
+}
+
+async fn p2p_receive_shift_tar(
+    State(exec): State<Arc<NodeExecState>>,
+    AxPath(token): AxPath<String>,
+    body: Body,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let ticket = exec
+        .consume_p2p_ticket(token.trim())
+        .await
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid or expired P2P shift token".to_string()))?;
+
+    let tmp_dir = exec.data_dir.join("tmp");
+    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+    let tmp_tgz = tmp_dir.join(format!("recv-{}.tar.gz", now_secs()));
+    let mut file = tokio::fs::File::create(&tmp_tgz)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed creating staging tar: {e}")))?;
+
+    let mut received_bytes = 0u64;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_tgz);
+            (StatusCode::BAD_REQUEST, format!("Stream read failed: {e}"))
+        })?;
+        received_bytes = received_bytes.saturating_add(chunk.len() as u64);
+        if received_bytes > ticket.max_bytes {
+            let _ = tokio::fs::remove_file(&tmp_tgz).await;
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, "Transfer exceeded ticket limit".to_string()));
+        }
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&tmp_tgz).await;
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Disk write failed: {e}")));
+        }
+    }
+    let _ = file.flush().await;
+    drop(file);
+
+    let tgz_c = tmp_tgz.clone();
+    let dest_c = ticket.dest_dir.clone();
+    let extracted_res = tokio::task::spawn_blocking(move || unpack_tar_gz_safe(&tgz_c, &dest_c))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Unpack worker failed: {e}")))?;
+    let _ = tokio::fs::remove_file(&tmp_tgz).await;
+
+    let extracted_bytes = extracted_res.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({
+        "ok": true,
+        "bytesTransferred": received_bytes,
+        "extractedBytes": extracted_bytes,
+        "destDir": ticket.dest_dir.to_string_lossy().to_string(),
+    })))
+}
+
+pub async fn stream_tar_gz_to_target(
+    base_url: &str,
+    token: &str,
+    tar_gz_path: &Path,
+) -> Result<u64, String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    let host_port = trimmed
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("Unsupported P2P URL scheme in '{base_url}' (expected http://)"))?;
+    let (host_hdr, path_prefix) = match host_port.split_once('/') {
+        Some((h, p)) => (h, format!("/{p}")),
+        None => (host_port, String::new()),
+    };
+
+    let meta = tokio::fs::metadata(tar_gz_path)
+        .await
+        .map_err(|e| format!("Failed reading staged archive: {e}"))?;
+    let total_len = meta.len();
+
+    let mut stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(host_hdr))
+        .await
+        .map_err(|_| format!("Timed out connecting to P2P peer {host_hdr}"))?
+        .map_err(|e| format!("TCP connect to {host_hdr} failed: {e}"))?;
+
+    let req_path = format!("{path_prefix}/p2p/shift/{token}");
+    let headers = format!(
+        "PUT {req_path} HTTP/1.1\r\nHost: {host_hdr}\r\nContent-Type: application/gzip\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(headers.as_bytes())
+        .await
+        .map_err(|e| format!("Failed writing P2P HTTP request headers: {e}"))?;
+
+    let mut file = tokio::fs::File::open(tar_gz_path)
+        .await
+        .map_err(|e| format!("Failed opening archive for streaming: {e}"))?;
+    tokio::io::copy(&mut file, &mut stream)
+        .await
+        .map_err(|e| format!("Failed streaming archive payload: {e}"))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| format!("Failed flushing P2P stream: {e}"))?;
+
+    let mut reader = TokioBufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .await
+        .map_err(|e| format!("Failed reading P2P HTTP status: {e}"))?;
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    loop {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("Failed reading P2P HTTP response headers: {e}"))?;
+        if n == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+
+    let mut body_bytes = Vec::new();
+    let _ = reader.read_to_end(&mut body_bytes).await;
+    let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+    if !(200..300).contains(&status_code) {
+        return Err(format!("Peer returned HTTP {status_code}: {body_text}"));
+    }
+    let parsed: Value = serde_json::from_str(&body_text).unwrap_or(Value::Null);
+    Ok(parsed["extractedBytes"].as_u64().unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1692,5 +2375,96 @@ mod tests {
         assert!(matches!(esc, ClusterWsMessage::RpcResponse { ok: false, status: 400, .. }));
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn p2p_shift_streams_tar_gz_directly_between_nodes() {
+        let src_data = temp_dir("webdep-p2p-src");
+        let dst_data = temp_dir("webdep-p2p-dst");
+        let src_site = src_data.join("sites/p2p-app");
+        std::fs::create_dir_all(src_site.join("current")).unwrap();
+        std::fs::create_dir_all(src_site.join("backups/backup-1")).unwrap();
+        std::fs::write(src_site.join("current/app.js"), b"console.log('shifted');").unwrap();
+        std::fs::write(src_site.join("backups/backup-1/note.txt"), b"snap").unwrap();
+
+        let src_exec = Arc::new(NodeExecState::new(src_data.clone(), test_manifest(Vec::new())));
+        let dst_exec = Arc::new(NodeExecState::new(dst_data.clone(), test_manifest(Vec::new())));
+        let (p2p_port, p2p_handle) = start_p2p_server(dst_exec.clone(), "127.0.0.1", 0)
+            .await
+            .unwrap();
+        assert!(p2p_port > 0);
+
+        let proj = dummy_project(99, "p2p-app", &src_site);
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        // 1. Preflight allocates free port & computes target deploy_dir
+        let pre = execute_rpc(
+            dst_exec.clone(),
+            "pre-1".to_string(),
+            "shift.preflight".to_string(),
+            json!({ "project": proj, "usedPorts": [] }),
+            tx.clone(),
+        )
+        .await;
+        let allocated_port = match pre {
+            ClusterWsMessage::RpcResponse { ok: true, result, .. } => {
+                assert_eq!(result["capabilities"]["p2pPort"].as_u64(), Some(p2p_port as u64));
+                result["allocatedPort"].as_u64().unwrap() as u16
+            }
+            other => panic!("unexpected preflight reply: {other:?}"),
+        };
+        assert!(allocated_port >= 1024);
+
+        // 2. Target prepares single-use receive ticket
+        let prep = execute_rpc(
+            dst_exec.clone(),
+            "prep-1".to_string(),
+            "shift.prepare_receive".to_string(),
+            json!({ "project": proj }),
+            tx.clone(),
+        )
+        .await;
+        let (token, target_dir) = match prep {
+            ClusterWsMessage::RpcResponse { ok: true, result, .. } => (
+                result["token"].as_str().unwrap().to_string(),
+                PathBuf::from(result["targetDeployDir"].as_str().unwrap()),
+            ),
+            other => panic!("unexpected prepare_receive reply: {other:?}"),
+        };
+
+        // 3. Source packs and streams .tar.gz directly to Target P2P HTTP receiver
+        let push = execute_rpc(
+            src_exec.clone(),
+            "push-1".to_string(),
+            "shift.push_tar".to_string(),
+            json!({
+                "project": proj,
+                "token": token,
+                "targetUrls": [format!("http://127.0.0.1:{p2p_port}")],
+            }),
+            tx,
+        )
+        .await;
+        match push {
+            ClusterWsMessage::RpcResponse { ok: true, result, .. } => {
+                assert!(result["bytesTransferred"].as_u64().unwrap() > 0);
+                assert!(result["extractedBytes"].as_u64().unwrap() > 0);
+            }
+            other => panic!("unexpected push reply: {other:?}"),
+        }
+
+        // Verify target extracted current/ and backups/ cleanly
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join("current/app.js")).unwrap(),
+            "console.log('shifted');"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join("backups/backup-1/note.txt")).unwrap(),
+            "snap"
+        );
+
+        p2p_handle.abort();
+        let _ = std::fs::remove_dir_all(&src_data);
+        let _ = std::fs::remove_dir_all(&dst_data);
     }
 }

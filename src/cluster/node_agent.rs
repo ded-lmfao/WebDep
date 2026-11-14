@@ -6,12 +6,13 @@ use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, S
 use tokio::sync::mpsc;
 
 use super::mesh::{
-    detect_capabilities, generate_wireguard_keypair, reconcile_mesh_network, DEFAULT_WG_PORT,
+    detect_capabilities, detect_capabilities_with_p2p, generate_wireguard_keypair,
+    reconcile_mesh_network, DEFAULT_WG_PORT,
 };
 use super::models::{
     ClusterWsMessage, EnrollNodeRequest, EnrollNodeResponse, NodeMetrics, NodeStateManifest,
 };
-use super::node_exec::{execute_rpc, reconcile_placements, NodeExecState};
+use super::node_exec::{execute_rpc, reconcile_placements, start_p2p_server, NodeExecState};
 use super::ws::{
     connect_ws, http_base_to_ws_url, http_post_json, normalize_core_http_url, WsMessage,
 };
@@ -267,6 +268,24 @@ pub async fn run_node_agent(data_dir: PathBuf) {
 
     reconcile_mesh_network(&manifest, &data_dir).await;
     let exec_state = Arc::new(NodeExecState::new(data_dir.clone(), manifest.clone()));
+    let p2p_bind_host = std::env::var("WEBDEP_NODE_P2P_BIND")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+    let p2p_pref_port: u16 = std::env::var("WEBDEP_NODE_P2P_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(4601);
+    let (p2p_port, _p2p_handle) = match start_p2p_server(exec_state.clone(), &p2p_bind_host, p2p_pref_port).await {
+        Ok(res) => {
+            println!("Web-Node P2P receiver listening on {}:{}", p2p_bind_host, res.0);
+            res
+        }
+        Err(e) => {
+            eprintln!("Web-Node P2P listener warning: {e}");
+            (0, tokio::spawn(async {}))
+        }
+    };
     let mut sampler = MetricsSampler::new();
     let backoff_secs = [1u64, 2, 5, 10, 30];
     let mut attempt: usize = 0;
@@ -308,7 +327,7 @@ pub async fn run_node_agent(data_dir: PathBuf) {
             wg_pubkey: manifest.wg_pubkey.clone(),
             wg_endpoint,
             public_ip: manifest.public_ip.clone(),
-            capabilities: detect_capabilities(),
+            capabilities: detect_capabilities_with_p2p(if p2p_port > 0 { Some(p2p_port) } else { None }),
             workloads: initial_workloads,
         };
         if let Ok(json) = serde_json::to_string(&register_msg) {

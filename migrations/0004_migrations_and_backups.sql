@@ -1,0 +1,14 @@
+-- Multi-node live app shifting metadata & off-node backup storage tracking
+ALTER TABLE migrations
+    ADD COLUMN IF NOT EXISTS initiated_by TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS from_ip TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS to_ip TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS target_port BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS domains_json TEXT NOT NULL DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS cutover_mode TEXT NOT NULL DEFAULT 'dns',
+    ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE backups
+    ADD COLUMN IF NOT EXISTS storage_mode TEXT NOT NULL DEFAULT 'local',
+    ADD COLUMN IF NOT EXISTS core_backup_path TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS source_node_id BIGINT;

@@ -120,6 +120,8 @@ export function renderNodesView(enrollTokens = null) {
 
   const addBtn = document.getElementById('add-node-header-btn');
   if (addBtn) addBtn.style.display = isMainAdmin ? '' : 'none';
+  const fleetBtn = document.getElementById('fleet-update-header-btn');
+  if (fleetBtn) fleetBtn.style.display = isMainAdmin ? '' : 'none';
 
   if (!nodes.length) {
     setHtmlIfChanged(
@@ -221,6 +223,9 @@ export function renderNodesView(enrollTokens = null) {
                 <button class="btn btn-secondary btn-sm" onclick="toggleNodeDrain(${n.id}, ${isDraining ? 'false' : 'true'})">
                   ${isDraining ? 'Resume' : 'Drain'}
                 </button>
+                ${Number(n.projectCount || 0) > 0 ? `
+                  <button class="btn btn-secondary btn-sm" onclick="evacuateClusterNode(${n.id}, '${escapeHtml(n.name)}')">Evacuate</button>
+                ` : ''}
               ` : ''}
               ${isMainAdmin && !n.isLocal ? `
                 <button class="btn btn-danger btn-sm" onclick="removeClusterNode(${n.id}, '${escapeHtml(n.name)}')">Remove</button>
@@ -343,11 +348,12 @@ export async function toggleNodeDrain(nodeId, drain) {
 }
 
 export async function removeClusterNode(nodeId, nodeName) {
-  const ok = await showConfirmDialog(
-    'Remove Worker Node',
-    `Remove "${nodeName}" from the cluster mesh? Workloads assigned to this node must be moved or deleted first.`,
-    { danger: true, confirmText: 'Remove Node' },
-  );
+  const ok = await showConfirmDialog({
+    title: 'Remove Worker Node',
+    message: `Remove "${nodeName}" from the cluster mesh? Workloads assigned to this node must be moved or deleted first.`,
+    danger: true,
+    confirmText: 'Remove Node',
+  });
   if (!ok) return;
 
   try {
@@ -366,6 +372,218 @@ document.getElementById('global-node-filter')?.addEventListener('change', (e) =>
   setGlobalNodeFilter(e.target.value);
 });
 
+let activeShiftMigration = null;
+
+function renderShiftModalState(mig, historyList = []) {
+  const setupEl = document.getElementById('shift-setup-panel');
+  const activeEl = document.getElementById('shift-active-panel');
+  const bannerEl = document.getElementById('shift-stage-banner');
+  const dnsCard = document.getElementById('shift-dns-card');
+  const dnsRecEl = document.getElementById('shift-dns-records');
+  const startBtn = document.getElementById('shift-start-btn');
+  const histEl = document.getElementById('shift-history-box');
+
+  if (mig && ['running', 'pending', 'awaiting_dns'].includes(mig.status)) {
+    activeShiftMigration = mig;
+    if (setupEl) setupEl.style.display = 'none';
+    if (activeEl) activeEl.style.display = 'flex';
+    if (startBtn) startBtn.style.display = 'none';
+    if (bannerEl) {
+      bannerEl.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+          <strong>Shift #${mig.id}: ${escapeHtml(mig.fromNodeName || 'Source')} &rarr; ${escapeHtml(mig.toNodeName || 'Target')}</strong>
+          <span class="badge ${mig.status === 'awaiting_dns' ? 'badge-warning' : 'badge-info'}">${escapeHtml(mig.stage)}</span>
+        </div>
+        <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">
+          Target port: <code>${mig.targetPort || '--'}</code> &bull; Transferred: <strong>${formatBytesHuman(mig.transferBytes || 0)}</strong>
+        </div>
+      `;
+    }
+    if (dnsCard) {
+      dnsCard.style.display = mig.status === 'awaiting_dns' ? 'block' : 'none';
+    }
+    if (dnsRecEl && mig.status === 'awaiting_dns') {
+      const domRows = (mig.domains || []).map((d) =>
+        `<div><code>A</code> &bull; <strong>${escapeHtml(d)}</strong> &bull; <code>${escapeHtml(mig.fromIp || '--')}</code> &rarr; <code>${escapeHtml(mig.toIp || '--')}</code></div>`
+      ).join('');
+      dnsRecEl.innerHTML = `
+        ${domRows || '<div>Update DNS A record to point to target IP.</div>'}
+        <div style="margin-top:6px; font-size:11.5px; color:var(--text-dim);">
+          ${mig.dnsVerified ? '<span class="badge badge-success">DNS Verified</span>' : 'Update your DNS A record(s), click <strong>Check DNS</strong>, or use <strong>Complete Cutover Now</strong>.'}
+        </div>
+      `;
+    }
+  } else {
+    activeShiftMigration = null;
+    if (setupEl) setupEl.style.display = 'block';
+    if (activeEl) activeEl.style.display = 'none';
+    if (startBtn) startBtn.style.display = '';
+    if (dnsCard) dnsCard.style.display = 'none';
+  }
+
+  if (histEl) {
+    if (!historyList || !historyList.length) {
+      histEl.textContent = 'No prior migrations recorded for this website.';
+    } else {
+      histEl.innerHTML = `<div style="margin-bottom:4px; font-weight:600; color:var(--text-muted);">Recent Shifts</div>` +
+        historyList.slice(0, 4).map((h) =>
+          `<div>#${h.id}: ${escapeHtml(h.fromNodeName || '?')} &rarr; ${escapeHtml(h.toNodeName || '?')} &bull; <span class="badge badge-neutral">${escapeHtml(h.status)}</span> (${formatBytesHuman(h.transferBytes || 0)})</div>`
+        ).join('');
+    }
+  }
+}
+
+export async function openMoveToNodeModal(projectId) {
+  const pid = Number(projectId || state.selectedProjectId);
+  const proj = (state.projects || []).find((x) => x.id === pid);
+  if (!proj) {
+    toast('Select a website first.', 'warning');
+    return;
+  }
+  state.selectedProjectId = pid;
+  await loadNodes(true);
+
+  const titleEl = document.getElementById('shift-modal-title');
+  if (titleEl) titleEl.textContent = `Move "${proj.name}" to Node`;
+
+  const sel = document.getElementById('shift-target-node-select');
+  const candidates = (state.nodes || []).filter((n) => n.status === 'online' && Number(n.id) !== Number(proj.node_id));
+  if (sel) {
+    sel.innerHTML = candidates.length
+      ? candidates.map((n) => `<option value="${n.id}">${escapeHtml(n.name)} (${escapeHtml(n.region || 'default')} &bull; ${escapeHtml(n.meshIp || n.publicIp || '')})</option>`).join('')
+      : '<option value="">No other healthy online nodes available</option>';
+  }
+
+  let history = [];
+  try {
+    history = await api(`/api/projects/${pid}/migrations`, { noCache: true });
+  } catch (_) {}
+  const active = Array.isArray(history)
+    ? history.find((m) => ['running', 'pending', 'awaiting_dns'].includes(m.status))
+    : null;
+  renderShiftModalState(active, Array.isArray(history) ? history : []);
+  openModal('modal-move-project-node');
+}
+
+export async function confirmStartProjectShift() {
+  const pid = Number(state.selectedProjectId);
+  const targetNodeId = Number(document.getElementById('shift-target-node-select')?.value || 0);
+  const skipDns = Boolean(document.getElementById('shift-skip-dns-checkbox')?.checked);
+  if (!pid || !targetNodeId) {
+    toast('Select an online destination Web-Node first.', 'warning');
+    return;
+  }
+  const btn = document.getElementById('shift-start-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Shifting...';
+  }
+  try {
+    const mig = await api(`/api/projects/${pid}/move`, {
+      method: 'POST',
+      body: { targetNodeId, autoCutoverWithoutDns: skipDns },
+    });
+    const history = await api(`/api/projects/${pid}/migrations`, { noCache: true }).catch(() => [mig]);
+    renderShiftModalState(mig, Array.isArray(history) ? history : [mig]);
+    if (mig.status === 'completed') {
+      toast(`Live shift #${mig.id} completed cleanly!`, 'success');
+      if (typeof window.refreshProjects === 'function') await window.refreshProjects();
+      closeModal('modal-move-project-node');
+    } else if (mig.status === 'awaiting_dns') {
+      toast('Target warmed & staged on HTTP! Complete DNS update to finish HTTPS cutover.', 'info');
+    }
+  } catch (err) {
+    toast(`Shift failed: ${err.message}`, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Start Live P2P Shift';
+    }
+  }
+}
+
+export async function checkShiftDns() {
+  if (!activeShiftMigration) return;
+  try {
+    const res = await api(`/api/migrations/${activeShiftMigration.id}/check-dns`, { method: 'POST' });
+    const history = await api(`/api/projects/${res.migration.projectId}/migrations`, { noCache: true }).catch(() => []);
+    renderShiftModalState(res.migration, Array.isArray(history) ? history : []);
+    toast(
+      res.dnsVerified
+        ? `DNS verified pointing to ${res.expectedIp}! Ready to complete cutover.`
+        : `DNS resolved [${(res.resolvedIps || []).join(', ') || 'none'}] (expected ${res.expectedIp})`,
+      res.dnsVerified ? 'success' : 'warning',
+    );
+  } catch (err) {
+    toast(`DNS check failed: ${err.message}`, 'error');
+  }
+}
+
+export async function completeShiftCutover() {
+  if (!activeShiftMigration) return;
+  try {
+    const done = await api(`/api/migrations/${activeShiftMigration.id}/complete`, { method: 'POST' });
+    toast(`Shift #${done.id} cutover completed!`, 'success');
+    activeShiftMigration = null;
+    if (typeof window.refreshProjects === 'function') await window.refreshProjects();
+    closeModal('modal-move-project-node');
+  } catch (err) {
+    toast(`Cutover failed: ${err.message}`, 'error');
+  }
+}
+
+export async function abortShiftMigration() {
+  if (!activeShiftMigration) return;
+  try {
+    await api(`/api/migrations/${activeShiftMigration.id}/abort`, { method: 'POST' });
+    toast('Shift aborted and target cleaned up; source untouched.', 'info');
+    const pid = activeShiftMigration.projectId;
+    activeShiftMigration = null;
+    const history = await api(`/api/projects/${pid}/migrations`, { noCache: true }).catch(() => []);
+    renderShiftModalState(null, Array.isArray(history) ? history : []);
+  } catch (err) {
+    toast(`Abort failed: ${err.message}`, 'error');
+  }
+}
+
+export async function evacuateClusterNode(nodeId, nodeName) {
+  const ok = await showConfirmDialog({
+    title: `Evacuate "${nodeName}"`,
+    message: `Drain "${nodeName}" and automatically shift all hosted applications to healthy online nodes?`,
+    confirmText: 'Drain & Evacuate',
+  });
+  if (!ok) return;
+  try {
+    const res = await api(`/api/cluster/nodes/${nodeId}/evacuate`, { method: 'POST', body: {} });
+    toast(
+      `Evacuated ${nodeName}: ${res.shifted.length} shifted, ${res.awaitingDns.length} awaiting DNS, ${res.failed.length} failed.`,
+      res.failed.length ? 'warning' : 'success',
+    );
+    await loadNodesView(true);
+    if (typeof window.refreshProjects === 'function') await window.refreshProjects();
+  } catch (err) {
+    toast(`Evacuation failed: ${err.message}`, 'error');
+  }
+}
+
+export async function triggerFleetUpdate() {
+  if (typeof window.startPlatformUpdate === 'function') {
+    return window.startPlatformUpdate();
+  }
+  const ok = await showConfirmDialog({
+    title: 'Coordinated Fleet Update',
+    message: 'Upgrade all connected remote Web-Nodes first, then upgrade and restart Web-Core?',
+    confirmText: 'Update Fleet',
+  });
+  if (!ok) return;
+  try {
+    const res = await api('/api/cluster/fleet-update', { method: 'POST', body: {} });
+    toast(res.message || 'Coordinated fleet update started', 'success');
+  } catch (err) {
+    toast(`Fleet update failed: ${err.message}`, 'error');
+  }
+}
+
 window.loadNodes = loadNodes;
 window.loadNodesView = loadNodesView;
 window.renderNodesView = renderNodesView;
@@ -374,5 +592,12 @@ window.openAddNodeModal = openAddNodeModal;
 window.generateNodeEnrollToken = generateNodeEnrollToken;
 window.copyNodeJoinCommand = copyNodeJoinCommand;
 window.toggleNodeDrain = toggleNodeDrain;
+window.evacuateClusterNode = evacuateClusterNode;
 window.removeClusterNode = removeClusterNode;
+window.triggerFleetUpdate = triggerFleetUpdate;
+window.openMoveToNodeModal = openMoveToNodeModal;
+window.confirmStartProjectShift = confirmStartProjectShift;
+window.checkShiftDns = checkShiftDns;
+window.completeShiftCutover = completeShiftCutover;
+window.abortShiftMigration = abortShiftMigration;
 window.closeAddNodeModal = () => closeModal('modal-add-node');

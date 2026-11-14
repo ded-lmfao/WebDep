@@ -49,28 +49,128 @@ pub(crate) async fn system_update_status_handler(
     Ok(Json(state.updater.get_status()))
 }
 
+pub(crate) async fn trigger_fleet_and_core_update(
+    state: &AppState,
+    actor_username: &str,
+    tag: Option<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    log_audit(
+        state,
+        actor_username,
+        "system.update",
+        Some("platform"),
+        Some("Triggered coordinated fleet & Core GitHub Release update"),
+    )
+    .await;
+
+    let nodes = state.cluster.list_nodes().await.unwrap_or_default();
+    let mut connected_remotes = Vec::new();
+    for n in nodes {
+        if !n.is_local && state.cluster.is_node_connected(n.id).await {
+            connected_remotes.push(n);
+        }
+    }
+
+    if connected_remotes.is_empty() {
+        state.logs.add(
+            None,
+            None,
+            "system",
+            "warn",
+            &format!("1-Click platform update from GitHub Release triggered by {}", actor_username),
+        );
+        state
+            .updater
+            .start_update(tag)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "remoteNodesTargeted": 0,
+            "message": "Release update sequence started",
+        })));
+    }
+
+    let remote_count = connected_remotes.len();
+    state
+        .updater
+        .begin_fleet_update_status(remote_count)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    state.logs.add(
+        None,
+        None,
+        "system",
+        "warn",
+        &format!(
+            "Coordinated fleet update ({remote_count} remote Web-Node(s) first, then Web-Core) triggered by {}",
+            actor_username
+        ),
+    );
+
+    let (repo_slug, token) = state.updater.get_repo_and_token().await;
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        let total = connected_remotes.len();
+        for (idx, n) in connected_remotes.into_iter().enumerate() {
+            let pct = 10u8 + (((idx + 1) * 20 / total.max(1)) as u8);
+            state_clone.updater.log_fleet_step(
+                &format!("Upgrading Web-Node '{}' (#{} / {})...", n.name, idx + 1, total),
+                pct,
+                &format!("[Fleet] Upgrading remote Web-Node '{}' (#{}) first...", n.name, n.id),
+            );
+            match state_clone
+                .cluster
+                .call_node(
+                    n.id,
+                    "node.self_update",
+                    serde_json::json!({
+                        "repoSlug": &repo_slug,
+                        "tag": &tag,
+                        "githubToken": &token,
+                        "restart": true,
+                    }),
+                    std::time::Duration::from_secs(240),
+                )
+                .await
+            {
+                Ok(res) => {
+                    let upgraded_tag = res["tag"].as_str().unwrap_or("latest");
+                    state_clone.updater.log_fleet_step(
+                        &format!("Web-Node '{}' upgraded to {}", n.name, upgraded_tag),
+                        pct,
+                        &format!("[Fleet] Web-Node '{}' upgraded to {} (restarting)", n.name, upgraded_tag),
+                    );
+                }
+                Err((_, err)) => {
+                    let msg = format!("Remote Web-Node '{}' update failed: {}", n.name, err);
+                    state_clone.logs.add(None, None, "system", "error", &msg);
+                    state_clone.updater.fail_fleet_step(msg);
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        if let Err(e) = state_clone.updater.start_update_after_fleet(tag).await {
+            state_clone.updater.fail_fleet_step(e);
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "remoteNodesTargeted": remote_count,
+        "message": format!("Coordinated update started: upgrading {remote_count} Web-Node(s) before Web-Core"),
+    })))
+}
+
 pub(crate) async fn system_update_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     payload: Option<Json<crate::updater::TriggerUpdatePayload>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let actor = verify_power(&state, &headers, "system_manage", None).await?;
-    log_audit(
-        &state,
-        &actor.username,
-        "system.update",
-        Some("platform"),
-        Some("Triggered 1-click platform update from GitHub Release"),
-    )
-    .await;
-    state.logs.add(None, None, "system", "warn", &format!("1-Click platform update from GitHub Release triggered by {}", actor.username));
-
     let tag = payload.and_then(|p| p.tag.clone());
-    state.updater.start_update(tag)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    Ok(Json(serde_json::json!({ "ok": true, "message": "Release update sequence started" })))
+    trigger_fleet_and_core_update(&state, &actor.username, tag).await
 }
 
 pub(crate) async fn system_update_repo_handler(

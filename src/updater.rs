@@ -579,25 +579,86 @@ impl Updater {
         Ok(format!("https://github.com/{}", slug))
     }
 
+    pub async fn get_repo_and_token(&self) -> (String, Option<String>) {
+        let repo = resolve_repo_slug_from_db(self.db.as_ref()).await;
+        let tok = resolve_github_token_from_db(self.db.as_ref()).await;
+        (repo, tok)
+    }
+
+    pub fn begin_fleet_update_status(&self, remote_nodes: usize) -> Result<(), String> {
+        let mut st = self.status.lock().unwrap();
+        if st.status == "in_progress" {
+            return Err("An update is already running in background".to_string());
+        }
+        *st = UpdateStatus {
+            status: "in_progress".to_string(),
+            step: if remote_nodes > 0 {
+                format!("Upgrading {remote_nodes} connected Web-Node worker(s) first...")
+            } else {
+                "Initializing release update...".to_string()
+            },
+            progress: 5,
+            logs: vec![format!(
+                "[{}] Starting coordinated cluster update (remote nodes first: {})...",
+                now_time_str(),
+                remote_nodes
+            )],
+            error: None,
+            started_at: Some(now_secs()),
+            finished_at: None,
+        };
+        Ok(())
+    }
+
+    pub fn log_fleet_step(&self, step: &str, progress: u8, msg: &str) {
+        Self::set_step(&self.status, step, progress);
+        Self::append_log(&self.status, msg);
+    }
+
+    pub fn fail_fleet_step(&self, err: String) {
+        Self::fail_update(&self.status, err);
+    }
+
     pub async fn start_update(&self, tag_override: Option<String>) -> Result<(), String> {
+        self.start_update_internal(tag_override, false).await
+    }
+
+    pub async fn start_update_after_fleet(&self, tag_override: Option<String>) -> Result<(), String> {
+        self.start_update_internal(tag_override, true).await
+    }
+
+    async fn start_update_internal(
+        &self,
+        tag_override: Option<String>,
+        preserve_logs: bool,
+    ) -> Result<(), String> {
         {
             let mut st = self.status.lock().unwrap();
-            if st.status == "in_progress" {
+            if !preserve_logs && st.status == "in_progress" {
                 return Err("An update is already running in background".to_string());
             }
 
-            *st = UpdateStatus {
-                status: "in_progress".to_string(),
-                step: "Initializing release update...".to_string(),
-                progress: 5,
-                logs: vec![format!(
-                    "[{}] Starting WebDep prebuilt GitHub Release update...",
+            if !preserve_logs {
+                *st = UpdateStatus {
+                    status: "in_progress".to_string(),
+                    step: "Initializing release update...".to_string(),
+                    progress: 5,
+                    logs: vec![format!(
+                        "[{}] Starting WebDep prebuilt GitHub Release update...",
+                        now_time_str()
+                    )],
+                    error: None,
+                    started_at: Some(now_secs()),
+                    finished_at: None,
+                };
+            } else {
+                st.step = "Upgrading Web-Core binary...".to_string();
+                st.progress = 35;
+                st.logs.push(format!(
+                    "[{}] [Core] Starting Web-Core release binary update...",
                     now_time_str()
-                )],
-                error: None,
-                started_at: Some(now_secs()),
-                finished_at: None,
-            };
+                ));
+            }
         }
 
         let status_arc = self.status.clone();
@@ -645,293 +706,20 @@ impl Updater {
         token: Option<String>,
         tag_override: Option<String>,
     ) {
-        // STEP 1: Verify platform support, target binary path, and preserve .env/data
-        Self::set_step(&status_arc, "Verifying environment & binary path...", 10);
-
-        let asset_name = match current_arch_asset_name() {
-            Some(name) => name,
-            None => {
-                Self::fail_update(
-                    &status_arc,
-                    format!(
-                        "Prebuilt GitHub Release updates target Linux (x86_64 / aarch64); automatic binary update is unsupported on {}/{}.",
-                        std::env::consts::OS,
-                        std::env::consts::ARCH
-                    ),
-                );
-                return;
-            }
-        };
-
-        let active_exe = resolve_active_exe_path();
-        let exe_dir = active_exe
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let exe_name = active_exe
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("webdep")
-            .to_string();
-
-        Self::append_log(
-            &status_arc,
-            &format!("[Target] Active binary path: {} (asset: {})", active_exe.display(), asset_name),
+        let tag_opt = perform_binary_swap_sync(
+            &repo_slug,
+            tag_override.as_deref(),
+            token.as_deref(),
+            true,
+            Some(&status_arc),
         );
-
-        let env_path = Path::new(".env");
-        let env_bak = Path::new(".env.updater-backup");
-        if env_path.exists() {
-            if let Err(e) = std::fs::copy(env_path, env_bak) {
-                warn!("Could not back up .env: {}", e);
-            } else {
-                Self::append_log(&status_arc, "[Safety] Backed up .env configuration before binary swap");
-            }
-        }
-        Self::append_log(&status_arc, "[Safety] data/ directory and databases remain untouched");
-
-        // STEP 2: Query GitHub Releases API
-        Self::set_step(&status_arc, "Fetching latest GitHub Release metadata...", 25);
-        Self::append_log(&status_arc, &format!("[GitHub] Checking releases on {}...", repo_slug));
-
-        let release = match fetch_github_release(&repo_slug, tag_override.as_deref(), token.as_deref()) {
-            Ok(r) => r,
+        let tag_name = match tag_opt {
+            Ok(t) => t,
             Err(e) => {
                 Self::fail_update(&status_arc, e);
                 return;
             }
         };
-
-        let target_asset = match release.assets.iter().find(|a| a.name == asset_name) {
-            Some(a) => a.clone(),
-            None => {
-                Self::fail_update(
-                    &status_arc,
-                    format!(
-                        "Release '{}' does not contain asset '{}'. Check GitHub Actions release build.",
-                        release.tag_name, asset_name
-                    ),
-                );
-                return;
-            }
-        };
-        let checksum_asset = match release.assets.iter().find(|a| a.name == "checksums.txt") {
-            Some(a) => a.clone(),
-            None => {
-                Self::fail_update(
-                    &status_arc,
-                    format!(
-                        "Release '{}' is missing checksums.txt required for SHA-256 verification.",
-                        release.tag_name
-                    ),
-                );
-                return;
-            }
-        };
-
-        Self::append_log(
-            &status_arc,
-            &format!(
-                "[GitHub] Found release '{}' ({} bytes for {})",
-                release.tag_name, target_asset.size, target_asset.name
-            ),
-        );
-
-        // STEP 3: Download archive & checksums into isolated staging folder
-        Self::set_step(&status_arc, &format!("Downloading {}...", target_asset.name), 50);
-
-        let stage_dir = PathBuf::from(format!("data/tmp/updater-{}", now_secs()));
-        if let Err(e) = std::fs::create_dir_all(&stage_dir) {
-            Self::fail_update(
-                &status_arc,
-                format!("Failed to create staging directory {}: {}", stage_dir.display(), e),
-            );
-            return;
-        }
-
-        let archive_path = stage_dir.join(&target_asset.name);
-        let checksums_path = stage_dir.join("checksums.txt");
-        let extract_dir = stage_dir.join("extract");
-
-        if let Err(e) = curl_download_file(&checksum_asset, token.as_deref(), &checksums_path, 15) {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(&status_arc, e);
-            return;
-        }
-        if let Err(e) = curl_download_file(&target_asset, token.as_deref(), &archive_path, 180) {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(&status_arc, e);
-            return;
-        }
-        Self::append_log(&status_arc, "[Download] Downloaded release archive and checksums.txt");
-
-        // STEP 4: Verify SHA-256 checksum strictly before extracting
-        Self::set_step(&status_arc, "Verifying SHA-256 checksum & extracting binary...", 70);
-        let checksums_text = match std::fs::read_to_string(&checksums_path) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(&status_arc, format!("Failed to read checksums.txt: {}", e));
-                return;
-            }
-        };
-        let expected_sha = match parse_checksum_for_asset(&checksums_text, &target_asset.name) {
-            Some(h) => h,
-            None => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(
-                    &status_arc,
-                    format!("No SHA-256 entry for '{}' found in checksums.txt", target_asset.name),
-                );
-                return;
-            }
-        };
-        let actual_sha = match compute_file_sha256_hex(&archive_path) {
-            Ok(h) => h,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(&status_arc, e);
-                return;
-            }
-        };
-        if actual_sha != expected_sha {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(
-                &status_arc,
-                format!(
-                    "SHA-256 verification FAILED for {}: expected {}, got {}",
-                    target_asset.name, expected_sha, actual_sha
-                ),
-            );
-            return;
-        }
-        Self::append_log(&status_arc, &format!("[Verify] SHA-256 verified: {}", actual_sha));
-
-        if let Err(e) = std::fs::create_dir_all(&extract_dir) {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(&status_arc, format!("Failed to create extract dir: {}", e));
-            return;
-        }
-        let tar_out = Command::new("tar")
-            .args([
-                "-xzf",
-                archive_path.to_str().unwrap_or_default(),
-                "-C",
-                extract_dir.to_str().unwrap_or_default(),
-            ])
-            .output();
-        match tar_out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                Self::fail_update(&status_arc, format!("Failed to extract tarball: {}", err));
-                return;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(&status_arc, format!("Failed to execute tar: {}", e));
-                return;
-            }
-        }
-
-        let extracted_bin = match find_extracted_binary(&extract_dir, &exe_name) {
-            Some(p) => p,
-            None => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(
-                    &status_arc,
-                    format!("Archive '{}' did not contain '{}'", target_asset.name, exe_name),
-                );
-                return;
-            }
-        };
-
-        // Stage next to active_exe so the final rename swap is atomic on the same filesystem
-        let staged_new = exe_dir.join(format!("{}.new", exe_name));
-        let old_exe = exe_dir.join(format!("{}.old", exe_name));
-        if let Err(e) = std::fs::copy(&extracted_bin, &staged_new) {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            let _ = std::fs::remove_file(&staged_new);
-            Self::fail_update(
-                &status_arc,
-                format!("Failed to stage binary at {}: {}", staged_new.display(), e),
-            );
-            return;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&staged_new, std::fs::Permissions::from_mode(0o700));
-        }
-
-        // Smoke-check executable runs cleanly before touching live binary
-        match Command::new(&staged_new).arg("--version").output() {
-            Ok(o) if o.status.success() => {
-                let ver_line = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                Self::append_log(&status_arc, &format!("[Verify] New binary smoke test OK: {}", ver_line));
-            }
-            Ok(o) => {
-                let _ = std::fs::remove_file(&staged_new);
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                Self::fail_update(
-                    &status_arc,
-                    format!("New binary failed `--version` smoke check: {}", err),
-                );
-                return;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&staged_new);
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(
-                    &status_arc,
-                    format!("Failed to execute new binary smoke check: {}", e),
-                );
-                return;
-            }
-        }
-
-        // STEP 5: Atomic binary hot-swap with automatic rollback
-        Self::set_step(&status_arc, "Swapping WebDep binary...", 90);
-        if active_exe.exists() {
-            if old_exe.exists() {
-                let _ = std::fs::remove_file(&old_exe);
-            }
-            if let Err(e) = std::fs::rename(&active_exe, &old_exe) {
-                let _ = std::fs::remove_file(&staged_new);
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(
-                    &status_arc,
-                    format!("Could not move active binary aside for hot-swap: {}", e),
-                );
-                return;
-            }
-        }
-
-        if let Err(e) = std::fs::rename(&staged_new, &active_exe) {
-            if old_exe.exists() && !active_exe.exists() {
-                let _ = std::fs::rename(&old_exe, &active_exe);
-                Self::append_log(&status_arc, "[Recovery] Restored previous binary intact after swap failure.");
-            }
-            let _ = std::fs::remove_file(&staged_new);
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(&status_arc, format!("Failed to activate new binary: {}", e));
-            return;
-        }
-
-        if old_exe.exists() {
-            let _ = std::fs::remove_file(&old_exe);
-        }
-        let _ = std::fs::remove_dir_all(&stage_dir);
-
-        if env_bak.exists() && !env_path.exists() {
-            let _ = std::fs::copy(env_bak, env_path);
-        }
-        if env_bak.exists() {
-            let _ = std::fs::remove_file(env_bak);
-        }
 
         if let Ok(mut guard) = cache_arc.lock() {
             *guard = None;
@@ -939,7 +727,7 @@ impl Updater {
 
         Self::append_log(
             &status_arc,
-            &format!("[Success] Upgraded WebDep binary to release {}", release.tag_name),
+            &format!("[Success] Upgraded WebDep binary to release {}", tag_name),
         );
         Self::append_log(&status_arc, "[Restart] Automatically restarting WebDep panel now...");
         Self::set_step(&status_arc, "Update complete! Restarting WebDep panel...", 100);
@@ -953,6 +741,313 @@ impl Updater {
 
         restart_service_delayed(1200);
     }
+}
+
+/// PG-free shared binary self-update routine used by both Web-Core (`Updater`)
+/// and remote `Web-Node` workers (`node.self_update` RPC).
+pub fn perform_binary_swap_sync(
+    repo_slug: &str,
+    tag_override: Option<&str>,
+    token: Option<&str>,
+    backup_dotenv: bool,
+    status_arc: Option<&Arc<Mutex<UpdateStatus>>>,
+) -> Result<String, String> {
+    let set_step = |step: &str, pct: u8| {
+        if let Some(arc) = status_arc {
+            Updater::set_step(arc, step, pct);
+        }
+    };
+    let append_log = |msg: &str| {
+        if let Some(arc) = status_arc {
+            Updater::append_log(arc, msg);
+        }
+    };
+
+    set_step("Verifying environment & binary path...", 10);
+
+    let asset_name = current_arch_asset_name().ok_or_else(|| {
+        format!(
+            "Prebuilt GitHub Release updates target Linux (x86_64 / aarch64); automatic binary update is unsupported on {}/{}.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+
+    let active_exe = resolve_active_exe_path();
+    let exe_dir = active_exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let exe_name = active_exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("webdep")
+        .to_string();
+
+    append_log(&format!(
+        "[Target] Active binary path: {} (asset: {})",
+        active_exe.display(),
+        asset_name
+    ));
+
+    let env_path = Path::new(".env");
+    let env_bak = Path::new(".env.updater-backup");
+    if backup_dotenv && env_path.exists() {
+        if let Err(e) = std::fs::copy(env_path, env_bak) {
+            warn!("Could not back up .env: {}", e);
+        } else {
+            append_log("[Safety] Backed up .env configuration before binary swap");
+        }
+    }
+
+    set_step("Fetching latest GitHub Release metadata...", 25);
+    append_log(&format!("[GitHub] Checking releases on {}...", repo_slug));
+
+    let release = fetch_github_release(repo_slug, tag_override, token)?;
+    let target_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == asset_name)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Release '{}' does not contain asset '{}'. Check GitHub Actions release build.",
+                release.tag_name, asset_name
+            )
+        })?;
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == "checksums.txt")
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Release '{}' is missing checksums.txt required for SHA-256 verification.",
+                release.tag_name
+            )
+        })?;
+
+    append_log(&format!(
+        "[GitHub] Found release '{}' ({} bytes for {})",
+        release.tag_name, target_asset.size, target_asset.name
+    ));
+
+    set_step(&format!("Downloading {}...", target_asset.name), 50);
+    let stage_dir = std::env::temp_dir().join(format!("webdep-updater-{}", now_secs()));
+    std::fs::create_dir_all(&stage_dir).map_err(|e| {
+        format!(
+            "Failed to create staging directory {}: {}",
+            stage_dir.display(),
+            e
+        )
+    })?;
+
+    let archive_path = stage_dir.join(&target_asset.name);
+    let checksums_path = stage_dir.join("checksums.txt");
+    let extract_dir = stage_dir.join("extract");
+
+    if let Err(e) = curl_download_file(&checksum_asset, token, &checksums_path, 15) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(e);
+    }
+    if let Err(e) = curl_download_file(&target_asset, token, &archive_path, 180) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(e);
+    }
+    append_log("[Download] Downloaded release archive and checksums.txt");
+
+    set_step("Verifying SHA-256 checksum & extracting binary...", 70);
+    let checksums_text = match std::fs::read_to_string(&checksums_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!("Failed to read checksums.txt: {}", e));
+        }
+    };
+    let expected_sha = match parse_checksum_for_asset(&checksums_text, &target_asset.name) {
+        Some(h) => h,
+        None => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!(
+                "No SHA-256 entry for '{}' found in checksums.txt",
+                target_asset.name
+            ));
+        }
+    };
+    let actual_sha = match compute_file_sha256_hex(&archive_path) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(e);
+        }
+    };
+    if actual_sha != expected_sha {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(format!(
+            "SHA-256 verification FAILED for {}: expected {}, got {}",
+            target_asset.name, expected_sha, actual_sha
+        ));
+    }
+    append_log(&format!("[Verify] SHA-256 verified: {}", actual_sha));
+
+    if let Err(e) = std::fs::create_dir_all(&extract_dir) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(format!("Failed to create extract dir: {}", e));
+    }
+    let tar_out = Command::new("tar")
+        .args([
+            "-xzf",
+            archive_path.to_str().unwrap_or_default(),
+            "-C",
+            extract_dir.to_str().unwrap_or_default(),
+        ])
+        .output();
+    match tar_out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            return Err(format!("Failed to extract tarball: {}", err));
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!("Failed to execute tar: {}", e));
+        }
+    }
+
+    let extracted_bin = match find_extracted_binary(&extract_dir, &exe_name) {
+        Some(p) => p,
+        None => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!(
+                "Archive '{}' did not contain '{}'",
+                target_asset.name, exe_name
+            ));
+        }
+    };
+
+    let staged_new = exe_dir.join(format!("{}.new", exe_name));
+    let old_exe = exe_dir.join(format!("{}.old", exe_name));
+    if let Err(e) = std::fs::copy(&extracted_bin, &staged_new) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        let _ = std::fs::remove_file(&staged_new);
+        return Err(format!(
+            "Failed to stage binary at {}: {}",
+            staged_new.display(),
+            e
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&staged_new, std::fs::Permissions::from_mode(0o700));
+    }
+
+    match Command::new(&staged_new).arg("--version").output() {
+        Ok(o) if o.status.success() => {
+            let ver_line = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            append_log(&format!("[Verify] New binary smoke test OK: {}", ver_line));
+        }
+        Ok(o) => {
+            let _ = std::fs::remove_file(&staged_new);
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            return Err(format!("New binary failed `--version` smoke check: {}", err));
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&staged_new);
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!("Failed to execute new binary smoke check: {}", e));
+        }
+    }
+
+    set_step("Swapping WebDep binary...", 90);
+    if active_exe.exists() {
+        if old_exe.exists() {
+            let _ = std::fs::remove_file(&old_exe);
+        }
+        if let Err(e) = std::fs::rename(&active_exe, &old_exe) {
+            let _ = std::fs::remove_file(&staged_new);
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!(
+                "Could not move active binary aside for hot-swap: {}",
+                e
+            ));
+        }
+    }
+    if let Err(e) = std::fs::rename(&staged_new, &active_exe) {
+        if old_exe.exists() && !active_exe.exists() {
+            let _ = std::fs::rename(&old_exe, &active_exe);
+            append_log("[Recovery] Restored previous binary intact after swap failure.");
+        }
+        let _ = std::fs::remove_file(&staged_new);
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(format!("Failed to activate new binary: {}", e));
+    }
+
+    if old_exe.exists() {
+        let _ = std::fs::remove_file(&old_exe);
+    }
+    let _ = std::fs::remove_dir_all(&stage_dir);
+    if backup_dotenv && env_bak.exists() && !env_path.exists() {
+        let _ = std::fs::copy(env_bak, env_path);
+    }
+    if env_bak.exists() {
+        let _ = std::fs::remove_file(env_bak);
+    }
+
+    Ok(release.tag_name)
+}
+
+pub fn restart_node_service_delayed(delay_ms: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        #[cfg(unix)]
+        {
+            let is_node_systemd = tokio::process::Command::new("systemctl")
+                .args(["is-active", "--quiet", "webdep-node"])
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if is_node_systemd {
+                let _ = tokio::process::Command::new("sh")
+                    .args(["-c", "(sleep 0.4 && (sudo systemctl restart webdep-node || systemctl restart webdep-node)) >/dev/null 2>&1 &"])
+                    .spawn();
+                return;
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                let bin = resolve_active_exe_path();
+                if bin.exists() {
+                    let _ = tokio::process::Command::new(bin)
+                        .arg("--node")
+                        .current_dir(&cwd)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn();
+                }
+            }
+            std::process::exit(0);
+        }
+        #[cfg(windows)]
+        {
+            if let Ok(cwd) = std::env::current_dir() {
+                let bin = resolve_active_exe_path();
+                if tokio::fs::try_exists(&bin).await.unwrap_or(false) {
+                    let mut cmd = tokio::process::Command::new(bin);
+                    cmd.arg("--node")
+                        .current_dir(&cwd)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    cmd.creation_flags(0x00000008 | 0x00000200);
+                    let _ = cmd.spawn();
+                }
+            }
+            std::process::exit(0);
+        }
+    });
 }
 
 pub fn restart_service_delayed(delay_ms: u64) {

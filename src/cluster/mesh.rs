@@ -330,6 +330,10 @@ pub fn render_wg_conf(manifest: &NodeStateManifest) -> String {
 }
 
 pub fn detect_capabilities() -> NodeCapabilities {
+    detect_capabilities_with_p2p(None)
+}
+
+pub fn detect_capabilities_with_p2p(p2p_port: Option<u16>) -> NodeCapabilities {
     let mut sys = sysinfo::System::new();
     sys.refresh_cpu_all();
     let cores = sys.cpus().len().max(1);
@@ -345,6 +349,7 @@ pub fn detect_capabilities() -> NodeCapabilities {
         has_wireguard,
         has_caddy,
         has_postgres,
+        p2p_port,
     }
 }
 
