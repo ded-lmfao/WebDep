@@ -12,6 +12,39 @@ pub struct Projects {
     vault: Arc<Vault>,
 }
 
+/// Variables WebDep sets for every app (see `build_container_env_pure`). A user value would be
+/// silently replaced at start, so it is refused (single save) or skipped (bulk import).
+pub const RESERVED_ENV_KEYS: &[&str] = &[
+    "PORT", "WEBDEP_CONTAINER_ID", "WEBDEP_SITE_SLUG", "CERT_DATA_DIR", "APP_DATA_DIR", "DATA_DIR",
+    "DB_DIR", "SQLITE_DIR", "STORAGE_DIR", "UPLOAD_DIR", "TEMP", "TMP", "TMPDIR", "NPM_CONFIG_CACHE",
+];
+
+/// Shell-compatible variable name: letters, digits and underscores, not starting with a digit.
+pub fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+pub fn is_reserved_env_key(key: &str) -> bool {
+    RESERVED_ENV_KEYS.iter().any(|r| r.eq_ignore_ascii_case(key))
+}
+
+fn validate_env_key_for_save(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("Variable key cannot be empty".to_string());
+    }
+    if !is_valid_env_key(key) {
+        return Err(format!(
+            "Invalid variable name '{key}': use letters, digits and underscores, not starting with a digit"
+        ));
+    }
+    if is_reserved_env_key(key) {
+        return Err(format!("'{key}' is set by WebDep for every app and cannot be overridden"));
+    }
+    Ok(())
+}
+
 impl Projects {
     pub fn new(db: DbPool, vault: Arc<Vault>) -> Self {
         Self { db, vault }
@@ -302,9 +335,7 @@ impl Projects {
         previous_key: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let clean_key = key.trim();
-        if clean_key.is_empty() {
-            return Err("Variable key cannot be empty".into());
-        }
+        validate_env_key_for_save(clean_key)?;
         let enc = self.vault.encrypt(value)?;
         let mut tx = self.db.begin().await?;
         if let Some(prev) = previous_key.map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -380,7 +411,12 @@ impl Projects {
         is_secret: bool,
         replace_all: bool,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-        let pairs = parse_dotenv(raw_or_vars);
+        let mut pairs = parse_dotenv(raw_or_vars);
+        if let Some((bad, _)) = pairs.iter().find(|(k, _)| !is_valid_env_key(k)) {
+            return Err(format!("Invalid variable name '{bad}': use letters, digits and underscores").into());
+        }
+        // Keys WebDep always sets (PORT, DATA_DIR, ...) would be ignored at start: skip them.
+        pairs.retain(|(k, _)| !is_reserved_env_key(k));
         if pairs.is_empty() && !replace_all {
             return Ok(0);
         }
@@ -430,8 +466,11 @@ impl Projects {
         let mut count = 0;
         for item in items {
             let k = item.key.trim();
-            if k.is_empty() {
+            if k.is_empty() || is_reserved_env_key(k) {
                 continue;
+            }
+            if !is_valid_env_key(k) {
+                return Err(format!("Invalid variable name '{k}': use letters, digits and underscores").into());
             }
             let enc = self.vault.encrypt(&item.value)?;
             sqlx::query(
@@ -552,5 +591,23 @@ mod tests {
         assert!(list.iter().any(|p| p.id == id && p.project_kind == "service"));
 
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod env_key_tests {
+    use super::*;
+
+    #[test]
+    fn env_key_validation() {
+        assert!(is_valid_env_key("SECRET_KEY"));
+        assert!(is_valid_env_key("_private1"));
+        assert!(!is_valid_env_key("BAD KEY=1"));
+        assert!(!is_valid_env_key("1ABC"));
+        assert!(!is_valid_env_key(""));
+        assert!(is_reserved_env_key("PORT"));
+        assert!(is_reserved_env_key("data_dir"));
+        assert!(validate_env_key_for_save("PORT").is_err());
+        assert!(validate_env_key_for_save("API_TOKEN").is_ok());
     }
 }

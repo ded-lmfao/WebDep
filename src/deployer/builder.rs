@@ -203,3 +203,19 @@ where
     }
 }
 
+
+
+/// File inside a release recording the start command it last ran successfully with, so a failed
+/// deploy that also changed the command can restore the previous release with *its* command.
+const RELEASE_START_CMD_FILE: &str = ".webdep-start-cmd";
+
+pub fn record_release_start_cmd(release_dir: &Path, start_cmd: &str) {
+    let _ = std::fs::write(release_dir.join(RELEASE_START_CMD_FILE), start_cmd);
+}
+
+pub fn recorded_release_start_cmd(release_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(release_dir.join(RELEASE_START_CMD_FILE))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}

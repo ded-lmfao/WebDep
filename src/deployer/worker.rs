@@ -2,12 +2,71 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
-use super::builder::{merge_copy_dir, switch_current, run_shell_cmd};
+use super::builder::{merge_copy_dir, record_release_start_cmd, recorded_release_start_cmd, switch_current, run_shell_cmd};
 use super::Deployer;
 use crate::db::now;
 use crate::git::{CommitInfo, Git};
 
 impl Deployer {
+    /// Copy the app's last output lines into the deployment log, so a failed start shows *why*
+    /// (e.g. "can't open file 'server.py'") instead of only an exit status.
+    async fn attach_recent_app_output(&self, project_id: i64, dep_id: i64) {
+        // stderr/stdout are read asynchronously; give the reader a moment to flush.
+        sleep(Duration::from_millis(400)).await;
+        let mut lines = self.logs.list(Some(project_id), None, Some("app"), None, 12).await;
+        // Only output from this start attempt, not older request logs.
+        let cutoff = now() - 20_000;
+        lines.retain(|l| l.ts >= cutoff);
+        if lines.is_empty() {
+            return;
+        }
+        lines.sort_by_key(|l| l.id);
+        self.logs.add(Some(project_id), Some(dep_id), "deployment", "error", "Last output from the app:");
+        for l in lines {
+            self.logs.add(Some(project_id), Some(dep_id), "app", &l.level, &l.message);
+        }
+    }
+
+    /// After a failed start or health check, put the previously live release back so a broken
+    /// deploy does not leave the site down.
+    async fn restore_previous_release(&self, p: &crate::projects::Project, dep_id: i64, current_symlink: &Path) {
+        let Some(prev_id) = p.current_release_id else {
+            return;
+        };
+        let prev_dir: Option<String> = sqlx::query_scalar("SELECT dir FROM releases WHERE id = $1")
+            .bind(prev_id)
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten();
+        let Some(prev_dir) = prev_dir.map(PathBuf::from).filter(|d| d.is_dir()) else {
+            return;
+        };
+        switch_current(current_symlink, &prev_dir);
+        let env_map = self.projects.get_env_map(p.id).await;
+        // The failed deploy may have come with a new start command: run the old release the way it last worked.
+        let mut prev_project = p.clone();
+        if let Some(cmd) = recorded_release_start_cmd(&prev_dir) {
+            prev_project.start_cmd = cmd;
+        }
+        match self.runtime.start_project(&prev_project, env_map, Some(&prev_dir)).await {
+            Ok(pid) => self.logs.add(
+                Some(p.id),
+                Some(dep_id),
+                "deployment",
+                "warn",
+                &format!("Restored the previous release #{prev_id} (PID {pid}): the site keeps serving the last working version."),
+            ),
+            Err(e) => self.logs.add(
+                Some(p.id),
+                Some(dep_id),
+                "deployment",
+                "error",
+                &format!("Could not restore the previous release #{prev_id}: {e}"),
+            ),
+        };
+    }
+
     pub async fn run_deploy(self: Arc<Self>, project_id: i64, dep_id: i64) {
         {
             let mut spawned = self.spawned_deployments.lock().unwrap();
@@ -179,7 +238,7 @@ impl Deployer {
             self.runtime.link_work_dir_to_container(&release_dir, &container);
             let env_map = self.projects.get_env_map(p.id).await;
             let (_isolated_env, dotenv_body) = self.runtime.build_container_env(&p, &env_map, &container);
-            let _ = tokio::fs::write(release_dir.join(".env"), dotenv_body).await;
+            crate::runtime::container::write_app_dotenv(&release_dir.join(".env"), dotenv_body).await;
         }
 
         // Stage 3: Installing dependencies
@@ -280,6 +339,10 @@ impl Deployer {
         self.update_stage(dep_id, "health_checking").await;
         let env_map = self.projects.get_env_map(p.id).await;
         if let Err(e) = self.runtime.start_project(&p, env_map, Some(&release_dir)).await {
+            self.attach_recent_app_output(p.id, dep_id).await;
+            if !is_service {
+                self.restore_previous_release(&p, dep_id, &current_symlink).await;
+            }
             self.fail_deployment_step(dep_id, p.id, "app", &format!("Start failed: {}", e)).await;
             return;
         }
@@ -289,6 +352,10 @@ impl Deployer {
             let resolved_health_url = p.health_url.replace("{{PORT}}", &port_str);
             self.logs.add(Some(p.id), Some(dep_id), "health", "info", &format!("Probing health check URL: {}", resolved_health_url));
             if let Err(e) = self.runtime.health_check(&resolved_health_url, p.health_timeout_s as u64).await {
+                self.attach_recent_app_output(p.id, dep_id).await;
+                if !is_service {
+                    self.restore_previous_release(&p, dep_id, &current_symlink).await;
+                }
                 self.fail_deployment_step(dep_id, p.id, "health", &format!("Health check failed: {}", e)).await;
                 return;
             }
@@ -297,6 +364,10 @@ impl Deployer {
         // Stability window
         if p.stability_s > 0 {
             sleep(Duration::from_secs(p.stability_s as u64)).await;
+        }
+
+        if !is_service {
+            record_release_start_cmd(&release_dir, &p.start_cmd);
         }
 
         // Mark success & record backup snapshot in PostgreSQL

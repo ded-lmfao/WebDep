@@ -31,7 +31,9 @@ use crate::cluster::archive::{
     pack_dir_to_tar_gz, pack_project_shift_to_zip, unpack_archive_auto_safe,
 };
 use crate::cluster::mesh::detect_capabilities_with_p2p;
-use crate::deployer::builder::{merge_copy_dir, run_shell_cmd_with_logger, switch_current};
+use crate::deployer::builder::{
+    merge_copy_dir, record_release_start_cmd, recorded_release_start_cmd, run_shell_cmd_with_logger, switch_current,
+};
 use crate::git::{CommitInfo, Git, StoredGithubToken};
 use crate::monitor::{get_path_disk_size, Monitor};
 use crate::projects::Project;
@@ -302,7 +304,7 @@ async fn apply_and_cache_context(
         let (_iso, dotenv_body) = build_container_env_pure(p, &ctx.env, &container);
         let current_dir = Path::new(&p.deploy_dir).join("current");
         if current_dir.is_dir() {
-            let _ = tokio::fs::write(current_dir.join(".env"), dotenv_body).await;
+            crate::runtime::container::write_app_dotenv(&current_dir.join(".env"), dotenv_body).await;
         }
     }
 }
@@ -673,7 +675,7 @@ async fn run_remote_deploy_task(
     if !is_service {
         link_work_dir_to_container_dir(&release_dir, &container);
         let (_iso, dotenv_body) = build_container_env_pure(&p, &ctx.env, &container);
-        let _ = tokio::fs::write(release_dir.join(".env"), dotenv_body).await;
+        crate::runtime::container::write_app_dotenv(&release_dir.join(".env"), dotenv_body).await;
     }
 
     let has_pkg_json = release_dir.join("package.json").exists();
@@ -758,6 +760,10 @@ async fn run_remote_deploy_task(
         ..Default::default()
     });
     let current_symlink = Path::new(&p.deploy_dir).join("current");
+    // Remember the live release so a failed start/health check can put it back.
+    let previous_release = std::fs::read_link(&current_symlink)
+        .ok()
+        .filter(|prev| prev.is_dir() && *prev != release_dir);
     switch_current(&current_symlink, &release_dir);
 
     if exec.get_stop_seq(p.id) != start_stop_seq {
@@ -778,14 +784,48 @@ async fn run_remote_deploy_task(
         ..Default::default()
     });
 
+    // Restores the previous release after a failure; returns the app status to report.
+    let restore_previous = |reason: String| {
+        let exec = exec.clone();
+        let p = p.clone();
+        let env = ctx.env.clone();
+        let ws_tx = ws_tx.clone();
+        let current_symlink = current_symlink.clone();
+        let previous_release = previous_release.clone();
+        async move {
+            let Some(prev) = previous_release.filter(|_| !is_service) else {
+                return ("stopped".to_string(), None);
+            };
+            switch_current(&current_symlink, &prev);
+            let mut prev_project = p.clone();
+            if let Some(cmd) = recorded_release_start_cmd(&prev) {
+                prev_project.start_cmd = cmd;
+            }
+            match start_project_local(&exec, &prev_project, env, Some(&prev), &ws_tx).await {
+                Ok(pid) => {
+                    send_log(&ws_tx, Some(p.id), Some(dep_id), "deployment", "warn", &format!(
+                        "{reason}. Restored the previous release (PID {pid}): the site keeps serving the last working version."
+                    ));
+                    ("running".to_string(), Some(pid))
+                }
+                Err(e) => {
+                    send_log(&ws_tx, Some(p.id), Some(dep_id), "deployment", "error", &format!("Could not restore the previous release: {e}"));
+                    ("stopped".to_string(), None)
+                }
+            }
+        }
+    };
+
     let pid = match start_project_local(&exec, &p, ctx.env.clone(), Some(&release_dir), &ws_tx).await {
         Ok(pid) => pid,
         Err(e) => {
+            let (app_status, app_pid) = restore_previous(format!("Start failed: {e}")).await;
             emit_state(DeployStateUpdate {
                 deployment_id: dep_id,
                 project_id: p.id,
                 status: Some("failed".to_string()),
-                app_status: Some("stopped".to_string()),
+                app_status: Some(app_status),
+                app_pid,
                 error: Some(format!("Start failed: {e}")),
                 ..Default::default()
             });
@@ -797,10 +837,13 @@ async fn run_remote_deploy_task(
         let port_str = container.port.to_string();
         let health_url = p.health_url.replace("{{PORT}}", &port_str);
         if let Err(e) = crate::runtime::supervisor::health_check_url(&health_url, p.health_timeout_s.max(5) as u64).await {
+            let (app_status, app_pid) = restore_previous(format!("Health check failed: {e}")).await;
             emit_state(DeployStateUpdate {
                 deployment_id: dep_id,
                 project_id: p.id,
                 status: Some("failed".to_string()),
+                app_status: Some(app_status),
+                app_pid,
                 error: Some(format!("Health check failed: {e}")),
                 ..Default::default()
             });
@@ -810,6 +853,10 @@ async fn run_remote_deploy_task(
 
     if p.stability_s > 0 {
         tokio::time::sleep(Duration::from_secs(p.stability_s as u64)).await;
+    }
+
+    if !is_service {
+        record_release_start_cmd(&release_dir, &p.start_cmd);
     }
 
     send_log(

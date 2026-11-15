@@ -331,6 +331,58 @@ pub fn link_work_dir_to_db_dir(work_dir: &Path, target_db_dir: &Path) {
     }
 }
 
+/// Default `AUTH_ENCRYPTION_KEY` for an app that does not set its own.
+///
+/// It used to be SHA-256("webdep-container-auth-key-{id}-{slug}-{port}"), which anyone who knows
+/// those three values can recompute. New apps now get a random key stored (mode 600) in their data
+/// directory. Apps that already have data keep the legacy derived key so nothing they encrypted
+/// becomes unreadable.
+fn app_auth_encryption_key(p: &Project, port: u16, container: &WebsiteContainer) -> String {
+    let is_hex64 = |k: &str| k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit());
+    let key_file = container.db_dir.join(".webdep-auth-key");
+    if let Ok(existing) = std::fs::read_to_string(&key_file) {
+        let k = existing.trim();
+        if is_hex64(k) {
+            return k.to_string();
+        }
+    }
+    let legacy = {
+        let mut hasher = Sha256::new();
+        hasher.update(format!("webdep-container-auth-key-{}-{}-{}", p.id, p.slug, port).as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+    let has_existing_data = std::fs::read_dir(&container.db_dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if has_existing_data {
+        return legacy;
+    }
+    let mut bytes = [0u8; 32];
+    rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
+    let fresh = hex::encode(bytes);
+    if std::fs::create_dir_all(&container.db_dir).is_err() || std::fs::write(&key_file, &fresh).is_err() {
+        // Without a persisted key a random one would change on every start: keep the stable legacy key.
+        return legacy;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600));
+    }
+    fresh
+}
+
+/// Write an app's generated `.env` readable by its owner only: it holds the app's secrets.
+pub async fn write_app_dotenv(path: &std::path::Path, body: String) {
+    if tokio::fs::write(path, body).await.is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+        }
+    }
+}
+
 pub fn build_container_env_pure(
     p: &Project,
     user_env: &HashMap<String, String>,
@@ -380,10 +432,7 @@ pub fn build_container_env_pure(
         None => true,
     };
     if needs_auth_key {
-        let mut hasher = Sha256::new();
-        hasher.update(format!("webdep-container-auth-key-{}-{}-{}", p.id, p.slug, port).as_bytes());
-        let hex_key = format!("{:x}", hasher.finalize());
-        final_env.insert("AUTH_ENCRYPTION_KEY".to_string(), hex_key);
+        final_env.insert("AUTH_ENCRYPTION_KEY".to_string(), app_auth_encryption_key(p, port, container));
     }
 
     let mut dotenv_body = format!(

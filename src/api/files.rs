@@ -44,7 +44,10 @@ pub(crate) fn service_root(p: &crate::projects::Project) -> Result<std::path::Pa
     } else {
         cwd.join(p.deploy_dir.trim_start_matches("./").trim_start_matches(".\\"))
     };
-    if p.project_kind == "service" {
+    // Services, and websites without a Git repository, are edited in `app/`: that folder is the
+    // source Deploy snapshots, so edits must land there (not in the live release, where they would
+    // go live without a deploy and then vanish on the next one).
+    if p.project_kind == "service" || crate::git::is_local_source(&p.repo_url) {
         let root = base.join("app");
         let _ = std::fs::create_dir_all(&root);
         Ok(root)

@@ -103,7 +103,7 @@ pub async fn spawn_project_process_pure(
 
     let (isolated_env, dotenv_body) = build_container_env_pure(p, &env_vars, container);
     if !is_service {
-        let _ = tokio::fs::write(work_dir.join(".env"), dotenv_body).await;
+        crate::runtime::container::write_app_dotenv(&work_dir.join(".env"), dotenv_body).await;
     }
 
     let mut final_cmd = resolved_cmd;

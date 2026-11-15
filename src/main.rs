@@ -306,12 +306,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         };
 
                         if is_already_running {
-                            tracing::info!(
-                                "Workload '{}' (PID: {:?}) is already running; preserving zero downtime",
-                                p.name,
-                                p.app_pid
+                            // The process outlived the previous panel process (e.g. KillMode=process), but
+                            // its stdout/stderr were pipes into that panel and are now closed: logs are
+                            // lost and many servers fail on their next write (Python's http.server answers
+                            // nothing; Node may crash on EPIPE). Restart it under this panel instead of
+                            // adopting a half-broken process.
+                            let _ = resume_runtime.kill_project_everything(&p).await;
+                            resume_logs.add(
+                                Some(p.id),
+                                None,
+                                "system",
+                                "info",
+                                &format!(
+                                    "Restarting '{}' after the panel restarted so its output is captured again",
+                                    p.name
+                                ),
                             );
-                            continue;
                         }
 
                         let env = resume_projects.get_env_map(p.id).await;
