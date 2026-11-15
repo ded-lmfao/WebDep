@@ -72,6 +72,20 @@ export function togglePasswordVisibility(inputId) {
   const input = document.getElementById(inputId);
   if (!input) return;
   input.type = input.type === 'password' ? 'text' : 'password';
+  // The database details dialog also masks the password inside its connection URLs.
+  if (inputId === 'db-detail-password') {
+    const reveal = input.type === 'text';
+    ['db-detail-internal-url', 'db-detail-external-url'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el && el.dataset.realValue !== undefined) {
+        el.value = reveal ? el.dataset.realValue : maskUrlPassword(el.dataset.realValue);
+      }
+    });
+  }
+}
+
+function maskUrlPassword(url) {
+  return String(url || '').replace(/^([a-z][a-z0-9+.-]*:\/\/[^:@/]+:)([^@]*)@/i, '$1••••••••@');
 }
 
 export function toggleDatabaseAccessIpFields(selectId, wrapId) {
@@ -207,10 +221,14 @@ export function showDatabaseDetails(id) {
   const accessMode = db.accessMode || db.access_mode || 'local';
   const title = document.getElementById('db-details-title');
   if (title) title.textContent = `Connection Details — ${db.name}`;
-  const intUrl = document.getElementById('db-detail-internal-url');
-  if (intUrl) intUrl.value = db.internalUrl || db.internal_url || '';
-  const extUrl = document.getElementById('db-detail-external-url');
-  if (extUrl) extUrl.value = db.externalUrl || db.external_url || '';
+  // Connection URLs embed the password: show them masked like the password field, copy the real value.
+  const setUrl = (el, url) => {
+    if (!el) return;
+    el.dataset.realValue = url;
+    el.value = maskUrlPassword(url);
+  };
+  setUrl(document.getElementById('db-detail-internal-url'), db.internalUrl || db.internal_url || '');
+  setUrl(document.getElementById('db-detail-external-url'), db.externalUrl || db.external_url || '');
   const nameEl = document.getElementById('db-detail-dbname');
   if (nameEl) nameEl.value = db.dbName || db.db_name || '';
   const userEl = document.getElementById('db-detail-user');
@@ -218,7 +236,10 @@ export function showDatabaseDetails(id) {
   const portEl = document.getElementById('db-detail-port');
   if (portEl) portEl.value = db.port || 5432;
   const passEl = document.getElementById('db-detail-password');
-  if (passEl) passEl.value = db.dbPassword || db.db_password || '';
+  if (passEl) {
+    passEl.value = db.dbPassword || db.db_password || '';
+    passEl.type = 'password';
+  }
   const psqlEl = document.getElementById('db-detail-psql');
   if (psqlEl) psqlEl.value = db.psqlCommand || db.psql_command || '';
 
@@ -261,7 +282,7 @@ export async function deleteDatabase(id, name) {
 export function copyElementValue(elemId) {
   const el = document.getElementById(elemId);
   if (!el) return;
-  void copyTextToClipboard(el.value, 'Copied to clipboard.');
+  void copyTextToClipboard(el.dataset.realValue ?? el.value, 'Copied to clipboard.');
 }
 
 // Bind globals for inline HTML event handlers

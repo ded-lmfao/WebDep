@@ -54,6 +54,9 @@ pub(crate) async fn trigger_fleet_and_core_update(
     actor_username: &str,
     tag: Option<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Some(branch) = crate::updater::feature_branch_build() {
+        return Err((StatusCode::CONFLICT, crate::updater::feature_branch_update_message(&branch)));
+    }
     log_audit(
         state,
         actor_username,

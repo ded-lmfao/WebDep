@@ -500,7 +500,12 @@ impl Updater {
             Err(err) => (None, None, None, None, None, None, None, None, Some(err)),
         };
 
-        let has_update = match (&remote_tag, &remote_commit) {
+        let branch_build = feature_branch_build();
+        let check_error = match &branch_build {
+            Some(b) => Some(feature_branch_update_message(b)),
+            None => check_error,
+        };
+        let has_update = branch_build.is_none() && match (&remote_tag, &remote_commit) {
             (Some(r_tag), Some(r_sha))
                 if current_commit != "unknown" && !current_commit.is_empty() =>
             {
@@ -620,10 +625,16 @@ impl Updater {
     }
 
     pub async fn start_update(&self, tag_override: Option<String>) -> Result<(), String> {
+        if let Some(branch) = feature_branch_build() {
+            return Err(feature_branch_update_message(&branch));
+        }
         self.start_update_internal(tag_override, false).await
     }
 
     pub async fn start_update_after_fleet(&self, tag_override: Option<String>) -> Result<(), String> {
+        if let Some(branch) = feature_branch_build() {
+            return Err(feature_branch_update_message(&branch));
+        }
         self.start_update_internal(tag_override, true).await
     }
 
@@ -745,6 +756,31 @@ impl Updater {
 
 /// PG-free shared binary self-update routine used by both Web-Core (`Updater`)
 /// and remote `Web-Node` workers (`node.self_update` RPC).
+/// When this binary was compiled from a feature branch (not main/master or a release tag), the
+/// one-click updater must not swap in the latest release: it is built from a different codebase
+/// and may not understand this branch's data. Returns the branch name in that case.
+/// `WEBDEP_ALLOW_RELEASE_UPDATE=true` opts back in.
+pub fn feature_branch_build() -> Option<String> {
+    let allow = std::env::var("WEBDEP_ALLOW_RELEASE_UPDATE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if allow {
+        return None;
+    }
+    let branch = env!("WEBDEP_GIT_BRANCH").trim();
+    if branch.is_empty() || matches!(branch, "HEAD" | "main" | "master") || branch.starts_with('v') {
+        None
+    } else {
+        Some(branch.to_string())
+    }
+}
+
+pub fn feature_branch_update_message(branch: &str) -> String {
+    format!(
+        "This panel was built from the '{branch}' branch. One-click updates install the latest release from main, which would replace this build. Update it by pulling '{branch}' and rebuilding (or set WEBDEP_ALLOW_RELEASE_UPDATE=true)."
+    )
+}
+
 pub fn perform_binary_swap_sync(
     repo_slug: &str,
     tag_override: Option<&str>,

@@ -452,6 +452,10 @@ export async function loadSystemVersionInfo(quiet = false, forceRefresh = false)
         badgeEl.className = 'badge badge-success';
         const label = v.remote_commit || v.remote_tag || 'latest';
         badgeEl.textContent = `Update available (${label})`;
+      } else if (v.check_error && /built from the '/.test(v.check_error)) {
+        badgeEl.className = 'badge badge-info';
+        badgeEl.textContent = 'Branch build';
+        badgeEl.title = v.check_error;
       } else if (v.check_error) {
         badgeEl.className = 'badge badge-neutral';
         badgeEl.textContent = 'No release checked';
