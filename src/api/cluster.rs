@@ -703,6 +703,358 @@ pub(crate) async fn node_ws_handler(
     Ok(resp)
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InstallModulesInput {
+    #[serde(default)]
+    pub module_ids: Vec<String>,
+}
+
+fn align_node_modules(
+    catalog: &[crate::cluster::modules::ModuleCatalogEntry],
+    reported: &[crate::cluster::modules::NodeModuleStatus],
+) -> Vec<crate::cluster::modules::NodeModuleStatus> {
+    catalog
+        .iter()
+        .map(|entry| {
+            reported
+                .iter()
+                .find(|m| m.id == entry.id)
+                .cloned()
+                .unwrap_or_else(|| crate::cluster::modules::NodeModuleStatus {
+                    id: entry.id.clone(),
+                    installed: false,
+                    version: String::new(),
+                    binary_path: String::new(),
+                    details: "Not yet scanned on node".to_string(),
+                })
+        })
+        .collect()
+}
+
+fn build_node_modules_view(
+    node: &ClusterNode,
+    catalog: &[crate::cluster::modules::ModuleCatalogEntry],
+) -> serde_json::Value {
+    let aligned = align_node_modules(catalog, &node.capabilities.modules);
+    let mut required_missing: Vec<String> = Vec::new();
+    let mut installed_count = 0usize;
+    for entry in catalog {
+        if let Some(st) = aligned.iter().find(|m| m.id == entry.id) {
+            if st.installed {
+                installed_count += 1;
+            } else if entry.required {
+                required_missing.push(entry.id.clone());
+            }
+        }
+    }
+    let pm = if node.capabilities.package_manager.trim().is_empty() {
+        if node.capabilities.os == "windows" {
+            "manual".to_string()
+        } else {
+            "apt-get".to_string()
+        }
+    } else {
+        node.capabilities.package_manager.clone()
+    };
+
+    serde_json::json!({
+        "nodeId": node.id,
+        "name": node.name,
+        "region": node.region,
+        "status": node.status,
+        "isLocal": node.is_local,
+        "os": node.capabilities.os,
+        "arch": node.capabilities.arch,
+        "packageManager": pm,
+        "installedCount": installed_count,
+        "totalCount": catalog.len(),
+        "requiredMissing": required_missing,
+        "requiredMissingCount": required_missing.len(),
+        "allRequiredReady": required_missing.is_empty(),
+        "modules": aligned,
+        "lastSeenAt": node.last_seen_at,
+    })
+}
+
+async fn refresh_single_node_caps(
+    state: &AppState,
+    node: &ClusterNode,
+) -> Result<crate::cluster::models::NodeCapabilities, (StatusCode, String)> {
+    let updated_caps = if node.is_local {
+        let p2p_port = node.capabilities.p2p_port;
+        tokio::task::spawn_blocking(move || crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        let rpc_res = state
+            .cluster
+            .call_node(
+                node.id,
+                "modules.status",
+                serde_json::json!({}),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        serde_json::from_value::<crate::cluster::models::NodeCapabilities>(
+            rpc_res["capabilities"].clone(),
+        )
+        .unwrap_or_else(|_| {
+            let mut c = node.capabilities.clone();
+            if let Some(pm) = rpc_res["packageManager"].as_str() {
+                c.package_manager = pm.to_string();
+            }
+            if let Ok(mods) = serde_json::from_value(rpc_res["modules"].clone()) {
+                c.modules = mods;
+            }
+            c
+        })
+    };
+
+    state
+        .cluster
+        .update_node_capabilities(node.id, &updated_caps)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(updated_caps)
+}
+
+async fn run_install_on_single_node(
+    state: &AppState,
+    actor_username: &str,
+    node: &ClusterNode,
+    catalog: &[crate::cluster::modules::ModuleCatalogEntry],
+    requested_ids: &[String],
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let mut target_ids: Vec<String> = requested_ids
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if target_ids.is_empty() {
+        let aligned = align_node_modules(catalog, &node.capabilities.modules);
+        target_ids = catalog
+            .iter()
+            .filter(|entry| {
+                entry.required
+                    && !aligned
+                        .iter()
+                        .find(|m| m.id == entry.id)
+                        .map(|m| m.installed)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id.clone())
+            .collect();
+    }
+    if target_ids.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "nodeId": node.id,
+            "nodeName": node.name,
+            "skipped": true,
+            "results": [],
+            "node": build_node_modules_view(node, catalog),
+        }));
+    }
+
+    let (results, updated_caps) = if node.is_local {
+        let ids_c = target_ids.clone();
+        let p2p_port = node.capabilities.p2p_port;
+        tokio::task::spawn_blocking(move || {
+            let (results, _) = crate::cluster::modules::install_node_modules_sync(&ids_c);
+            let caps = crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port);
+            (results, caps)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        let rpc_res = state
+            .cluster
+            .call_node(
+                node.id,
+                "modules.install",
+                serde_json::json!({ "moduleIds": target_ids }),
+                std::time::Duration::from_secs(600),
+            )
+            .await?;
+        let results: Vec<crate::cluster::modules::ModuleInstallResult> =
+            serde_json::from_value(rpc_res["results"].clone()).unwrap_or_default();
+        let caps = serde_json::from_value::<crate::cluster::models::NodeCapabilities>(
+            rpc_res["capabilities"].clone(),
+        )
+        .unwrap_or_else(|_| {
+            let mut c = node.capabilities.clone();
+            if let Some(pm) = rpc_res["packageManager"].as_str() {
+                c.package_manager = pm.to_string();
+            }
+            if let Ok(mods) = serde_json::from_value(rpc_res["modules"].clone()) {
+                c.modules = mods;
+            }
+            c
+        });
+        (results, caps)
+    };
+
+    state
+        .cluster
+        .update_node_capabilities(node.id, &updated_caps)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut refreshed_node = node.clone();
+    refreshed_node.capabilities = updated_caps;
+
+    let all_ok = results.iter().all(|r| r.success);
+    state.logs.add(
+        None,
+        None,
+        "system",
+        if all_ok { "info" } else { "warn" },
+        &format!(
+            "VPS module install on '{}' [{}] by {}: {}",
+            node.name,
+            target_ids.join(", "),
+            actor_username,
+            if all_ok { "completed" } else { "partial/failed" }
+        ),
+    );
+
+    Ok(serde_json::json!({
+        "ok": all_ok,
+        "nodeId": node.id,
+        "nodeName": node.name,
+        "skipped": false,
+        "results": results,
+        "node": build_node_modules_view(&refreshed_node, catalog),
+    }))
+}
+
+pub(crate) async fn list_cluster_modules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _user = require_current_user(&state, &headers).await?;
+    let catalog = crate::cluster::modules::module_catalog();
+    let mut nodes = state
+        .cluster
+        .list_nodes()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    for n in &mut nodes {
+        if n.is_local && n.capabilities.modules.is_empty() {
+            if let Ok(caps) = refresh_single_node_caps(&state, n).await {
+                n.capabilities = caps;
+            }
+        }
+    }
+
+    let node_views: Vec<serde_json::Value> = nodes
+        .iter()
+        .map(|n| build_node_modules_view(n, &catalog))
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "catalog": catalog,
+        "nodes": node_views,
+    })))
+}
+
+pub(crate) async fn refresh_node_modules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(node_id): AxPath<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _user = require_current_user(&state, &headers).await?;
+    let mut node = state
+        .cluster
+        .get_node(node_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Node #{node_id} not found")))?;
+    let caps = refresh_single_node_caps(&state, &node).await?;
+    node.capabilities = caps;
+    let catalog = crate::cluster::modules::module_catalog();
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "node": build_node_modules_view(&node, &catalog),
+    })))
+}
+
+pub(crate) async fn install_node_modules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(node_id): AxPath<i64>,
+    Json(input): Json<InstallModulesInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_main_admin(&state, &headers).await?;
+    let node = state
+        .cluster
+        .get_node(node_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Node #{node_id} not found")))?;
+    if !node.is_local && !matches!(node.status.as_str(), "online" | "draining") {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Node '{}' is currently '{}'", node.name, node.status),
+        ));
+    }
+    let catalog = crate::cluster::modules::module_catalog();
+    let res =
+        run_install_on_single_node(&state, &actor.username, &node, &catalog, &input.module_ids)
+            .await?;
+    Ok(Json(res))
+}
+
+pub(crate) async fn install_fleet_modules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<InstallModulesInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_main_admin(&state, &headers).await?;
+    let nodes = state
+        .cluster
+        .list_nodes()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let catalog = crate::cluster::modules::module_catalog();
+
+    let mut per_node = Vec::new();
+    for node in nodes {
+        if !node.is_local && !matches!(node.status.as_str(), "online" | "draining") {
+            per_node.push(serde_json::json!({
+                "ok": false,
+                "nodeId": node.id,
+                "nodeName": node.name,
+                "skipped": true,
+                "error": format!("Node is '{}' and unreachable", node.status),
+                "results": [],
+            }));
+            continue;
+        }
+        match run_install_on_single_node(&state, &actor.username, &node, &catalog, &input.module_ids)
+            .await
+        {
+            Ok(v) => per_node.push(v),
+            Err((_code, msg)) => per_node.push(serde_json::json!({
+                "ok": false,
+                "nodeId": node.id,
+                "nodeName": node.name,
+                "skipped": false,
+                "error": msg,
+                "results": [],
+            })),
+        }
+    }
+
+    let all_ok = per_node.iter().all(|v| v["ok"].as_bool().unwrap_or(false) || v["skipped"].as_bool().unwrap_or(false));
+    Ok(Json(serde_json::json!({
+        "ok": all_ok,
+        "nodes": per_node,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1345,5 +1697,114 @@ mod tests {
         agent_task.abort();
         server_task.abort();
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[tokio::test]
+    async fn cluster_modules_api_lists_refreshes_and_rbac_protects_install() {
+        let state = crate::api::common::tests_state_helper().await;
+        let local_manifest = state
+            .cluster
+            .pair_local_node(
+                "http://127.0.0.1:8080",
+                "ws://127.0.0.1:8080/api/cluster/node-ws",
+                "core-modules",
+            )
+            .await
+            .unwrap();
+
+        let users = state.auth.list_users().await.unwrap();
+        let admin = users.into_iter().find(|u| u.is_main_admin).unwrap();
+        let admin_sess = state.auth.create_session(admin.id).await.unwrap();
+        let admin_sid = admin_sess.id;
+        let admin_csrf = admin_sess.csrf_token;
+
+        let dev_id: i64 = sqlx::query_scalar(
+            "INSERT INTO users(username, password_hash, permissions, allowed_projects, created_at)
+             VALUES('mod_viewer', 'hash', '[]', '[]', 1700000000) RETURNING id",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        let dev_sess = state.auth.create_session(dev_id).await.unwrap();
+        let dev_sid = dev_sess.id;
+        let dev_csrf = dev_sess.csrf_token;
+
+        let router = crate::api::create_router(state.clone());
+
+        // 1. Authenticated user can view catalog & per-VPS module readiness
+        let list_res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/cluster/modules")
+                    .header(header::COOKIE, format!("nd_session={dev_sid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_res.status(), StatusCode::OK);
+        let list_bytes = axum::body::to_bytes(list_res.into_body(), 128 * 1024).await.unwrap();
+        let list_json: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
+        let cat = list_json["catalog"].as_array().unwrap();
+        assert!(cat.iter().any(|m| m["id"] == "unrar" && m["required"] == true));
+        assert!(cat.iter().any(|m| m["id"] == "python" && m["required"] == true));
+        assert!(cat.iter().any(|m| m["id"] == "node" && m["required"] == true));
+        assert!(cat.iter().any(|m| m["id"] == "java"));
+        let nodes = list_json["nodes"].as_array().unwrap();
+        assert!(nodes.iter().any(|n| n["nodeId"] == local_manifest.node_id));
+
+        // 2. Non-main-admin cannot trigger package installs
+        let denied = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/cluster/nodes/{}/modules/install", local_manifest.node_id))
+                    .header(header::COOKIE, format!("nd_session={dev_sid}"))
+                    .header("x-csrf-token", &dev_csrf)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"moduleIds":["unrar"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let denied_fleet = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/cluster/modules/install-fleet")
+                    .header(header::COOKIE, format!("nd_session={dev_sid}"))
+                    .header("x-csrf-token", &dev_csrf)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"moduleIds":["unrar"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied_fleet.status(), StatusCode::FORBIDDEN);
+
+        // 3. Main admin can refresh node module scan
+        let ref_res = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/cluster/nodes/{}/modules/refresh", local_manifest.node_id))
+                    .header(header::COOKIE, format!("nd_session={admin_sid}"))
+                    .header("x-csrf-token", &admin_csrf)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ref_res.status(), StatusCode::OK);
+        let ref_bytes = axum::body::to_bytes(ref_res.into_body(), 128 * 1024).await.unwrap();
+        let ref_json: serde_json::Value = serde_json::from_slice(&ref_bytes).unwrap();
+        assert_eq!(ref_json["ok"], true);
+        assert!(ref_json["node"]["modules"].as_array().unwrap().len() == cat.len());
     }
 }

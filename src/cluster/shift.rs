@@ -10,14 +10,14 @@ use sqlx::Row;
 
 use crate::api::common::AppState;
 use crate::auth::User;
-use crate::cluster::archive::pack_subdirs_to_tar_gz;
+use crate::cluster::archive::pack_project_shift_to_zip;
 use crate::cluster::models::{ClusterNode, NodeStateManifest};
 use crate::cluster::node_exec::{
-    allocate_free_port_on_node, resolve_target_deploy_dir, start_p2p_server,
-    stream_tar_gz_to_target, NodeExecState,
+    allocate_free_port_on_node, resolve_source_deploy_dir, resolve_target_deploy_dir,
+    sanitize_project_folder, start_p2p_server, stream_archive_to_target, NodeExecState,
 };
 use crate::projects::Project;
-use crate::runtime::container::cleanup_project_files_dirs;
+use crate::runtime::container::cleanup_project_files_dirs_in_data_dir_checked;
 use crate::runtime::Runtime;
 
 fn now_secs() -> i64 {
@@ -435,7 +435,15 @@ pub async fn start_project_shift(
             manifest,
         ));
         let tok = local_exec
-            .issue_p2p_ticket(PathBuf::from(&target_deploy_dir), 8 * 1024 * 1024 * 1024, 600)
+            .issue_p2p_ticket(
+                PathBuf::from(&target_deploy_dir),
+                proj.id,
+                proj.slug.clone(),
+                proj.project_kind.clone(),
+                target_port,
+                8 * 1024 * 1024 * 1024,
+                900,
+            )
             .await;
         let (bound_port, handle) = match start_p2p_server(local_exec, "0.0.0.0", 0).await {
             Ok(v) => v,
@@ -459,7 +467,7 @@ pub async fn start_project_shift(
                     "token": token,
                     "targetUrls": p2p_urls,
                 }),
-                Duration::from_secs(300),
+                Duration::from_secs(600),
             )
             .await;
         if let Some(h) = local_p2p_handle.take() {
@@ -474,26 +482,29 @@ pub async fn start_project_shift(
             }
         }
     } else {
-        // Local Source -> P2P Target
-        let tmp_tgz = state
-            .cluster
-            .data_dir()
-            .join("tmp")
-            .join(format!("local-shift-{project_id}-{}.tar.gz", now_secs()));
-        let src_dir = PathBuf::from(&proj.deploy_dir);
-        let tgz_c = tmp_tgz.clone();
+        // Local Source -> P2P Target (.zip containing all app files + node_modules + container data)
+        let tmp_dir = state.cluster.data_dir().join("tmp");
+        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+        let tmp_zip = tmp_dir.join(format!("local-shift-{project_id}-{}.zip", now_secs()));
+        let local_data_dir = state.cluster.data_dir();
+        let src_dir = resolve_source_deploy_dir(local_data_dir, &proj);
+        let safe_slug = sanitize_project_folder(&proj.slug, proj.id);
+        let container_dir = local_data_dir.join("containers").join(&safe_slug);
+        let legacy_app_data_dir = local_data_dir.join("app-data").join(&safe_slug);
+        let zip_c = tmp_zip.clone();
         let pack = tokio::task::spawn_blocking(move || {
-            pack_subdirs_to_tar_gz(
+            pack_project_shift_to_zip(
                 &src_dir,
-                &["current", "releases", "app", "containers", "backups"],
-                &tgz_c,
-                &[],
+                Some(&container_dir),
+                Some(&legacy_app_data_dir),
+                &zip_c,
             )
         })
         .await;
         let comp_bytes = match pack {
             Ok(Ok((comp, _))) => comp as i64,
             Ok(Err(e)) => {
+                let _ = tokio::fs::remove_file(&tmp_zip).await;
                 if let Some(h) = local_p2p_handle.take() {
                     h.abort();
                 }
@@ -501,6 +512,7 @@ pub async fn start_project_shift(
                 return Err((StatusCode::INTERNAL_SERVER_ERROR, e));
             }
             Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp_zip).await;
                 if let Some(h) = local_p2p_handle.take() {
                     h.abort();
                 }
@@ -513,7 +525,7 @@ pub async fn start_project_shift(
         let mut pushed = false;
         let mut last_err = String::from("No reachable target P2P URL");
         for u in &p2p_urls {
-            match stream_tar_gz_to_target(u, &token, &tmp_tgz).await {
+            match stream_archive_to_target(u, &token, &tmp_zip).await {
                 Ok(_) => {
                     pushed = true;
                     break;
@@ -521,7 +533,7 @@ pub async fn start_project_shift(
                 Err(e) => last_err = format!("{u}: {e}"),
             }
         }
-        let _ = tokio::fs::remove_file(&tmp_tgz).await;
+        let _ = tokio::fs::remove_file(&tmp_zip).await;
         if let Some(h) = local_p2p_handle.take() {
             h.abort();
         }
@@ -860,7 +872,7 @@ pub async fn complete_migration_cutover(
     state.cache.invalidate_project(proj.id);
     state.cluster.broadcast_peer_sync().await;
 
-    // Best-effort post-cutover cleanup on Source Web-Node
+    // Clean up source ("before") node files, container data, Caddy config & processes after successful move
     if let Some(src_nid) = from_node_id {
         if src_nid != to_node_id {
             if let Ok(Some(src_node)) = state.cluster.get_node(src_nid).await {
@@ -870,7 +882,7 @@ pub async fn complete_migration_cutover(
                         .list_for_node(src_nid)
                         .await
                         .unwrap_or_default();
-                    let _ = state
+                    match state
                         .cluster
                         .call_node(
                             src_nid,
@@ -880,9 +892,36 @@ pub async fn complete_migration_cutover(
                                 "remainingProjects": remaining,
                                 "removeFiles": true,
                             }),
-                            Duration::from_secs(20),
+                            Duration::from_secs(120),
                         )
-                        .await;
+                        .await
+                    {
+                        Ok(res) => {
+                            let removed_dirs = res["removedDirs"].as_u64().unwrap_or(0);
+                            state.logs.add(
+                                Some(proj.id),
+                                None,
+                                "shift",
+                                "info",
+                                &format!(
+                                    "Cleaned up previous node '{}' ({} directory tree(s) removed) after moving '{}' to '{}'",
+                                    src_node.name, removed_dirs, proj.name, to_node.name
+                                ),
+                            );
+                        }
+                        Err((_, msg)) => {
+                            state.logs.add(
+                                Some(proj.id),
+                                None,
+                                "shift",
+                                "warn",
+                                &format!(
+                                    "App '{}' moved to '{}', but automatic file cleanup on previous node '{}' failed: {}",
+                                    proj.name, to_node.name, src_node.name, msg
+                                ),
+                            );
+                        }
+                    }
                 } else {
                     let _ = state.runtime.stop_project(&proj).await;
                     let remaining = state
@@ -891,7 +930,53 @@ pub async fn complete_migration_cutover(
                         .await
                         .unwrap_or_default();
                     state.caddy.remove_project_config(&proj.slug, &remaining);
-                    cleanup_project_files_dirs(&proj, &remaining);
+                    let _ = state.caddy.reload();
+                    let local_data_dir = state.cluster.data_dir().to_path_buf();
+                    let proj_c = proj.clone();
+                    let rem_c = remaining;
+                    let clean_res = tokio::task::spawn_blocking(move || {
+                        cleanup_project_files_dirs_in_data_dir_checked(
+                            &local_data_dir,
+                            &proj_c,
+                            &rem_c,
+                        )
+                    })
+                    .await;
+                    match clean_res {
+                        Ok(Ok(removed_dirs)) => {
+                            state.logs.add(
+                                Some(proj.id),
+                                None,
+                                "shift",
+                                "info",
+                                &format!(
+                                    "Cleaned up previous node '{}' ({} directory tree(s) removed) after moving '{}' to '{}'",
+                                    src_node.name, removed_dirs, proj.name, to_node.name
+                                ),
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            state.logs.add(
+                                Some(proj.id),
+                                None,
+                                "shift",
+                                "warn",
+                                &format!(
+                                    "App '{}' moved to '{}', but local cleanup on previous node '{}' reported: {}",
+                                    proj.name, to_node.name, src_node.name, e
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            state.logs.add(
+                                Some(proj.id),
+                                None,
+                                "shift",
+                                "warn",
+                                &format!("Local source cleanup task failed: {e}"),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1028,7 +1113,12 @@ async fn cleanup_staged_target(
             .await
             .unwrap_or_default();
         state.caddy.remove_project_config(&staged.slug, &remaining);
-        cleanup_project_files_dirs(&staged, &remaining);
+        let _ = state.caddy.reload();
+        let _ = cleanup_project_files_dirs_in_data_dir_checked(
+            state.cluster.data_dir(),
+            &staged,
+            &remaining,
+        );
     }
 }
 
@@ -1239,6 +1329,7 @@ mod tests {
             has_caddy: false,
             has_postgres: false,
             p2p_port: Some(p2p_port),
+            ..Default::default()
         };
         state
             .cluster
@@ -1327,9 +1418,17 @@ mod tests {
             .unwrap();
         let proj = state.projects.get(proj_id).await.unwrap().unwrap();
 
+        let src_data_dir = state.cluster.data_dir().to_path_buf();
         let src_current = PathBuf::from(&proj.deploy_dir).join("current");
-        std::fs::create_dir_all(&src_current).unwrap();
+        std::fs::create_dir_all(src_current.join("node_modules/pkg")).unwrap();
         std::fs::write(src_current.join("server.js"), b"// live-app-v1").unwrap();
+        std::fs::write(src_current.join("node_modules/pkg/mod.js"), b"exports.ok = true;").unwrap();
+        std::fs::create_dir_all(src_data_dir.join("containers/shift-web/db")).unwrap();
+        std::fs::create_dir_all(src_data_dir.join("containers/shift-web/storage")).unwrap();
+        std::fs::write(src_data_dir.join("containers/shift-web/db/app.db"), b"db-bytes").unwrap();
+        std::fs::write(src_data_dir.join("containers/shift-web/storage/pic.png"), b"img-bytes").unwrap();
+        std::fs::create_dir_all(src_data_dir.join("keys")).unwrap();
+        std::fs::write(src_data_dir.join("keys").join(format!("deploy_key_{}", proj.id)), b"k").unwrap();
         state
             .projects
             .set_env_var(proj.id, "APP_SECRET", "shift-secret", true)
@@ -1418,6 +1517,25 @@ mod tests {
         let stage2_caddy = std::fs::read_to_string(good_data.join("caddy/shift-web.caddy")).unwrap();
         assert!(stage2_caddy.contains("tls ops@example.test"));
         assert!(!src_current.exists());
+        assert!(!PathBuf::from(&proj.deploy_dir).exists());
+        assert!(!src_data_dir.join("containers/shift-web").exists());
+        assert!(!src_data_dir.join("keys").join(format!("deploy_key_{}", proj.id)).exists());
+        assert_eq!(
+            std::fs::read_to_string(good_data.join("sites/shift-web/current/node_modules/pkg/mod.js")).unwrap(),
+            "exports.ok = true;"
+        );
+        assert_eq!(
+            std::fs::read_to_string(good_data.join("containers/shift-web/db/app.db")).unwrap(),
+            "db-bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(good_data.join("containers/shift-web/storage/pic.png")).unwrap(),
+            "img-bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(good_data.join("sites/shift-web/current/data/app.db")).unwrap(),
+            "db-bytes"
+        );
 
         good_p2p.abort();
         good_rpc.abort();

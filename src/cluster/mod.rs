@@ -2,6 +2,7 @@ pub mod archive;
 pub mod manager;
 pub mod mesh;
 pub mod models;
+pub mod modules;
 pub mod node_agent;
 pub mod node_exec;
 pub mod shift;

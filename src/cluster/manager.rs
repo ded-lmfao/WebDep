@@ -576,6 +576,28 @@ impl ClusterManager {
         Ok(())
     }
 
+    pub async fn update_node_capabilities(
+        &self,
+        node_id: i64,
+        capabilities: &NodeCapabilities,
+    ) -> Result<(), String> {
+        let now = now_secs();
+        let caps_json = serde_json::to_string(capabilities).unwrap_or_else(|_| "{}".to_string());
+        sqlx::query(
+            "UPDATE nodes
+             SET capabilities_json = $2,
+                 updated_at = $3
+             WHERE id = $1",
+        )
+        .bind(node_id)
+        .bind(&caps_json)
+        .bind(now)
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("Failed updating node #{node_id} capabilities: {e}"))?;
+        Ok(())
+    }
+
     pub async fn update_node_metrics(&self, node_id: i64, metrics: &NodeMetrics) -> Result<(), String> {
         let now = now_secs();
         let metrics_json = serde_json::to_string(metrics).unwrap_or_else(|_| "{}".to_string());

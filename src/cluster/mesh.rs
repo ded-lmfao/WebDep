@@ -341,6 +341,7 @@ pub fn detect_capabilities_with_p2p(p2p_port: Option<u16>) -> NodeCapabilities {
     let has_wireguard = command_exists("wg");
     let has_caddy = command_exists("caddy");
     let has_postgres = crate::databases::binaries::PgBinaries::detect().is_ok();
+    let modules_snap = super::modules::detect_node_modules_sync();
 
     NodeCapabilities {
         os: std::env::consts::OS.to_string(),
@@ -350,6 +351,8 @@ pub fn detect_capabilities_with_p2p(p2p_port: Option<u16>) -> NodeCapabilities {
         has_caddy,
         has_postgres,
         p2p_port,
+        package_manager: modules_snap.package_manager,
+        modules: modules_snap.modules,
     }
 }
 

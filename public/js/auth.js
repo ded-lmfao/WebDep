@@ -347,6 +347,7 @@ export async function onAuthenticated(isFreshLogin = false) {
       ? (typeof loadDatabases === 'function' ? loadDatabases() : (window.loadDatabases ? window.loadDatabases() : Promise.resolve()))
       : Promise.resolve(),
     window.loadNodes ? window.loadNodes() : Promise.resolve(),
+    window.loadModulesBadge ? window.loadModulesBadge() : Promise.resolve(),
   ]).catch((err) => {
     console.warn('Initial project/db load warning:', err);
   });

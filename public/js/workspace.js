@@ -207,6 +207,7 @@ function updateBreadcrumbs() {
       services: 'Backend Services',
       databases: 'Managed Databases',
       nodes: 'Cluster Nodes',
+      modules: 'VPS Modules',
       settings: 'Platform Settings',
     };
     secEl.textContent = globalLabels[state.currentView] || state.currentView;
@@ -830,6 +831,7 @@ function renderCurrentView() {
       break;
     case 'audit': void loadAuditView(); break;
     case 'nodes': if (window.loadNodesView) void window.loadNodesView(); break;
+    case 'modules': if (window.loadModulesView) void window.loadModulesView(); break;
   }
 }
 

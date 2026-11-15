@@ -238,12 +238,14 @@ if command -v sudo >/dev/null 2>&1; then
     if ! command -v ufw >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update -y >/dev/null 2>&1 && sudo apt-get install -y ufw >/dev/null 2>&1 || true
     fi
+    P2P_PORT="${WEBDEP_NODE_P2P_PORT:-4601}"
     if command -v ufw >/dev/null 2>&1; then
         sudo ufw allow OpenSSH >/dev/null 2>&1 || sudo ufw allow 22/tcp >/dev/null 2>&1 || true
         sudo ufw allow 80/tcp >/dev/null 2>&1 || true
         sudo ufw allow 443/tcp >/dev/null 2>&1 || true
         sudo ufw allow 51820/udp >/dev/null 2>&1 || true
         sudo ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
+        sudo ufw allow "${P2P_PORT}/tcp" >/dev/null 2>&1 || true
         sudo ufw --force enable >/dev/null 2>&1 || true
     fi
     if ! command -v wg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
@@ -251,14 +253,14 @@ if command -v sudo >/dev/null 2>&1; then
         sudo apt-get update -y >/dev/null 2>&1 && sudo apt-get install -y wireguard-tools >/dev/null 2>&1 || true
     fi
     if command -v iptables >/dev/null 2>&1; then
-        for p in 80 443 "${PORT}"; do
+        for p in 80 443 "${PORT}" "${P2P_PORT}"; do
             sudo iptables -C INPUT -p tcp --dport "$p" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || \
                 sudo iptables -I INPUT 1 -p tcp --dport "$p" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || true
         done
     fi
-    # Allow WebDep service user to automatically open ports in UFW/iptables, manage WireGuard mesh, reload Caddy & restart WebDep
+    # Allow WebDep service user to automatically open ports in UFW/iptables, manage WireGuard mesh, reload Caddy, install VPS runtime modules & restart WebDep
     if [[ -d "/etc/sudoers.d" ]]; then
-        echo "${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/sbin/ufw, /usr/sbin/iptables, /usr/bin/wg, /usr/bin/wg-quick, /usr/bin/systemctl reload caddy, /usr/bin/systemctl restart webdep, /bin/systemctl restart webdep, /usr/bin/systemctl restart webdep-core, /bin/systemctl restart webdep-core, /usr/bin/systemctl restart webdep-node, /bin/systemctl restart webdep-node" | sudo tee /etc/sudoers.d/webdep-firewall >/dev/null 2>&1 || true
+        echo "${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/sbin/ufw, /usr/sbin/iptables, /usr/bin/wg, /usr/bin/wg-quick, /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /sbin/apk, /usr/bin/apk, /usr/bin/pacman, /usr/bin/systemctl reload caddy, /usr/bin/systemctl restart webdep, /bin/systemctl restart webdep, /usr/bin/systemctl restart webdep-core, /bin/systemctl restart webdep-core, /usr/bin/systemctl restart webdep-node, /bin/systemctl restart webdep-node" | sudo tee /etc/sudoers.d/webdep-firewall >/dev/null 2>&1 || true
         sudo chmod 0440 /etc/sudoers.d/webdep-firewall 2>/dev/null || true
     fi
 fi

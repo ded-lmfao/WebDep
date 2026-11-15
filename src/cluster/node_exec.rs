@@ -27,15 +27,18 @@ use crate::api::system::app_usage::{
     collect_project_seed_pids_pure, compute_entity_usage_with_monitor, EntityUsageInput,
 };
 use crate::caddy::Caddy;
-use crate::cluster::archive::{pack_dir_to_tar_gz, pack_subdirs_to_tar_gz, unpack_tar_gz_safe};
+use crate::cluster::archive::{
+    pack_dir_to_tar_gz, pack_project_shift_to_zip, unpack_archive_auto_safe,
+};
 use crate::cluster::mesh::detect_capabilities_with_p2p;
 use crate::deployer::builder::{merge_copy_dir, run_shell_cmd_with_logger, switch_current};
 use crate::git::{CommitInfo, Git, StoredGithubToken};
 use crate::monitor::{get_path_disk_size, Monitor};
 use crate::projects::Project;
 use crate::runtime::container::{
-    build_container_env_pure, cleanup_project_files_dirs, ensure_container_with_port,
-    link_work_dir_to_container_dir, WebsiteContainer,
+    build_container_env_pure, cleanup_project_files_dirs_in_data_dir,
+    cleanup_project_files_dirs_in_data_dir_checked, ensure_container_in_data_dir,
+    link_work_dir_to_container_dir, link_work_dir_to_db_dir, WebsiteContainer,
 };
 use crate::runtime::maintenance::{start_maintenance_server_in_map, stop_maintenance_server_in_map};
 use crate::runtime::process::spawn_project_process_pure;
@@ -60,6 +63,11 @@ pub struct RemoteContextPayload {
 #[derive(Debug, Clone)]
 pub struct P2pTransferTicket {
     pub dest_dir: PathBuf,
+    pub project_slug: String,
+    pub project_kind: String,
+    pub project_id: i64,
+    #[allow(dead_code)]
+    pub port: u16,
     pub expires_at: i64,
     pub max_bytes: u64,
 }
@@ -98,6 +106,10 @@ impl NodeExecState {
     pub async fn issue_p2p_ticket(
         &self,
         dest_dir: PathBuf,
+        project_id: i64,
+        project_slug: String,
+        project_kind: String,
+        port: u16,
         max_bytes: u64,
         ttl_secs: i64,
     ) -> String {
@@ -107,6 +119,10 @@ impl NodeExecState {
         let now = now_secs();
         let ticket = P2pTransferTicket {
             dest_dir,
+            project_slug,
+            project_kind,
+            project_id,
+            port,
             expires_at: now + ttl_secs.clamp(30, 3600),
             max_bytes,
         };
@@ -116,15 +132,19 @@ impl NodeExecState {
         token
     }
 
-    pub async fn consume_p2p_ticket(&self, token: &str) -> Option<P2pTransferTicket> {
+    pub async fn peek_p2p_ticket(&self, token: &str) -> Option<P2pTransferTicket> {
         let now = now_secs();
-        let mut guard = self.p2p_tokens.write().await;
-        let ticket = guard.remove(token)?;
+        let guard = self.p2p_tokens.read().await;
+        let ticket = guard.get(token)?.clone();
         if ticket.expires_at < now {
             None
         } else {
             Some(ticket)
         }
+    }
+
+    pub async fn remove_p2p_ticket(&self, token: &str) {
+        self.p2p_tokens.write().await.remove(token);
     }
 
     fn get_project_lock(&self, project_id: i64) -> Arc<tokio::sync::Mutex<()>> {
@@ -274,7 +294,7 @@ async fn apply_and_cache_context(
     ctx: RemoteContextPayload,
 ) {
     apply_remote_context(&exec.data_dir, p.id, &ctx);
-    let container = ensure_container_with_port(p, p.port.unwrap_or(3000));
+    let container = ensure_container_in_data_dir(&exec.data_dir, p, p.port.unwrap_or(3000));
     if !ctx.env.is_empty() {
         exec.env_cache.write().await.insert(p.id, ctx.env.clone());
     }
@@ -396,6 +416,26 @@ async fn stop_project_local(exec: &Arc<NodeExecState>, p: &Project, container: &
     killed
 }
 
+async fn stop_project_processes_for_cleanup(exec: &Arc<NodeExecState>, p: &Project) -> bool {
+    exec.bump_stop_seq(p.id);
+    let proj_lock = exec.get_project_lock(p.id);
+    let _guard = proj_lock.lock().await;
+    stop_maintenance_server_in_map(&exec.maintenance_shutdowns, p.id);
+    let old_child = exec.processes.lock().ok().and_then(|mut m| m.remove(&p.id));
+    let extra = p.app_pid.into_iter().collect::<Vec<_>>();
+    let resolved_dir = resolve_source_deploy_dir(&exec.data_dir, p);
+    let deploy_str = resolved_dir.to_string_lossy();
+    kill_project_processes_pure(
+        p.id,
+        &p.slug,
+        &deploy_str,
+        p.port,
+        &extra,
+        old_child,
+    )
+    .await
+}
+
 async fn start_project_local(
     exec: &Arc<NodeExecState>,
     p: &Project,
@@ -409,7 +449,7 @@ async fn start_project_local(
     stop_maintenance_server_in_map(&exec.maintenance_shutdowns, p.id);
     let old_child = exec.processes.lock().ok().and_then(|mut m| m.remove(&p.id));
     let extra = p.app_pid.into_iter().collect::<Vec<_>>();
-    let container = ensure_container_with_port(p, p.port.unwrap_or(3000));
+    let container = ensure_container_in_data_dir(&exec.data_dir, p, p.port.unwrap_or(3000));
     let _ = kill_project_processes_pure(
         p.id,
         &p.slug,
@@ -479,7 +519,7 @@ async fn run_remote_deploy_task(
 
     apply_and_cache_context(&exec, &p, ctx.clone()).await;
     let start_stop_seq = exec.get_stop_seq(p.id);
-    let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
+    let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
     send_log(
         &ws_tx,
         Some(p.id),
@@ -858,7 +898,7 @@ pub async fn execute_rpc(
             };
             let ctx: RemoteContextPayload = serde_json::from_value(params["context"].clone()).unwrap_or_default();
             let _ = tokio::fs::create_dir_all(&p.deploy_dir).await;
-            ensure_container_with_port(&p, p.port.unwrap_or(3000));
+            ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
             apply_and_cache_context(&exec, &p, ctx).await;
             exec.upsert_workload_from_project(&p, Some(&p.app_status), p.app_pid)
                 .await;
@@ -870,9 +910,9 @@ pub async fn execute_rpc(
             };
             let remaining: Vec<Project> =
                 serde_json::from_value(params["remainingProjects"].clone()).unwrap_or_default();
-            let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
+            let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
             stop_project_local(&exec, &p, &container).await;
-            cleanup_project_files_dirs(&p, &remaining);
+            cleanup_project_files_dirs_in_data_dir(&exec.data_dir, &p, &remaining);
             let caddy = Caddy::new(&exec.data_dir);
             caddy.remove_project_config(&p.slug, &remaining);
             exec.remove_workload(p.id).await;
@@ -897,7 +937,7 @@ pub async fn execute_rpc(
             let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
                 return err_resp(req_id, 400, "Invalid project payload");
             };
-            let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
+            let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
             stop_project_local(&exec, &p, &container).await;
             send_log(&ws_tx, Some(p.id), None, "system", "info", &format!("Stopped '{}' on Web-Node", p.name));
             ok_resp(req_id, json!({ "ok": true }))
@@ -908,7 +948,7 @@ pub async fn execute_rpc(
             };
             let ctx: RemoteContextPayload = serde_json::from_value(params["context"].clone()).unwrap_or_default();
             apply_and_cache_context(&exec, &p, ctx.clone()).await;
-            let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
+            let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
             stop_project_local(&exec, &p, &container).await;
             match start_project_local(&exec, &p, ctx.env, None, &ws_tx).await {
                 Ok(pid) => ok_resp(req_id, json!({ "ok": true, "pid": pid })),
@@ -922,7 +962,7 @@ pub async fn execute_rpc(
             let enabled = params["enabled"].as_bool().unwrap_or(false);
             let ctx: RemoteContextPayload = serde_json::from_value(params["context"].clone()).unwrap_or_default();
             apply_and_cache_context(&exec, &p, ctx.clone()).await;
-            let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
+            let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
             if enabled {
                 stop_project_local(&exec, &p, &container).await;
                 if let Some(port) = p.port {
@@ -1346,7 +1386,17 @@ pub async fn execute_rpc(
                 .unwrap_or_else(|| resolve_target_deploy_dir(&exec.data_dir, &p));
             let max_bytes = params["maxBytes"].as_u64().unwrap_or(8 * 1024 * 1024 * 1024);
             let ttl_secs = params["ttlSecs"].as_i64().unwrap_or(900);
-            let token = exec.issue_p2p_ticket(dest_dir.clone(), max_bytes, ttl_secs).await;
+            let token = exec
+                .issue_p2p_ticket(
+                    dest_dir.clone(),
+                    p.id,
+                    p.slug.clone(),
+                    p.project_kind.clone(),
+                    p.port.unwrap_or(3000),
+                    max_bytes,
+                    ttl_secs,
+                )
+                .await;
             let p2p_port = exec.p2p_port.load(Ordering::Relaxed);
             ok_resp(
                 req_id,
@@ -1357,7 +1407,7 @@ pub async fn execute_rpc(
                 }),
             )
         }
-        "shift.push_tar" => {
+        "shift.push_tar" | "shift.push_zip" => {
             let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
                 return err_resp(req_id, 400, "Invalid project payload");
             };
@@ -1378,33 +1428,41 @@ pub async fn execute_rpc(
                 return err_resp(req_id, 400, "Missing targetUrls for P2P transfer");
             }
 
-            let tmp_tgz = exec
-                .data_dir
-                .join("tmp")
-                .join(format!("shift-push-{}-{}.tar.gz", p.id, now_secs()));
-            let deploy_dir = PathBuf::from(&p.deploy_dir);
-            let container_dir = exec.data_dir.join("containers").join(&p.slug);
-            let tgz_pack = tmp_tgz.clone();
+            let tmp_dir = exec.data_dir.join("tmp");
+            let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+            let tmp_zip = tmp_dir.join(format!("shift-push-{}-{}.zip", p.id, now_secs()));
+            let deploy_dir = resolve_source_deploy_dir(&exec.data_dir, &p);
+            let safe_slug = sanitize_project_folder(&p.slug, p.id);
+            let container_dir = exec.data_dir.join("containers").join(&safe_slug);
+            let legacy_app_data_dir = exec.data_dir.join("app-data").join(&safe_slug);
+            let zip_pack = tmp_zip.clone();
 
             let pack_res = tokio::task::spawn_blocking(move || {
-                // Stage active app/release/container/backup subdirectories in direct P2P shift
-                let subdirs = ["current", "releases", "app", "containers", "backups"];
-                let (comp, raw) = pack_subdirs_to_tar_gz(&deploy_dir, &subdirs, &tgz_pack, &[])?;
-                let _ = container_dir;
-                Ok::<(u64, u64), String>((comp, raw))
+                pack_project_shift_to_zip(
+                    &deploy_dir,
+                    Some(&container_dir),
+                    Some(&legacy_app_data_dir),
+                    &zip_pack,
+                )
             })
             .await;
 
             let (compressed_bytes, raw_bytes) = match pack_res {
                 Ok(Ok(sizes)) => sizes,
-                Ok(Err(e)) => return err_resp(req_id, 500, format!("Failed packing archive: {e}")),
-                Err(e) => return err_resp(req_id, 500, format!("Pack worker panicked: {e}")),
+                Ok(Err(e)) => {
+                    let _ = tokio::fs::remove_file(&tmp_zip).await;
+                    return err_resp(req_id, 500, format!("Failed packing .zip archive: {e}"));
+                }
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&tmp_zip).await;
+                    return err_resp(req_id, 500, format!("Pack worker panicked: {e}"));
+                }
             };
 
             let mut last_err = String::from("No reachable P2P endpoint");
             let mut transfer_result = None;
             for base_url in &target_urls {
-                match stream_tar_gz_to_target(base_url, &token, &tmp_tgz).await {
+                match stream_archive_to_target(base_url, &token, &tmp_zip).await {
                     Ok(extracted_bytes) => {
                         transfer_result = Some((base_url.clone(), extracted_bytes));
                         break;
@@ -1414,7 +1472,7 @@ pub async fn execute_rpc(
                     }
                 }
             }
-            let _ = tokio::fs::remove_file(&tmp_tgz).await;
+            let _ = tokio::fs::remove_file(&tmp_zip).await;
 
             match transfer_result {
                 Some((used_url, extracted_bytes)) => {
@@ -1425,8 +1483,8 @@ pub async fn execute_rpc(
                         "shift",
                         "info",
                         &format!(
-                            "Streamed {} bytes compressed directly to Target via {}",
-                            compressed_bytes, used_url
+                            "Streamed {} bytes (.zip, {} raw bytes) directly to Target via {}",
+                            compressed_bytes, raw_bytes, used_url
                         ),
                     );
                     ok_resp(
@@ -1452,7 +1510,7 @@ pub async fn execute_rpc(
             let health_timeout_ms = params["healthTimeoutMs"].as_u64().unwrap_or(5000);
             let skip_port_probe = params["skipPortProbe"].as_bool().unwrap_or(false);
             let _ = tokio::fs::create_dir_all(&p.deploy_dir).await;
-            let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
+            let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
             apply_and_cache_context(&exec, &p, ctx.clone()).await;
 
             match start_project_local(&exec, &p, ctx.env, None, &ws_tx).await {
@@ -1496,16 +1554,62 @@ pub async fn execute_rpc(
             let remaining: Vec<Project> =
                 serde_json::from_value(params["remainingProjects"].clone()).unwrap_or_default();
             let remove_files = params["removeFiles"].as_bool().unwrap_or(true);
-            let container = ensure_container_with_port(&p, p.port.unwrap_or(3000));
-            stop_project_local(&exec, &p, &container).await;
+            stop_project_processes_for_cleanup(&exec, &p).await;
             let caddy = Caddy::new(&exec.data_dir);
             caddy.remove_project_config(&p.slug, &remaining);
+            let _ = caddy.reload();
+
+            let mut removed_dirs = 0usize;
             if remove_files {
-                cleanup_project_files_dirs(&p, &remaining);
+                let data_dir_c = exec.data_dir.clone();
+                let mut src_proj = p.clone();
+                let resolved_src = resolve_source_deploy_dir(&data_dir_c, &src_proj);
+                src_proj.deploy_dir = resolved_src.to_string_lossy().to_string();
+                let rem_c = remaining.clone();
+                let orig_proj = p.clone();
+                let cleanup_res = tokio::task::spawn_blocking(move || {
+                    let mut count =
+                        cleanup_project_files_dirs_in_data_dir_checked(&data_dir_c, &src_proj, &rem_c)?;
+                    if orig_proj.deploy_dir != src_proj.deploy_dir {
+                        count += cleanup_project_files_dirs_in_data_dir_checked(
+                            &data_dir_c,
+                            &orig_proj,
+                            &rem_c,
+                        )?;
+                    }
+                    Ok::<usize, String>(count)
+                })
+                .await;
+                match cleanup_res {
+                    Ok(Ok(count)) => {
+                        removed_dirs = count;
+                    }
+                    Ok(Err(e)) => {
+                        exec.remove_workload(p.id).await;
+                        exec.env_cache.write().await.remove(&p.id);
+                        return err_resp(req_id, 500, format!("Source cleanup failed: {e}"));
+                    }
+                    Err(e) => {
+                        exec.remove_workload(p.id).await;
+                        exec.env_cache.write().await.remove(&p.id);
+                        return err_resp(req_id, 500, format!("Source cleanup worker panicked: {e}"));
+                    }
+                }
             }
             exec.remove_workload(p.id).await;
             exec.env_cache.write().await.remove(&p.id);
-            ok_resp(req_id, json!({ "ok": true }))
+            send_log(
+                &ws_tx,
+                Some(p.id),
+                None,
+                "shift",
+                "info",
+                &format!(
+                    "Cleaned up old node workload & {} directory tree(s) for '{}'",
+                    removed_dirs, p.slug
+                ),
+            );
+            ok_resp(req_id, json!({ "ok": true, "removedDirs": removed_dirs }))
         }
         "caddy.stage_http" => {
             let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
@@ -1651,7 +1755,8 @@ pub async fn execute_rpc(
             }
             let tgz_c = tmp_tgz.clone();
             let dir_c = tmp_dir.clone();
-            let unpack_res = tokio::task::spawn_blocking(move || unpack_tar_gz_safe(&tgz_c, &dir_c)).await;
+            let unpack_res =
+                tokio::task::spawn_blocking(move || unpack_archive_auto_safe(&tgz_c, &dir_c)).await;
             let _ = tokio::fs::remove_file(&tmp_tgz).await;
             if let Ok(Err(e)) = unpack_res {
                 let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
@@ -1694,6 +1799,77 @@ pub async fn execute_rpc(
                     "targetDeployDir": deploy_dir.to_string_lossy().to_string(),
                 }),
             )
+        }
+        "modules.status" => {
+            let p2p_port = exec.p2p_port.load(Ordering::Relaxed);
+            let port_opt = if p2p_port > 0 { Some(p2p_port) } else { None };
+            let caps = tokio::task::spawn_blocking(move || detect_capabilities_with_p2p(port_opt))
+                .await
+                .map_err(|e| e.to_string());
+            match caps {
+                Ok(c) => ok_resp(
+                    req_id,
+                    json!({
+                        "ok": true,
+                        "packageManager": c.package_manager,
+                        "modules": c.modules,
+                        "capabilities": c,
+                    }),
+                ),
+                Err(e) => err_resp(req_id, 500, format!("Module detection failed: {e}")),
+            }
+        }
+        "modules.install" => {
+            let mut module_ids: Vec<String> = params["moduleIds"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.trim().to_ascii_lowercase()))
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if module_ids.is_empty() {
+                if let Some(single) = params["moduleId"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    module_ids.push(single.to_ascii_lowercase());
+                }
+            }
+            if module_ids.is_empty() {
+                return err_resp(req_id, 400, "Missing moduleIds for installation");
+            }
+            let p2p_port = exec.p2p_port.load(Ordering::Relaxed);
+            let port_opt = if p2p_port > 0 { Some(p2p_port) } else { None };
+            let ids_log = module_ids.join(", ");
+            send_log(
+                &ws_tx,
+                None,
+                None,
+                "system",
+                "info",
+                &format!("Installing VPS modules [{ids_log}]..."),
+            );
+            let res = tokio::task::spawn_blocking(move || {
+                let (results, _snap) = crate::cluster::modules::install_node_modules_sync(&module_ids);
+                let caps = detect_capabilities_with_p2p(port_opt);
+                (results, caps)
+            })
+            .await;
+            match res {
+                Ok((results, caps)) => {
+                    let all_ok = results.iter().all(|r| r.success);
+                    ok_resp(
+                        req_id,
+                        json!({
+                            "ok": all_ok,
+                            "results": results,
+                            "packageManager": caps.package_manager,
+                            "modules": caps.modules,
+                            "capabilities": caps,
+                        }),
+                    )
+                }
+                Err(e) => err_resp(req_id, 500, format!("Module install worker panicked: {e}")),
+            }
         }
         other => err_resp(req_id, 404, format!("Unknown remote RPC op '{other}'")),
     }
@@ -1957,18 +2133,218 @@ async fn handle_files_upload(req_id: String, params: Value) -> ClusterWsMessage 
     ok_resp(req_id, json!({ "ok": true, "uploaded": uploaded }))
 }
 
-pub fn resolve_target_deploy_dir(data_dir: &Path, p: &Project) -> PathBuf {
-    let clean_slug: String = p
-        .slug
+pub fn sanitize_project_folder(slug: &str, project_id: i64) -> String {
+    let clean_slug: String = slug
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         .collect();
-    let folder = if clean_slug.is_empty() {
-        format!("project-{}", p.id)
+    if clean_slug.is_empty() {
+        format!("project-{}", project_id)
     } else {
         clean_slug
+    }
+}
+
+pub fn resolve_source_deploy_dir(data_dir: &Path, p: &Project) -> PathBuf {
+    let trimmed = p.deploy_dir.trim();
+    let raw = PathBuf::from(trimmed);
+    if !trimmed.is_empty() && raw.exists() {
+        return raw;
+    }
+    let norm = trimmed.replace('\\', "/");
+    let stripped = norm
+        .strip_prefix("./data/")
+        .or_else(|| norm.strip_prefix("data/"))
+        .map(PathBuf::from);
+    if let Some(rel) = stripped {
+        let candidate = data_dir.join(rel);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    let folder = sanitize_project_folder(&p.slug, p.id);
+    let kind_dir = if p.project_kind == "service" {
+        "services"
+    } else {
+        "sites"
     };
-    data_dir.join("sites").join(folder)
+    let fallback = data_dir.join(kind_dir).join(folder);
+    if fallback.exists() || trimmed.is_empty() {
+        fallback
+    } else {
+        raw
+    }
+}
+
+pub fn resolve_target_deploy_dir(data_dir: &Path, p: &Project) -> PathBuf {
+    let folder = sanitize_project_folder(&p.slug, p.id);
+    if p.project_kind == "service" {
+        data_dir.join("services").join(folder)
+    } else {
+        data_dir.join("sites").join(folder)
+    }
+}
+
+fn remove_path_any(path: &Path) -> Result<(), String> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if meta.file_type().is_symlink() {
+        if std::fs::remove_file(path).is_ok() {
+            return Ok(());
+        }
+        if std::fs::remove_dir(path).is_ok() {
+            return Ok(());
+        }
+    }
+    if meta.is_dir() {
+        #[cfg(windows)]
+        {
+            // Also remove Windows junctions cleanly without following targets
+            if std::fs::remove_dir(path).is_ok() {
+                return Ok(());
+            }
+        }
+        std::fs::remove_dir_all(path)
+            .map_err(|e| format!("Failed removing '{}': {e}", path.display()))
+    } else {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("Failed removing '{}': {e}", path.display()))
+    }
+}
+
+fn copy_path_preserving_symlinks(src: &Path, dst: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(src)
+        .map_err(|e| format!("Failed reading '{}': {e}", src.display()))?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(src)
+            .map_err(|e| format!("Failed reading symlink '{}': {e}", src.display()))?;
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, dst)
+                .map_err(|e| format!("Failed creating symlink '{}': {e}", dst.display()))?;
+        }
+        #[cfg(windows)]
+        {
+            if src.is_dir() {
+                std::os::windows::fs::symlink_dir(&target, dst)
+                    .map_err(|e| format!("Failed creating dir symlink '{}': {e}", dst.display()))?;
+            } else {
+                std::os::windows::fs::symlink_file(&target, dst)
+                    .map_err(|e| format!("Failed creating file symlink '{}': {e}", dst.display()))?;
+            }
+        }
+        return Ok(());
+    }
+    if meta.is_dir() {
+        std::fs::create_dir_all(dst)
+            .map_err(|e| format!("Failed creating dir '{}': {e}", dst.display()))?;
+        for entry in std::fs::read_dir(src)
+            .map_err(|e| format!("Failed reading dir '{}': {e}", src.display()))?
+            .flatten()
+        {
+            copy_path_preserving_symlinks(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::copy(src, dst)
+        .map_err(|e| format!("Failed copying '{}': {e}", src.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dst, std::fs::Permissions::from_mode(meta.permissions().mode()));
+    }
+    Ok(())
+}
+
+fn replace_path_from_stage(src: &Path, dst: &Path) -> Result<(), String> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed creating parent '{}': {e}", parent.display()))?;
+    }
+    remove_path_any(dst)?;
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_path_preserving_symlinks(src, dst)?;
+            let _ = remove_path_any(src);
+            Ok(())
+        }
+    }
+}
+
+fn install_shift_unpacked_tree(
+    data_dir: &Path,
+    dest_dir: &Path,
+    unpacked_dir: &Path,
+    project_slug: &str,
+    project_kind: &str,
+    project_id: i64,
+) -> Result<(), String> {
+    let safe_slug = sanitize_project_folder(project_slug, project_id);
+    let container_stage = unpacked_dir.join("__webdep_container__");
+    if container_stage.is_dir() {
+        let target_container_dir = data_dir.join("containers").join(&safe_slug);
+        std::fs::create_dir_all(&target_container_dir)
+            .map_err(|e| format!("Failed creating container dir: {e}"))?;
+        for entry in std::fs::read_dir(&container_stage)
+            .map_err(|e| format!("Failed listing unpacked container dir: {e}"))?
+            .flatten()
+        {
+            let dst = target_container_dir.join(entry.file_name());
+            replace_path_from_stage(&entry.path(), &dst)?;
+        }
+        let _ = std::fs::remove_dir_all(&container_stage);
+    }
+
+    // Legacy compatibility: older archives may carry containers/<slug> under unpacked root
+    let legacy_container_stage = unpacked_dir.join("containers").join(&safe_slug);
+    if legacy_container_stage.is_dir() {
+        let target_container_dir = data_dir.join("containers").join(&safe_slug);
+        std::fs::create_dir_all(&target_container_dir)
+            .map_err(|e| format!("Failed creating legacy container dir: {e}"))?;
+        for entry in std::fs::read_dir(&legacy_container_stage)
+            .map_err(|e| format!("Failed listing legacy container dir: {e}"))?
+            .flatten()
+        {
+            let dst = target_container_dir.join(entry.file_name());
+            replace_path_from_stage(&entry.path(), &dst)?;
+        }
+        let _ = std::fs::remove_dir_all(&legacy_container_stage);
+        if let Ok(mut rem) = std::fs::read_dir(unpacked_dir.join("containers")) {
+            if rem.next().is_none() {
+                let _ = std::fs::remove_dir(unpacked_dir.join("containers"));
+            }
+        }
+    }
+
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("Failed creating target deploy_dir '{}': {e}", dest_dir.display()))?;
+    for entry in std::fs::read_dir(unpacked_dir)
+        .map_err(|e| format!("Failed listing unpacked root: {e}"))?
+        .flatten()
+    {
+        let dst = dest_dir.join(entry.file_name());
+        replace_path_from_stage(&entry.path(), &dst)?;
+    }
+
+    if project_kind != "service" {
+        let target_db_dir = data_dir.join("containers").join(&safe_slug).join("db");
+        let current_dir = dest_dir.join("current");
+        let app_dir = dest_dir.join("app");
+        if current_dir.is_dir() {
+            link_work_dir_to_db_dir(&current_dir, &target_db_dir);
+        } else if app_dir.is_dir() {
+            link_work_dir_to_db_dir(&app_dir, &target_db_dir);
+        }
+    }
+    Ok(())
 }
 
 pub fn allocate_free_port_on_node(preferred: Option<u16>, used_ports: &[u16]) -> Result<u16, String> {
@@ -2047,46 +2423,72 @@ async fn p2p_receive_shift_tar(
     AxPath(token): AxPath<String>,
     body: Body,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let token_clean = token.trim().to_string();
     let ticket = exec
-        .consume_p2p_ticket(token.trim())
+        .peek_p2p_ticket(&token_clean)
         .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid or expired P2P shift token".to_string()))?;
 
     let tmp_dir = exec.data_dir.join("tmp");
     let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-    let tmp_tgz = tmp_dir.join(format!("recv-{}.tar.gz", now_secs()));
-    let mut file = tokio::fs::File::create(&tmp_tgz)
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_archive = tmp_dir.join(format!("recv-{stamp}.archive"));
+    let unpack_stage = tmp_dir.join(format!("unpack-{stamp}"));
+    let mut file = tokio::fs::File::create(&tmp_archive)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed creating staging tar: {e}")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed creating staging archive: {e}")))?;
 
     let mut received_bytes = 0u64;
     let mut stream = body.into_data_stream();
     while let Some(chunk_res) = stream.next().await {
         let chunk = chunk_res.map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_tgz);
+            let _ = std::fs::remove_file(&tmp_archive);
             (StatusCode::BAD_REQUEST, format!("Stream read failed: {e}"))
         })?;
         received_bytes = received_bytes.saturating_add(chunk.len() as u64);
         if received_bytes > ticket.max_bytes {
-            let _ = tokio::fs::remove_file(&tmp_tgz).await;
+            let _ = tokio::fs::remove_file(&tmp_archive).await;
             return Err((StatusCode::PAYLOAD_TOO_LARGE, "Transfer exceeded ticket limit".to_string()));
         }
         if let Err(e) = file.write_all(&chunk).await {
-            let _ = tokio::fs::remove_file(&tmp_tgz).await;
+            let _ = tokio::fs::remove_file(&tmp_archive).await;
             return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Disk write failed: {e}")));
         }
     }
     let _ = file.flush().await;
     drop(file);
 
-    let tgz_c = tmp_tgz.clone();
-    let dest_c = ticket.dest_dir.clone();
-    let extracted_res = tokio::task::spawn_blocking(move || unpack_tar_gz_safe(&tgz_c, &dest_c))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Unpack worker failed: {e}")))?;
-    let _ = tokio::fs::remove_file(&tmp_tgz).await;
+    let archive_c = tmp_archive.clone();
+    let stage_c = unpack_stage.clone();
+    let data_dir_c = exec.data_dir.clone();
+    let ticket_c = ticket.clone();
+    let extracted_res = tokio::task::spawn_blocking(move || {
+        let extracted = unpack_archive_auto_safe(&archive_c, &stage_c)?;
+        install_shift_unpacked_tree(
+            &data_dir_c,
+            &ticket_c.dest_dir,
+            &stage_c,
+            &ticket_c.project_slug,
+            &ticket_c.project_kind,
+            ticket_c.project_id,
+        )?;
+        Ok::<u64, String>(extracted)
+    })
+    .await
+    .map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_archive);
+        let _ = std::fs::remove_dir_all(&unpack_stage);
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Unpack worker failed: {e}"))
+    })?;
+
+    let _ = tokio::fs::remove_file(&tmp_archive).await;
+    let _ = tokio::fs::remove_dir_all(&unpack_stage).await;
 
     let extracted_bytes = extracted_res.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    exec.remove_p2p_ticket(&token_clean).await;
     Ok(Json(json!({
         "ok": true,
         "bytesTransferred": received_bytes,
@@ -2095,10 +2497,10 @@ async fn p2p_receive_shift_tar(
     })))
 }
 
-pub async fn stream_tar_gz_to_target(
+pub async fn stream_archive_to_target(
     base_url: &str,
     token: &str,
-    tar_gz_path: &Path,
+    archive_path: &Path,
 ) -> Result<u64, String> {
     let trimmed = base_url.trim().trim_end_matches('/');
     let host_port = trimmed
@@ -2109,7 +2511,7 @@ pub async fn stream_tar_gz_to_target(
         None => (host_port, String::new()),
     };
 
-    let meta = tokio::fs::metadata(tar_gz_path)
+    let meta = tokio::fs::metadata(archive_path)
         .await
         .map_err(|e| format!("Failed reading staged archive: {e}"))?;
     let total_len = meta.len();
@@ -2119,16 +2521,26 @@ pub async fn stream_tar_gz_to_target(
         .map_err(|_| format!("Timed out connecting to P2P peer {host_hdr}"))?
         .map_err(|e| format!("TCP connect to {host_hdr} failed: {e}"))?;
 
+    let content_type = if archive_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false)
+    {
+        "application/zip"
+    } else {
+        "application/gzip"
+    };
     let req_path = format!("{path_prefix}/p2p/shift/{token}");
     let headers = format!(
-        "PUT {req_path} HTTP/1.1\r\nHost: {host_hdr}\r\nContent-Type: application/gzip\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
+        "PUT {req_path} HTTP/1.1\r\nHost: {host_hdr}\r\nContent-Type: {content_type}\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(headers.as_bytes())
         .await
         .map_err(|e| format!("Failed writing P2P HTTP request headers: {e}"))?;
 
-    let mut file = tokio::fs::File::open(tar_gz_path)
+    let mut file = tokio::fs::File::open(archive_path)
         .await
         .map_err(|e| format!("Failed opening archive for streaming: {e}"))?;
     tokio::io::copy(&mut file, &mut stream)
@@ -2386,14 +2798,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn p2p_shift_streams_tar_gz_directly_between_nodes() {
+    async fn p2p_shift_streams_zip_with_node_modules_and_container_data_between_nodes() {
         let src_data = temp_dir("webdep-p2p-src");
         let dst_data = temp_dir("webdep-p2p-dst");
         let src_site = src_data.join("sites/p2p-app");
-        std::fs::create_dir_all(src_site.join("current")).unwrap();
+        std::fs::create_dir_all(src_site.join("current/node_modules/pkg")).unwrap();
         std::fs::create_dir_all(src_site.join("backups/backup-1")).unwrap();
+        std::fs::create_dir_all(src_site.join("repo/.git")).unwrap();
+        std::fs::create_dir_all(src_data.join("containers/p2p-app/db")).unwrap();
+        std::fs::create_dir_all(src_data.join("containers/p2p-app/storage")).unwrap();
+        std::fs::create_dir_all(src_data.join("caddy")).unwrap();
+        std::fs::create_dir_all(src_data.join("keys")).unwrap();
         std::fs::write(src_site.join("current/app.js"), b"console.log('shifted');").unwrap();
+        std::fs::write(src_site.join("current/node_modules/pkg/index.js"), b"module.exports = 42;").unwrap();
         std::fs::write(src_site.join("backups/backup-1/note.txt"), b"snap").unwrap();
+        std::fs::write(src_site.join("repo/.git/pack.idx"), b"readonly-git-idx").unwrap();
+        if let Ok(mut perms) = std::fs::metadata(src_site.join("repo/.git/pack.idx")).map(|m| m.permissions()) {
+            perms.set_readonly(true);
+            let _ = std::fs::set_permissions(src_site.join("repo/.git/pack.idx"), perms);
+        }
+        std::fs::write(src_data.join("containers/p2p-app/db/app.db"), b"SQLite-data").unwrap();
+        std::fs::write(src_data.join("containers/p2p-app/storage/avatar.png"), b"PNGDATA").unwrap();
+        std::fs::write(src_data.join("caddy/p2p-app.caddy"), b":80 {}").unwrap();
+        std::fs::write(src_data.join("keys/deploy_key_99"), b"priv").unwrap();
 
         let src_exec = Arc::new(NodeExecState::new(src_data.clone(), test_manifest(Vec::new())));
         let dst_exec = Arc::new(NodeExecState::new(dst_data.clone(), test_manifest(Vec::new())));
@@ -2440,7 +2867,7 @@ mod tests {
             other => panic!("unexpected prepare_receive reply: {other:?}"),
         };
 
-        // 3. Source packs and streams .tar.gz directly to Target P2P HTTP receiver
+        // 3. Source packs and streams .zip directly to Target P2P HTTP receiver
         let push = execute_rpc(
             src_exec.clone(),
             "push-1".to_string(),
@@ -2450,7 +2877,7 @@ mod tests {
                 "token": token,
                 "targetUrls": [format!("http://127.0.0.1:{p2p_port}")],
             }),
-            tx,
+            tx.clone(),
         )
         .await;
         match push {
@@ -2461,17 +2888,112 @@ mod tests {
             other => panic!("unexpected push reply: {other:?}"),
         }
 
-        // Verify target extracted current/ and backups/ cleanly
+        // Verify target extracted current/, node_modules/, backups/, and container DB + storage
         assert_eq!(
             std::fs::read_to_string(target_dir.join("current/app.js")).unwrap(),
             "console.log('shifted');"
         );
         assert_eq!(
+            std::fs::read_to_string(target_dir.join("current/node_modules/pkg/index.js")).unwrap(),
+            "module.exports = 42;"
+        );
+        assert_eq!(
             std::fs::read_to_string(target_dir.join("backups/backup-1/note.txt")).unwrap(),
             "snap"
         );
+        assert_eq!(
+            std::fs::read_to_string(dst_data.join("containers/p2p-app/db/app.db")).unwrap(),
+            "SQLite-data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst_data.join("containers/p2p-app/storage/avatar.png")).unwrap(),
+            "PNGDATA"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join("current/data/app.db")).unwrap(),
+            "SQLite-data"
+        );
+
+        // 4. Clean up source ("before") node after successful transfer & verify all old files removed
+        let clean = execute_rpc(
+            src_exec.clone(),
+            "clean-1".to_string(),
+            "shift.cleanup_source".to_string(),
+            json!({
+                "project": proj,
+                "remainingProjects": [],
+                "removeFiles": true,
+            }),
+            tx,
+        )
+        .await;
+        match clean {
+            ClusterWsMessage::RpcResponse { ok: true, result, .. } => {
+                assert!(result["removedDirs"].as_u64().unwrap_or(0) >= 2);
+            }
+            other => panic!("unexpected cleanup reply: {other:?}"),
+        }
+        assert!(!src_site.exists(), "source site dir should be removed");
+        assert!(
+            !src_data.join("containers/p2p-app").exists(),
+            "source container dir should be removed without recreating empty dirs"
+        );
+        assert!(!src_data.join("caddy/p2p-app.caddy").exists());
+        assert!(!src_data.join("keys/deploy_key_99").exists());
+        // Target files remain intact
+        assert!(target_dir.join("current/app.js").exists());
+        assert!(dst_data.join("containers/p2p-app/db/app.db").exists());
 
         p2p_handle.abort();
+        let _ = std::fs::remove_dir_all(&src_data);
+        let _ = std::fs::remove_dir_all(&dst_data);
+    }
+
+    #[test]
+    fn install_shift_zip_restores_all_files_node_modules_and_container_db_offline() {
+        let src_data = temp_dir("webdep-inst-src");
+        let dst_data = temp_dir("webdep-inst-dst");
+        let src_site = src_data.join("sites/my-app");
+        std::fs::create_dir_all(src_site.join("current/node_modules/dep")).unwrap();
+        std::fs::create_dir_all(src_data.join("containers/my-app/db")).unwrap();
+        std::fs::create_dir_all(src_data.join("containers/my-app/storage")).unwrap();
+        std::fs::write(src_site.join("current/index.js"), b"ok").unwrap();
+        std::fs::write(src_site.join("current/node_modules/dep/lib.js"), b"dep").unwrap();
+        std::fs::write(src_data.join("containers/my-app/db/main.sqlite"), b"sqlite").unwrap();
+        std::fs::write(src_data.join("containers/my-app/storage/doc.pdf"), b"pdf").unwrap();
+
+        let zip_path = src_data.join("shift.zip");
+        pack_project_shift_to_zip(
+            &src_site,
+            Some(&src_data.join("containers/my-app")),
+            None,
+            &zip_path,
+        )
+        .unwrap();
+
+        let stage = dst_data.join("stage");
+        unpack_archive_auto_safe(&zip_path, &stage).unwrap();
+        let dst_site = dst_data.join("sites/my-app");
+        install_shift_unpacked_tree(&dst_data, &dst_site, &stage, "my-app", "website", 7).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dst_site.join("current/index.js")).unwrap(), "ok");
+        assert_eq!(
+            std::fs::read_to_string(dst_site.join("current/node_modules/dep/lib.js")).unwrap(),
+            "dep"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst_data.join("containers/my-app/db/main.sqlite")).unwrap(),
+            "sqlite"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst_data.join("containers/my-app/storage/doc.pdf")).unwrap(),
+            "pdf"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst_site.join("current/data/main.sqlite")).unwrap(),
+            "sqlite"
+        );
+
         let _ = std::fs::remove_dir_all(&src_data);
         let _ = std::fs::remove_dir_all(&dst_data);
     }

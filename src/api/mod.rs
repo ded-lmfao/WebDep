@@ -172,6 +172,19 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/cluster/nodes/:id/drain", post(drain_cluster_node_handler))
         .route("/api/cluster/nodes/:id/evacuate", post(evacuate_cluster_node_handler))
         .route("/api/cluster/nodes/:id", delete(delete_cluster_node_handler))
+        .route("/api/cluster/modules", get(list_cluster_modules_handler))
+        .route(
+            "/api/cluster/modules/install-fleet",
+            post(install_fleet_modules_handler),
+        )
+        .route(
+            "/api/cluster/nodes/:id/modules/refresh",
+            post(refresh_node_modules_handler),
+        )
+        .route(
+            "/api/cluster/nodes/:id/modules/install",
+            post(install_node_modules_handler),
+        )
         .route("/api/cluster/fleet-update", post(fleet_update_handler))
         // Live App Shifting (`Move to Node`)
         .route("/api/projects/:id/move", post(move_project_handler))

@@ -72,6 +72,10 @@ pub struct NodeCapabilities {
     pub has_postgres: bool,
     #[serde(default)]
     pub p2p_port: Option<u16>,
+    #[serde(default)]
+    pub package_manager: String,
+    #[serde(default)]
+    pub modules: Vec<super::modules::NodeModuleStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -37,15 +37,35 @@ fn copy_dir_files_if_missing(src_dir: &Path, dst_dir: &Path) {
 
 
 
-pub fn ensure_container_with_port(p: &Project, port: u16) -> WebsiteContainer {
+pub fn resolve_data_dir() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Ok(val) = std::env::var("DATA_DIR") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            let p = Path::new(trimmed);
+            if p.is_absolute() {
+                return p.to_path_buf();
+            }
+            let clean = trimmed.trim_start_matches("./").trim_start_matches(".\\");
+            return cwd.join(clean);
+        }
+    }
+    cwd.join("data")
+}
+
+pub fn ensure_container_with_port(p: &Project, port: u16) -> WebsiteContainer {
+    let data_dir = resolve_data_dir();
+    ensure_container_in_data_dir(&data_dir, p, port)
+}
+
+pub fn ensure_container_in_data_dir(data_dir: &Path, p: &Project, port: u16) -> WebsiteContainer {
     let safe_slug = if p.slug.trim().is_empty() {
         format!("site-{}", p.id)
     } else {
         p.slug.trim().to_string()
     };
 
-    let root_dir = cwd.join("data").join("containers").join(&safe_slug);
+    let root_dir = data_dir.join("containers").join(&safe_slug);
     let db_dir = root_dir.join("db");
     let storage_dir = root_dir.join("storage");
     let tmp_dir = root_dir.join("tmp");
@@ -60,7 +80,7 @@ pub fn ensure_container_with_port(p: &Project, port: u16) -> WebsiteContainer {
     let _ = std::fs::create_dir_all(&cache_dir);
     let _ = std::fs::create_dir_all(&run_dir);
 
-    let legacy_app_data = cwd.join("data").join("app-data").join(&safe_slug);
+    let legacy_app_data = data_dir.join("app-data").join(&safe_slug);
     if legacy_app_data.is_dir() {
         copy_dir_files_if_missing(&legacy_app_data, &db_dir);
     }
@@ -87,66 +107,196 @@ pub fn ensure_container_with_port(p: &Project, port: u16) -> WebsiteContainer {
     container
 }
 
-pub fn cleanup_project_files_dirs(p: &Project, remaining_projects: &[Project]) {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let safe_slug = p.slug.trim().to_string();
-
-    let key_dir = cwd.join("data").join("keys");
-    let _ = std::fs::remove_file(key_dir.join(format!("deploy_key_{}", p.id)));
-    let _ = std::fs::remove_file(key_dir.join(format!("deploy_key_{}.pub", p.id)));
-
-    if safe_slug.is_empty() || safe_slug.contains("..") || safe_slug.contains('/') || safe_slug.contains('\\') {
-        return;
-    }
-
-    let slug_shared = remaining_projects
-        .iter()
-        .any(|other| other.id != p.id && other.slug.trim().eq_ignore_ascii_case(&safe_slug));
-    if slug_shared {
-        return;
-    }
-
-    let container_root = cwd.join("data").join("containers").join(&safe_slug);
-    if container_root.exists() {
-        let _ = std::fs::remove_dir_all(&container_root);
-    }
-    let legacy_app_data = cwd.join("data").join("app-data").join(&safe_slug);
-    if legacy_app_data.exists() {
-        let _ = std::fs::remove_dir_all(&legacy_app_data);
-    }
-
-    let mut dirs_to_remove = vec![cwd.join("data").join("sites").join(&safe_slug)];
-    let dep_trimmed = p.deploy_dir.trim();
-    if !dep_trimmed.is_empty() {
-        let dep_path = PathBuf::from(dep_trimmed);
-        let ends_with_slug = dep_path
-            .file_name()
-            .map(|n| n.to_string_lossy().eq_ignore_ascii_case(&safe_slug))
-            .unwrap_or(false);
-        let dir_shared = remaining_projects
-            .iter()
-            .any(|other| other.id != p.id && other.deploy_dir.trim() == dep_trimmed);
-        if ends_with_slug && !dir_shared && dep_path.components().count() >= 3 {
-            dirs_to_remove.push(dep_path);
+fn clear_readonly_recursive(path: &Path) {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return;
         }
-    }
-
-    for dir in dirs_to_remove {
-        if dir.exists() || std::fs::symlink_metadata(&dir).is_ok() {
-            #[cfg(windows)]
-            {
-                let current_link = dir.join("current");
-                let cur_str = current_link.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-                let _ = std::process::Command::new("cmd").args(["/C", "rmdir", &cur_str]).output();
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+        if meta.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    clear_readonly_recursive(&entry.path());
+                }
             }
-            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
 
+fn force_remove_dir_all(dir: &Path) -> Result<bool, String> {
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return Ok(false);
+    };
+    if meta.file_type().is_symlink() {
+        #[cfg(windows)]
+        {
+            if std::fs::remove_dir(dir).is_ok() || std::fs::remove_file(dir).is_ok() {
+                return Ok(true);
+            }
+        }
+        #[cfg(unix)]
+        {
+            if std::fs::remove_file(dir).is_ok() {
+                return Ok(true);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        for link_name in ["current", "app"] {
+            let link = dir.join(link_name);
+            let cur_str = link.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "rmdir", &cur_str])
+                .output();
+            if let Ok(lmeta) = std::fs::symlink_metadata(&link) {
+                if lmeta.is_dir() {
+                    let data_link = link.join("data");
+                    let d_str = data_link.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "rmdir", &d_str])
+                        .output();
+                }
+            }
+        }
+    }
+
+    if let Err(first_err) = std::fs::remove_dir_all(dir) {
+        clear_readonly_recursive(dir);
+        if let Err(second_err) = std::fs::remove_dir_all(dir) {
+            return Err(format!(
+                "Failed removing '{}' ({}; retry: {})",
+                dir.display(),
+                first_err,
+                second_err
+            ));
+        }
+    }
+    Ok(true)
+}
+
+pub fn cleanup_project_files_dirs(p: &Project, remaining_projects: &[Project]) {
+    let data_dir = resolve_data_dir();
+    cleanup_project_files_dirs_in_data_dir(&data_dir, p, remaining_projects);
+}
+
+pub fn cleanup_project_files_dirs_in_data_dir(
+    data_dir: &Path,
+    p: &Project,
+    remaining_projects: &[Project],
+) {
+    let _ = cleanup_project_files_dirs_in_data_dir_checked(data_dir, p, remaining_projects);
+}
+
+pub fn cleanup_project_files_dirs_in_data_dir_checked(
+    data_dir: &Path,
+    p: &Project,
+    remaining_projects: &[Project],
+) -> Result<usize, String> {
+    let raw_slug = p.slug.trim().to_string();
+    let clean_slug: String = raw_slug
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+
+    let key_dir = data_dir.join("keys");
+    let _ = std::fs::remove_file(key_dir.join(format!("deploy_key_{}", p.id)));
+    let _ = std::fs::remove_file(key_dir.join(format!("deploy_key_{}.pub", p.id)));
+
+    if raw_slug.is_empty()
+        || raw_slug.contains("..")
+        || raw_slug.contains('/')
+        || raw_slug.contains('\\')
+    {
+        return Ok(0);
+    }
+
+    let slug_shared = remaining_projects.iter().any(|other| {
+        if other.id == p.id {
+            return false;
+        }
+        let o_raw = other.slug.trim();
+        let o_clean: String = o_raw
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        o_raw.eq_ignore_ascii_case(&raw_slug)
+            || (!clean_slug.is_empty() && o_clean.eq_ignore_ascii_case(&clean_slug))
+    });
+    if slug_shared {
+        return Ok(0);
+    }
+
+    let mut dirs_to_remove: Vec<PathBuf> = Vec::new();
+    let mut slug_variants = vec![raw_slug.clone()];
+    if !clean_slug.is_empty() && clean_slug != raw_slug {
+        slug_variants.push(clean_slug.clone());
+    }
+    for s in &slug_variants {
+        dirs_to_remove.push(data_dir.join("containers").join(s));
+        dirs_to_remove.push(data_dir.join("app-data").join(s));
+        dirs_to_remove.push(data_dir.join("sites").join(s));
+        dirs_to_remove.push(data_dir.join("services").join(s));
+    }
+
+    let dep_trimmed = p.deploy_dir.trim();
+    if !dep_trimmed.is_empty() {
+        let dir_shared = remaining_projects
+            .iter()
+            .any(|other| other.id != p.id && other.deploy_dir.trim() == dep_trimmed);
+        if !dir_shared {
+            let mut candidate_paths = vec![PathBuf::from(dep_trimmed)];
+            let norm = dep_trimmed.replace('\\', "/");
+            if let Some(rel) = norm.strip_prefix("./data/").or_else(|| norm.strip_prefix("data/")) {
+                candidate_paths.push(data_dir.join(rel));
+            }
+            for dep_path in candidate_paths {
+                let ends_with_slug = dep_path
+                    .file_name()
+                    .map(|n| {
+                        let ns = n.to_string_lossy();
+                        ns.eq_ignore_ascii_case(&raw_slug)
+                            || (!clean_slug.is_empty() && ns.eq_ignore_ascii_case(&clean_slug))
+                    })
+                    .unwrap_or(false);
+                if ends_with_slug
+                    && (dep_path.components().count() >= 3 || dep_path.starts_with(data_dir))
+                    && !dirs_to_remove.contains(&dep_path)
+                {
+                    dirs_to_remove.push(dep_path);
+                }
+            }
+        }
+    }
+
+    let mut removed_count = 0usize;
+    let mut errors = Vec::new();
+    for dir in dirs_to_remove {
+        match force_remove_dir_all(&dir) {
+            Ok(true) => removed_count += 1,
+            Ok(false) => {}
+            Err(e) => errors.push(e),
+        }
+    }
+    if errors.is_empty() {
+        Ok(removed_count)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 pub fn link_work_dir_to_container_dir(work_dir: &Path, container: &WebsiteContainer) {
+    link_work_dir_to_db_dir(work_dir, &container.db_dir);
+}
+
+pub fn link_work_dir_to_db_dir(work_dir: &Path, target_db_dir: &Path) {
     let data_subdir = work_dir.join("data");
-    let target_db_dir = &container.db_dir;
+    let _ = std::fs::create_dir_all(target_db_dir);
 
     if let Ok(meta) = std::fs::symlink_metadata(&data_subdir) {
         if meta.is_dir() && !meta.file_type().is_symlink() {

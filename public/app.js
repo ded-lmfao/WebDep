@@ -27,6 +27,7 @@ import { loadMonitorView } from './js/settings.js';
 import './js/files.js';
 import './js/logs.js';
 import './js/cluster.js';
+import './js/modules.js';
 
 // ============================================================================
 // Global Polling & Live Updates (Low Resource & Page Visibility Aware)
@@ -51,6 +52,8 @@ async function pollTick() {
 
     if (state.currentView === 'nodes') {
       if (window.loadNodesView) await window.loadNodesView();
+    } else if (state.currentView === 'modules') {
+      if (window.loadModulesView) await window.loadModulesView();
     } else if (state.currentView === 'services') {
       renderServicesList();
     } else if (state.currentView === 'projects') {
