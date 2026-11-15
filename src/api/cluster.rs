@@ -99,6 +99,46 @@ pub(crate) async fn list_cluster_nodes_handler(
     Ok(Json(nodes))
 }
 
+async fn resume_running_workloads_on_node(state: &AppState, node_id: i64) {
+    let Ok(projects) = state.projects.list_for_node(node_id).await else {
+        return;
+    };
+    for p in projects.into_iter().filter(|p| p.app_status == "running") {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        match state
+            .cluster
+            .call_node(
+                node_id,
+                "project.resume",
+                serde_json::json!({ "project": &p, "context": ctx }),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+        {
+            Ok(v) if v["started"].as_bool() == Some(true) => {
+                let pid = v["pid"].as_i64();
+                let _ = sqlx::query("UPDATE projects SET app_pid = $1, app_started_at = $2 WHERE id = $3")
+                    .bind(pid)
+                    .bind(crate::db::now())
+                    .bind(p.id)
+                    .execute(&state.db)
+                    .await;
+                state.cache.invalidate_all();
+            }
+            Ok(_) => {}
+            Err((_, e)) => {
+                state.logs.add(
+                    Some(p.id),
+                    None,
+                    "system",
+                    "warn",
+                    &format!("Could not resume '{}' on node #{node_id} after it reconnected: {e}", p.name),
+                );
+            }
+        }
+    }
+}
+
 fn redact_node_network_details(n: &mut ClusterNode) {
     n.public_ip.clear();
     n.wg_pubkey.clear();
@@ -617,6 +657,8 @@ pub(crate) async fn node_ws_handler(
     let cluster = state.cluster.clone();
     let logs = state.logs.clone();
     let cache = state.cache.clone();
+    let resume_state = state.clone();
+    let node_is_local = node.is_local;
     tokio::spawn(async move {
         let Ok(ws) = rx.await else {
             return;
@@ -627,6 +669,16 @@ pub(crate) async fn node_ws_handler(
 
         cluster.register_peer_sender(node_id, tx).await;
         let _ = cluster.send_peer_sync_to(node_id).await;
+
+        // A remote Web-Node that restarted (reboot, crash, upgrade) has lost its app processes while the
+        // Core still lists them as running. Ask it to bring them back; it skips apps that are alive.
+        // (Apps on the Core's own node are resumed by the Core runtime at startup.)
+        if !node_is_local {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                resume_running_workloads_on_node(&resume_state, node_id).await;
+            });
+        }
 
         let writer_handle = tokio::spawn(async move {
             while let Some(msg) = out_rx.recv().await {

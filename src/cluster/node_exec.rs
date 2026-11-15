@@ -80,7 +80,7 @@ pub struct NodeExecState {
     pub maintenance_shutdowns: Arc<Mutex<HashMap<i64, oneshot::Sender<()>>>>,
     pub env_cache: RwLock<HashMap<i64, HashMap<String, String>>>,
     pub deploy_queue: Arc<tokio::sync::Semaphore>,
-    pub monitor: Monitor,
+    pub monitor: Arc<Monitor>,
     pub manifest: RwLock<NodeStateManifest>,
     pub p2p_port: AtomicU16,
     pub p2p_tokens: RwLock<HashMap<String, P2pTransferTicket>>,
@@ -96,7 +96,7 @@ impl NodeExecState {
             maintenance_shutdowns: Arc::new(Mutex::new(HashMap::new())),
             env_cache: RwLock::new(HashMap::new()),
             deploy_queue: Arc::new(tokio::sync::Semaphore::new(1)),
-            monitor: Monitor::new(),
+            monitor: Arc::new(Monitor::new()),
             manifest: RwLock::new(manifest),
             p2p_port: AtomicU16::new(0),
             p2p_tokens: RwLock::new(HashMap::new()),
@@ -957,6 +957,41 @@ pub async fn execute_rpc(
             apply_and_cache_context(&exec, &p, ctx.clone()).await;
             match start_project_local(&exec, &p, ctx.env, None, &ws_tx).await {
                 Ok(pid) => ok_resp(req_id, json!({ "ok": true, "pid": pid })),
+                Err(e) => {
+                    let status = if e == "NOT_DEPLOYED_YET" { 409 } else { 500 };
+                    err_resp(req_id, status, e)
+                }
+            }
+        }
+        "project.resume" => {
+            // Sent by the Core when this node (re)connects, for projects the Core believes are running.
+            // Start only if the process is really gone, so a brief reconnect never restarts a healthy app.
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let ctx: RemoteContextPayload = serde_json::from_value(params["context"].clone()).unwrap_or_default();
+            apply_and_cache_context(&exec, &p, ctx.clone()).await;
+            let tracked_alive = exec
+                .processes
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&p.id).and_then(|c| c.id()))
+                .map(is_pid_alive)
+                .unwrap_or(false);
+            if tracked_alive {
+                // Just a reconnect: this Web-Node instance still supervises the app.
+                return ok_resp(req_id, json!({ "ok": true, "started": false }));
+            }
+            // Processes left behind by a previous Web-Node instance may still hold the port, but their
+            // stdout/stderr pipes died with that instance (no logs, and many servers fail on the next
+            // write). Stop any leftovers for this project and start it fresh under supervision.
+            let leftover_pids: Vec<u32> = p.app_pid.filter(|&pid| pid > 0).into_iter().collect();
+            let _ = kill_project_processes_pure(p.id, &p.slug, &p.deploy_dir, p.port, &leftover_pids, None).await;
+            match start_project_local(&exec, &p, ctx.env, None, &ws_tx).await {
+                Ok(pid) => {
+                    send_log(&ws_tx, Some(p.id), None, "system", "info", &format!("Resumed '{}' after Web-Node restart (PID {pid})", p.name));
+                    ok_resp(req_id, json!({ "ok": true, "started": true, "pid": pid }))
+                }
                 Err(e) => {
                     let status = if e == "NOT_DEPLOYED_YET" { 409 } else { 500 };
                     err_resp(req_id, status, e)

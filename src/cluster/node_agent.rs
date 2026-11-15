@@ -268,6 +268,9 @@ pub async fn run_node_agent(data_dir: PathBuf) {
 
     reconcile_mesh_network(&manifest, &data_dir).await;
     let exec_state = Arc::new(NodeExecState::new(data_dir.clone(), manifest.clone()));
+    // Per-process CPU/RAM for workloads on this node needs periodic samples (demand-driven:
+    // near-idle until the panel asks for usage). Without it remote apps report 0 B / 0%.
+    exec_state.monitor.start_background_sampler();
     let p2p_bind_host = std::env::var("WEBDEP_NODE_P2P_BIND")
         .ok()
         .filter(|s| !s.trim().is_empty())
