@@ -13,6 +13,7 @@ MODE="${1:-foreground}"
 ROLE_MODE="standalone"
 INSTALL_SERVICE=0
 DAEMON_MODE=0
+BUILD_FROM_SOURCE=0
 JOIN_URL=""
 JOIN_TOKEN=""
 NODE_NAME=""
@@ -26,6 +27,7 @@ for ((i=1; i<=$#; i++)); do
         --node) ROLE_MODE="node" ;;
         --service|service) INSTALL_SERVICE=1 ;;
         --daemon|-d|daemon|start) DAEMON_MODE=1 ;;
+        --source|--build) BUILD_FROM_SOURCE=1 ;;
         --join) next=$((i+1)); JOIN_URL="${!next:-}"; i=$next ;;
         --token) next=$((i+1)); JOIN_TOKEN="${!next:-}"; i=$next ;;
         --name) next=$((i+1)); NODE_NAME="${!next:-}"; i=$next ;;
@@ -188,10 +190,14 @@ if grep -q "^HOST=127.0.0.1" .env 2>/dev/null; then
     sed -i 's/^HOST=127.0.0.1/HOST=0.0.0.0/' .env
 fi
 
-# Download prebuilt GitHub Release binary when missing; fallback to source build if no release exists
-if [[ ! -f "target/release/webdep" ]]; then
-    if ! install_release_binary; then
-        echo "[*] Prebuilt release unavailable; falling back to local Cargo compilation..."
+# Build from local source when --source/--build is requested, or download prebuilt GitHub Release when missing
+if [[ "$BUILD_FROM_SOURCE" == "1" || ! -f "target/release/webdep" ]]; then
+    if [[ "$BUILD_FROM_SOURCE" == "1" ]] || ! install_release_binary; then
+        if [[ "$BUILD_FROM_SOURCE" == "1" ]]; then
+            echo "[*] --source requested: building release binary from local source code..."
+        else
+            echo "[*] Prebuilt release unavailable; falling back to local Cargo compilation..."
+        fi
         if ! command -v cargo >/dev/null 2>&1; then
             echo "[*] Rust (cargo) not found. Installing build essentials & Rust toolchain..."
             if command -v apt-get >/dev/null 2>&1; then
@@ -204,7 +210,8 @@ if [[ ! -f "target/release/webdep" ]]; then
             source "$HOME/.cargo/env"
         fi
         echo "[*] Compiling optimized Linux release binary (target/release/webdep)..."
-        cargo build --release
+        [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+        CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" cargo build --release
     fi
 fi
 
