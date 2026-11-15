@@ -431,16 +431,12 @@ impl Runtime {
                 Err(_) => return false,
             };
             if let Some(child) = map.get_mut(&project_id) {
+                // Report only. The supervisor removes exited children and decides whether to restart
+                // them; removing here (status polls run constantly) would hide crashes from it.
+                // tokio caches the exit status, so the supervisor's own try_wait still sees it.
                 match child.try_wait() {
-                    Ok(Some(_status)) => {
-                        map.remove(&project_id);
-                        Some(false)
-                    }
+                    Ok(Some(_)) | Err(_) => Some(false),
                     Ok(None) => Some(true),
-                    Err(_) => {
-                        map.remove(&project_id);
-                        Some(false)
-                    }
                 }
             } else {
                 None

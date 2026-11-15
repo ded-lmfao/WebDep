@@ -43,7 +43,7 @@ pub(crate) async fn get_app_logs_handler(
 #[derive(Deserialize)]
 pub(crate) struct LogsQuery {
     project: Option<i64>,
-    #[allow(dead_code)]
+    /// Log channel to list (`app` by default; e.g. `system`, `deployment`, `health`; `all` for every channel).
     channel: Option<String>,
     level: Option<String>,
     backlog: Option<usize>,
@@ -61,14 +61,12 @@ pub(crate) async fn list_logs_handler(
     };
     let _actor = verify_power(&state, &headers, "logs", Some(pid)).await?;
     let limit = q.limit.or(q.backlog).unwrap_or(300).min(2000);
-    let logs = state.logs.list(
-        Some(pid),
-        None,
-        Some("app"),
-        q.level.as_deref(),
-        limit,
-    )
-    .await;
+    let channel = match q.channel.as_deref().map(str::trim) {
+        None | Some("") => Some("app"),
+        Some(c) if c.eq_ignore_ascii_case("all") => None,
+        Some(c) => Some(c),
+    };
+    let logs = state.logs.list(Some(pid), None, channel, q.level.as_deref(), limit).await;
     Ok(Json(logs))
 }
 
