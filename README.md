@@ -246,6 +246,7 @@ WebDep loads configuration from `.env` in the process's current working director
 | `PUBLIC_IP` | *(auto-detected)* | Optional override for Core panel IP returned by `/api/cluster/panel-info`. |
 | `WEBDEP_NODE_P2P_BIND` | `0.0.0.0` | Bind address for Web-Node's direct P2P archive receiver. |
 | `WEBDEP_NODE_P2P_PORT` | `0` *(ephemeral)* | TCP port for Web-Node's direct P2P HTTP receiver (`0` picks a free port). |
+| `WEBDEP_MANAGE_FIREWALL` | `true` | Set to `false` to stop WebDep from editing UFW/iptables (panel, app, database and WireGuard mesh rules). Use it when the host firewall is managed elsewhere. |
 | `RUST_LOG` | `webdep=info` | Tracing log filter (`debug`, `info`, `warn`, `error`). |
 
 ---

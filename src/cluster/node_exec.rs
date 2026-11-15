@@ -540,14 +540,27 @@ async fn run_remote_deploy_task(
     });
 
     let repo_dir = Path::new(&p.deploy_dir).join("repo");
-    let fetch_res = tokio::task::spawn_blocking({
-        let url = p.repo_url.clone();
-        let rd = repo_dir.clone();
-        let br = p.branch.clone();
-        move || Git::clone_or_fetch(&url, &rd, &br)
-    })
-    .await
-    .unwrap_or_else(|e| Err(e.to_string()));
+    let local_source = crate::git::is_local_source(&p.repo_url);
+    let fetch_res = if local_source {
+        send_log(
+            &ws_tx,
+            Some(p.id),
+            Some(dep_id),
+            "deployment",
+            "info",
+            "No Git repository configured: deploying the files uploaded in the Files tab",
+        );
+        Ok(())
+    } else {
+        tokio::task::spawn_blocking({
+            let url = p.repo_url.clone();
+            let rd = repo_dir.clone();
+            let br = p.branch.clone();
+            move || Git::clone_or_fetch(&url, &rd, &br)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
+    };
 
     if let Err(e) = fetch_res {
         send_log(&ws_tx, Some(p.id), Some(dep_id), "github", "error", &format!("Git fetch failed: {e}"));
@@ -562,9 +575,11 @@ async fn run_remote_deploy_task(
     }
 
     let poll_ts = now_secs();
-    let head = match requested_sha.filter(|s| !s.trim().is_empty()) {
-        Some(s) => s,
-        None => match Git::resolve_head(&repo_dir) {
+    let local_commit = local_source.then(|| crate::git::local_snapshot_commit(poll_ts));
+    let head = match (local_commit.as_ref(), requested_sha.filter(|s| !s.trim().is_empty())) {
+        (Some(c), _) => c.sha.clone(),
+        (None, Some(s)) => s,
+        (None, None) => match Git::resolve_head(&repo_dir) {
             Ok(h) => h,
             Err(e) => {
                 emit_state(DeployStateUpdate {
@@ -592,8 +607,21 @@ async fn run_remote_deploy_task(
     let mut release_dir = Path::new(&p.deploy_dir)
         .join("releases")
         .join(format!("rel-{dep_id}"));
-    if let Err(e) = Git::checkout(&repo_dir, &head, &release_dir) {
-        send_log(&ws_tx, Some(p.id), Some(dep_id), "deployment", "error", &format!("Checkout error: {e}"));
+    let prepared = if local_source {
+        let app_dir = Path::new(&p.deploy_dir).join("app");
+        if is_service {
+            // Manual services run straight from their persistent `app/` folder.
+            let _ = tokio::fs::create_dir_all(&app_dir).await;
+            release_dir = app_dir;
+            Ok(())
+        } else {
+            crate::git::snapshot_local_files(&app_dir, &release_dir)
+        }
+    } else {
+        Git::checkout(&repo_dir, &head, &release_dir).map_err(|e| format!("Checkout error: {e}"))
+    };
+    if let Err(e) = prepared {
+        send_log(&ws_tx, Some(p.id), Some(dep_id), "deployment", "error", &e);
         emit_state(DeployStateUpdate {
             deployment_id: dep_id,
             project_id: p.id,
@@ -604,7 +632,7 @@ async fn run_remote_deploy_task(
         return;
     }
 
-    if is_service {
+    if is_service && !local_source {
         let app_dir = Path::new(&p.deploy_dir).join("app");
         if let Err(e) = merge_copy_dir(&release_dir, &app_dir) {
             emit_state(DeployStateUpdate {
@@ -620,12 +648,14 @@ async fn run_remote_deploy_task(
         release_dir = app_dir;
     }
 
-    let commit_info = Git::get_commit_info(&repo_dir, &head).unwrap_or(CommitInfo {
-        sha: head.clone(),
-        short_sha: head[..7.min(head.len())].to_string(),
-        author: "System".to_string(),
-        date: now_secs(),
-        message: "Deploy".to_string(),
+    let commit_info = local_commit.unwrap_or_else(|| {
+        Git::get_commit_info(&repo_dir, &head).unwrap_or(CommitInfo {
+            sha: head.clone(),
+            short_sha: head[..7.min(head.len())].to_string(),
+            author: "System".to_string(),
+            date: now_secs(),
+            message: "Deploy".to_string(),
+        })
     });
 
     emit_state(DeployStateUpdate {

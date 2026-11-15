@@ -31,6 +31,38 @@ fn copy_dir_all(src: &Path, dst: &Path, skip_git: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// True when a project has no Git remote and its files are managed through the Files tab
+/// (the panel stores `local` as the repository URL for these projects).
+pub fn is_local_source(repo_url: &str) -> bool {
+    let t = repo_url.trim();
+    t.is_empty() || t.eq_ignore_ascii_case("local")
+}
+
+/// Commit metadata recorded for a deployment of manually managed files.
+pub fn local_snapshot_commit(now: i64) -> CommitInfo {
+    CommitInfo {
+        sha: format!("local-{now}"),
+        short_sha: "local".to_string(),
+        author: "Files tab".to_string(),
+        date: now,
+        message: "Snapshot of files uploaded in the Files tab".to_string(),
+    }
+}
+
+/// Copy the manually managed `app/` folder into a release directory.
+pub fn snapshot_local_files(app_dir: &Path, destination_dir: &Path) -> Result<(), String> {
+    let has_files = std::fs::read_dir(app_dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if !has_files {
+        return Err(
+            "No files to deploy yet. This project has no Git repository: upload your files in the Files tab, then deploy again."
+                .to_string(),
+        );
+    }
+    copy_dir_all(app_dir, destination_dir, true)
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct StoredGithubToken {
     #[serde(default)]

@@ -55,7 +55,16 @@ impl Deployer {
         // Stage 1: Fetching
         self.update_stage(dep_id, "fetching").await;
         let repo_dir = Path::new(&p.deploy_dir).join("repo");
-        if let Err(e) = Git::clone_or_fetch(&p.repo_url, &repo_dir, &p.branch) {
+        let local_source = crate::git::is_local_source(&p.repo_url);
+        if local_source {
+            self.logs.add(
+                Some(p.id),
+                Some(dep_id),
+                "deployment",
+                "info",
+                "No Git repository configured: deploying the files uploaded in the Files tab",
+            );
+        } else if let Err(e) = Git::clone_or_fetch(&p.repo_url, &repo_dir, &p.branch) {
             self.logs.add(Some(p.id), Some(dep_id), "github", "error", &format!("Git fetch failed: {}", e));
             self.finish_deployment(dep_id, "failed", Some(&e)).await;
             return;
@@ -77,9 +86,12 @@ impl Deployer {
                 .flatten()
                 .filter(|s| !s.trim().is_empty());
 
-        let head = match requested_sha {
-            Some(sha) => sha,
-            None => match Git::resolve_head(&repo_dir) {
+        // Commit dates are Unix seconds (as reported by `git log --format=%at`).
+        let local_commit = local_source.then(|| crate::git::local_snapshot_commit(now() / 1000));
+        let head = match (local_commit.as_ref(), requested_sha) {
+            (Some(c), _) => c.sha.clone(),
+            (None, Some(sha)) => sha,
+            (None, None) => match Git::resolve_head(&repo_dir) {
                 Ok(h) => h,
                 Err(e) => {
                     self.finish_deployment(dep_id, "failed", Some(&e)).await;
@@ -92,7 +104,18 @@ impl Deployer {
         self.update_stage(dep_id, "pulling").await;
         let is_service = p.project_kind == "service";
         let mut release_dir = Path::new(&p.deploy_dir).join("releases").join(format!("rel-{}", dep_id));
-        if let Err(e) = Git::checkout(&repo_dir, &head, &release_dir) {
+        if local_source {
+            let app_dir = Path::new(&p.deploy_dir).join("app");
+            if is_service {
+                // Manual services run straight from their persistent `app/` folder.
+                let _ = tokio::fs::create_dir_all(&app_dir).await;
+                release_dir = app_dir;
+            } else if let Err(e) = crate::git::snapshot_local_files(&app_dir, &release_dir) {
+                self.logs.add(Some(p.id), Some(dep_id), "deployment", "error", &e);
+                self.finish_deployment(dep_id, "failed", Some(&e)).await;
+                return;
+            }
+        } else if let Err(e) = Git::checkout(&repo_dir, &head, &release_dir) {
             self.logs.add(Some(p.id), Some(dep_id), "deployment", "error", &format!("Checkout error: {}", e));
             self.finish_deployment(dep_id, "failed", Some(&e)).await;
             return;
@@ -100,7 +123,7 @@ impl Deployer {
 
         // Backend services: merge only the changed/tracked files into the persistent `app/` folder.
         // Untracked files (.env, local configs, databases, uploads) are never deleted or overwritten.
-        if is_service {
+        if is_service && !local_source {
             let app_dir = Path::new(&p.deploy_dir).join("app");
             if let Err(e) = merge_copy_dir(&release_dir, &app_dir) {
                 self.logs.add(Some(p.id), Some(dep_id), "deployment", "error", &format!("Merge error: {}", e));
@@ -118,13 +141,13 @@ impl Deployer {
             release_dir = app_dir;
         }
 
-        let commit_info = Git::get_commit_info(&repo_dir, &head).unwrap_or(CommitInfo {
+        let commit_info = local_commit.unwrap_or_else(|| Git::get_commit_info(&repo_dir, &head).unwrap_or(CommitInfo {
             sha: head.clone(),
             short_sha: head[..7.min(head.len())].to_string(),
             author: "System".to_string(),
             date: now(),
             message: "Deploy".to_string(),
-        });
+        }));
 
         // Insert release record
         let release_id: i64 = sqlx::query_scalar(

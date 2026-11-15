@@ -574,10 +574,12 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
   const accessMode = document.getElementById('website-access-mode')?.value || 'local';
   const allowedIps = document.getElementById('website-allowed-ips')?.value.trim() || '';
   const selectedNodeVal = document.getElementById('website-node-id')?.value;
+  const projectType = document.querySelector('#preset-buttons .preset-chip.active')?.getAttribute('data-type') || 'node';
 
   const payload = {
     name,
     slug,
+    project_type: projectType,
     repo_url: repoUrl,
     branch: document.getElementById('website-branch')?.value.trim() || 'main',
     domains,

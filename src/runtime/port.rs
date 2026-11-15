@@ -7,11 +7,25 @@ use super::Runtime;
 
 static PORT_PIDS_CACHE: OnceLock<Mutex<HashMap<u16, (Instant, Vec<u32>)>>> = OnceLock::new();
 
+/// Whether WebDep may edit the host firewall (UFW / iptables).
+///
+/// Enabled by default (upstream behaviour). Set `WEBDEP_MANAGE_FIREWALL=false` on hosts where the
+/// firewall is managed elsewhere or where other services share the machine, so WebDep never
+/// changes which ports are reachable.
+pub fn firewall_management_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("WEBDEP_MANAGE_FIREWALL")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+            .unwrap_or(false)
+    })
+}
+
 impl Runtime {
     /// Automatically open `port/tcp` in UFW and iptables on Linux so newly created servers/websites
     /// are reachable without manual firewall commands.
     pub fn allow_firewall_port(&self, port: u16, project_id: Option<i64>) {
-        if port == 0 {
+        if port == 0 || !firewall_management_enabled() {
             return;
         }
         if let Ok(mut set) = self.allowed_ports.lock() {

@@ -764,11 +764,12 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
 
             let candidates = package_candidates(&pm, &id);
             if candidates.is_empty() {
+                let message = format!("No package mapping for '{id}' on '{pm}'");
                 results.push(ModuleInstallResult {
                     module_id: id,
                     success: false,
                     already_installed: false,
-                    message: format!("No package mapping for '{id}' on '{pm}'"),
+                    message,
                     output: String::new(),
                 });
                 continue;

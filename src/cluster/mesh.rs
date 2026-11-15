@@ -420,7 +420,7 @@ pub async fn reconcile_mesh_network(manifest: &NodeStateManifest, data_dir: &Pat
                     .await;
             }
         }
-        if command_exists("ufw") {
+        if command_exists("ufw") && crate::runtime::port::firewall_management_enabled() {
             let _ = tokio::process::Command::new("sudo")
                 .args(["ufw", "allow", &format!("{}/udp", manifest.wg_listen_port)])
                 .output()

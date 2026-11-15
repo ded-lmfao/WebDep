@@ -105,6 +105,9 @@ pub fn is_process_alive(pid: u32) -> bool {
 }
 
 pub async fn sync_firewall_rules(port: u16, access_mode: &str, allowed_ips: &str) {
+    if !crate::runtime::port::firewall_management_enabled() {
+        return;
+    }
     #[cfg(unix)]
     {
         if access_mode == "local" {
@@ -130,6 +133,9 @@ pub async fn sync_firewall_rules(port: u16, access_mode: &str, allowed_ips: &str
 }
 
 pub async fn remove_firewall_rules(port: u16, allowed_ips: &str) {
+    if !crate::runtime::port::firewall_management_enabled() {
+        return;
+    }
     #[cfg(unix)]
     {
         let _ = Command::new("sudo").args(["ufw", "delete", "allow", &format!("{}/tcp", port)]).output().await;
