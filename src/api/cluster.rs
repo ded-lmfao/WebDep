@@ -83,13 +83,26 @@ pub(crate) async fn list_cluster_nodes_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ClusterNode>>, (StatusCode, String)> {
-    let _user = require_current_user(&state, &headers).await?;
-    let nodes = state
+    let user = require_current_user(&state, &headers).await?;
+    let mut nodes = state
         .cluster
         .list_nodes()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Every signed-in user needs node names (cards, target-node pickers), but network details
+    // are infrastructure secrets: only operators with `system_manage` see them.
+    if !user.has_power("system_manage") {
+        for n in nodes.iter_mut() {
+            redact_node_network_details(n);
+        }
+    }
     Ok(Json(nodes))
+}
+
+fn redact_node_network_details(n: &mut ClusterNode) {
+    n.public_ip.clear();
+    n.wg_pubkey.clear();
+    n.wg_endpoint.clear();
 }
 
 pub(crate) async fn list_enroll_tokens_handler(
@@ -933,7 +946,10 @@ pub(crate) async fn list_cluster_modules_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _user = require_current_user(&state, &headers).await?;
+    let user = require_current_user(&state, &headers).await?;
+    if !user.has_power("system_manage") {
+        return Err((StatusCode::FORBIDDEN, "Permission denied: Requires system_manage.".to_string()));
+    }
     let catalog = crate::cluster::modules::module_catalog();
     let mut nodes = state
         .cluster

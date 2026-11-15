@@ -977,7 +977,9 @@ impl ClusterManager {
         cache: &AppCache,
         upd: DeployStateUpdate,
     ) {
-        let now = now_secs();
+        // Control-plane timestamps (deployments, releases, projects) are Unix milliseconds,
+        // matching crate::db::now() used by local deployments.
+        let now = crate::db::now();
         if let Some(ref stage) = upd.stage {
             let _ = sqlx::query("UPDATE deployments SET stage = $1 WHERE id = $2")
                 .bind(stage)
@@ -987,8 +989,10 @@ impl ClusterManager {
         }
 
         if let Some(poll_ts) = upd.last_poll_at {
+            // Web-Nodes report seconds; store milliseconds like local deployments do.
+            let poll_ms = if poll_ts < 100_000_000_000 { poll_ts * 1000 } else { poll_ts };
             let _ = sqlx::query("UPDATE projects SET last_poll_at = $1 WHERE id = $2")
-                .bind(poll_ts)
+                .bind(poll_ms)
                 .bind(upd.project_id)
                 .execute(&self.db)
                 .await;

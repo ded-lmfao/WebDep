@@ -138,7 +138,7 @@ const PRESETS = {
     install_cmd: 'npm ci',
     build_cmd: '',
     start_cmd: 'node server.js',
-    health_url: 'http://127.0.0.1:3000/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   express: {
     port: 3000,
@@ -146,7 +146,7 @@ const PRESETS = {
     install_cmd: 'npm ci',
     build_cmd: '',
     start_cmd: 'node app.js',
-    health_url: 'http://127.0.0.1:3000/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   nextjs: {
     port: 3000,
@@ -154,7 +154,7 @@ const PRESETS = {
     install_cmd: 'npm ci',
     build_cmd: 'npm run build',
     start_cmd: 'npm run start -- -p {{PORT}}',
-    health_url: 'http://127.0.0.1:3000/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   vite: {
     port: 4173,
@@ -162,7 +162,7 @@ const PRESETS = {
     install_cmd: 'npm ci',
     build_cmd: 'npm run build',
     start_cmd: 'npx vite preview --port {{PORT}} --host 127.0.0.1',
-    health_url: 'http://127.0.0.1:4173/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   python: {
     port: 8000,
@@ -170,7 +170,7 @@ const PRESETS = {
     install_cmd: 'pip install -r requirements.txt --break-system-packages --ignore-installed',
     build_cmd: '',
     start_cmd: 'python3 -m uvicorn main:app --host 127.0.0.1 --port {{PORT}}',
-    health_url: 'http://127.0.0.1:8000/health',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   java: {
     port: 8080,
@@ -178,7 +178,7 @@ const PRESETS = {
     install_cmd: 'mvn clean package -DskipTests',
     build_cmd: '',
     start_cmd: 'java -jar target/*.jar --server.port={{PORT}}',
-    health_url: 'http://127.0.0.1:8080/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   custom: {
     port: 5000,

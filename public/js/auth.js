@@ -325,6 +325,9 @@ export async function onAuthenticated(isFreshLogin = false) {
     domains: ['domains'],
     backups: ['backups'],
     databases: ['databases', 'databases_manage'],
+    // Cluster infrastructure (node IPs, WireGuard endpoints, package installs) is for operators only.
+    nodes: ['system_manage'],
+    modules: ['system_manage'],
   };
   Object.entries(navPowerMap).forEach(([view, pwrs]) => {
     const navEl = document.querySelector(`.nav-item[data-view="${view}"]`);
@@ -347,7 +350,7 @@ export async function onAuthenticated(isFreshLogin = false) {
       ? (typeof loadDatabases === 'function' ? loadDatabases() : (window.loadDatabases ? window.loadDatabases() : Promise.resolve()))
       : Promise.resolve(),
     window.loadNodes ? window.loadNodes() : Promise.resolve(),
-    window.loadModulesBadge ? window.loadModulesBadge() : Promise.resolve(),
+    (window.loadModulesBadge && hasPower('system_manage')) ? window.loadModulesBadge() : Promise.resolve(),
   ]).catch((err) => {
     console.warn('Initial project/db load warning:', err);
   });

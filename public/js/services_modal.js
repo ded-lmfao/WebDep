@@ -12,8 +12,14 @@ export function setServiceSourceMode(mode) {
 
   const btnManual = document.getElementById('service-source-mode-manual');
   const btnGit = document.getElementById('service-source-mode-git');
-  if (btnManual) btnManual.classList.toggle('active', mode === 'manual');
-  if (btnGit) btnGit.classList.toggle('active', mode === 'git');
+  if (btnManual) {
+    btnManual.classList.toggle('active', mode === 'manual');
+    btnManual.setAttribute('aria-pressed', String(mode === 'manual'));
+  }
+  if (btnGit) {
+    btnGit.classList.toggle('active', mode === 'git');
+    btnGit.setAttribute('aria-pressed', String(mode === 'git'));
+  }
 
   const repoGroup = document.getElementById('service-repo-group');
   const branchGroup = document.getElementById('service-branch-group');

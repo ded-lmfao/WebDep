@@ -462,7 +462,8 @@ function applyPreset(type) {
 
   const isEditing = Boolean(document.getElementById('website-form-id')?.value);
   const assignedPort = isEditing ? (conf.port || 3000) : getNextAvailablePort(conf.port || 3000);
-  const healthUrl = (conf.health_url || '').replace(`:${conf.port}`, `:${assignedPort}`);
+  // {{PORT}} is resolved to the site's port at deploy time, so it stays correct if the port changes.
+  const healthUrl = conf.health_url || '';
 
   document.getElementById('website-port').value = assignedPort || '';
   document.getElementById('website-deploy-method').value = conf.deploy_method || 'managed';
@@ -585,7 +586,10 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
     allowed_ips: allowedIps,
     deploy_dir: deployDir,
     deploy_method: document.getElementById('website-deploy-method')?.value || 'managed',
-    health_url: document.getElementById('website-health-url')?.value.trim() || '',
+    // A loopback health URL always targets this site's own port: store it as {{PORT}} so a changed
+    // port (or one picked from a preset) can never leave the check probing a stale port.
+    health_url: (document.getElementById('website-health-url')?.value.trim() || '')
+      .replace(/^(https?:\/\/(?:127\.0\.0\.1|localhost)):\d+/i, '$1:{{PORT}}'),
     install_cmd: document.getElementById('website-install-cmd')?.value.trim() || '',
     build_cmd: document.getElementById('website-build-cmd')?.value.trim() || '',
     start_cmd: startCmd,

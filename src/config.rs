@@ -120,6 +120,16 @@ impl Config {
 
     pub fn load_dotenv() -> HashMap<String, String> {
         let path = Self::dotenv_path();
+        // Web-Node workers (`--node`) serve no panel and never read admin credentials, so they must
+        // not generate (or log) a bootstrap admin password.
+        let worker_only = std::env::args().any(|a| a == "--node");
+        if worker_only {
+            let map = Self::parse_dotenv_file(&path);
+            for (k, v) in &map {
+                std::env::set_var(k, v);
+            }
+            return map;
+        }
         if !path.exists() {
             let generated = Self::generate_bootstrap_password();
             Self::write_private_file(&path, &Self::render_default_dotenv(&generated));
