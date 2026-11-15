@@ -381,7 +381,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Background binary hot-reload watcher: if target/release/webdep.exe is rebuilt on disk,
     // automatically hand off to the new binary so changes take effect without manual restarts.
-    tokio::spawn(async move {
+    // Not under systemd (INVOCATION_ID is set for services): there the hand-off makes the managed
+    // process exit 0 while an unmanaged copy keeps running, which systemd treats as a clean stop
+    // (no restart, remaining processes killed) and which races with `systemctl restart`.
+    let under_systemd = std::env::var_os("INVOCATION_ID").is_some();
+    if !under_systemd { tokio::spawn(async move {
         let exe_path = std::path::PathBuf::from("target")
             .join("release")
             .join(if cfg!(windows) { "webdep.exe" } else { "webdep" });
@@ -414,7 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
         }
-    });
+    }); }
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
