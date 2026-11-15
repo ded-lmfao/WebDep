@@ -1225,7 +1225,12 @@ mod tests {
             port: Some(port),
             install_cmd: String::new(),
             build_cmd: String::new(),
-            start_cmd: "node -e \"setTimeout(()=>{},60000)\"".to_string(),
+            // Any long-running process works; avoid requiring Node.js on the test machine.
+            start_cmd: if cfg!(windows) {
+                "node -e \"setTimeout(()=>{},60000)\"".to_string()
+            } else {
+                "sleep 60".to_string()
+            },
             health_url: String::new(),
             health_timeout_s: 30,
             stability_s: 0,
