@@ -285,6 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // and ensure any websites marked 'stopped' have no orphan processes left on their ports
     {
         let resume_projects = projects.clone();
+        let resume_db = db.clone();
         let resume_runtime = runtime.clone();
         let resume_logs = logs.clone();
         let platform_port = config.port;
@@ -292,8 +293,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             resume_runtime.allow_firewall_port(80, None);
             resume_runtime.allow_firewall_port(443, None);
             resume_runtime.allow_firewall_port(platform_port, None);
+            // Only workloads placed on this host: projects on remote Web-Nodes are resumed by those
+            // nodes (see project.resume), never started or killed here.
+            let local_node_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM nodes WHERE is_local = TRUE")
+                .fetch_all(&resume_db)
+                .await
+                .unwrap_or_default();
             if let Ok(list) = resume_projects.list().await {
-                for p in list {
+                for p in list.into_iter().filter(|p| p.node_id.map_or(true, |n| local_node_ids.contains(&n))) {
                     let _ = resume_runtime.ensure_container(&p).await;
                     if p.app_status == "running" {
                         // Check if the workload is ALREADY running from before the panel restart

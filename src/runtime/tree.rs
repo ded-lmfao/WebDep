@@ -166,6 +166,103 @@ pub fn detect_java_exe() -> Option<(PathBuf, PathBuf)> {
     None
 }
 
+/// Set `WEBDEP_KILL_DRY_RUN=1` to log which processes would be stopped without signalling them.
+fn kill_dry_run() -> bool {
+    std::env::var("WEBDEP_KILL_DRY_RUN")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Environment of another process, when it can be read.
+#[cfg(unix)]
+fn process_environ(pid: u32) -> Option<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+        Some(
+            raw.split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut sys = sysinfo::System::new();
+        let target = sysinfo::Pid::from_u32(pid);
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[target]),
+            true,
+            sysinfo::ProcessRefreshKind::new().with_environ(sysinfo::UpdateKind::Always),
+        );
+        sys.process(target).map(|p| p.environ().iter().map(|e| e.to_string_lossy().into_owned()).collect())
+    }
+}
+
+#[cfg(unix)]
+fn process_name(pid: u32) -> String {
+    if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        return s.trim().to_string();
+    }
+    let mut sys = sysinfo::System::new();
+    let target = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[target]), true);
+    sys.process(target)
+        .map(|p| p.name().to_string_lossy().into_owned())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// True when the process's executable name contains `needle` (e.g. "postgres"). Used to avoid
+/// signalling an unrelated process that reused a stale PID from a pid file.
+pub(crate) fn pid_command_contains(pid: u32, needle: &str) -> bool {
+    let mut sys = sysinfo::System::new();
+    let target = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[target]), true);
+    sys.process(target)
+        .map(|p| p.name().to_string_lossy().to_lowercase().contains(&needle.to_lowercase()))
+        .unwrap_or(false)
+}
+
+/// Only processes that provably belong to this project may be signalled: the child WebDep is
+/// tracking, or a process whose environment carries the WEBDEP_PROJECT_ID / WEBDEP_PROJECT_SLUG
+/// that WebDep sets on every app it spawns (inherited by the app's own children).
+///
+/// Everything else that the discovery heuristics produce — stale PIDs saved in the database or in
+/// pids.txt (possibly reused by unrelated processes), numbers scraped from app output, whatever
+/// holds the port, path matches — is dropped. PID 0/1, WebDep itself and its parent are never
+/// signalled. This keeps a heuristic mistake from killing other services on a shared host.
+#[cfg(unix)]
+fn retain_project_owned_pids(project_id: i64, slug: &str, pids: &HashSet<u32>, tracked: Option<u32>) -> HashSet<u32> {
+    let self_pid = std::process::id();
+    let parent_pid = unsafe { libc::getppid() } as u32;
+    let env_id = format!("WEBDEP_PROJECT_ID={project_id}");
+    let env_slug = format!("WEBDEP_PROJECT_SLUG={slug}");
+    let mut owned = HashSet::new();
+    for &pid in pids {
+        if pid <= 1 || pid == self_pid || pid == parent_pid || pid > i32::MAX as u32 {
+            continue;
+        }
+        let is_tracked = tracked == Some(pid);
+        let carries_marker = process_environ(pid)
+            .map(|env| env.iter().any(|e| *e == env_id || (!slug.is_empty() && *e == env_slug)))
+            .unwrap_or(false);
+        if is_tracked || carries_marker {
+            owned.insert(pid);
+        } else if crate::runtime::is_pid_alive(pid) {
+            tracing::warn!(
+                "Not stopping PID {pid} ({}): it does not belong to project #{project_id} ({slug})",
+                process_name(pid)
+            );
+        }
+    }
+    owned
+}
+
+#[cfg(not(unix))]
+fn retain_project_owned_pids(_project_id: i64, _slug: &str, pids: &HashSet<u32>, _tracked: Option<u32>) -> HashSet<u32> {
+    pids.iter().copied().filter(|&p| p > 1 && p != std::process::id()).collect()
+}
+
 pub(crate) async fn kill_project_processes_pure(
     project_id: i64,
     slug: &str,
@@ -213,10 +310,9 @@ pub(crate) async fn kill_project_processes_pure(
     let mut pids_to_kill: HashSet<u32> = HashSet::new();
 
     let had_child = old_child.is_some();
-    if let Some(ref child) = old_child {
-        if let Some(pid) = child.id() {
-            pids_to_kill.insert(pid);
-        }
+    let tracked_pid = old_child.as_ref().and_then(|c| c.id());
+    if let Some(pid) = tracked_pid {
+        pids_to_kill.insert(pid);
     }
 
     for &pid in known_extra_pids {
@@ -246,17 +342,36 @@ pub(crate) async fn kill_project_processes_pure(
         pids_to_kill.insert(spid);
     }
 
+    let pids_to_kill = retain_project_owned_pids(project_id, slug, &pids_to_kill, tracked_pid);
+    let dry_run = kill_dry_run();
     for pid in &pids_to_kill {
-        Runtime::kill_pid_tree(*pid).await;
+        #[cfg(unix)]
+        tracing::info!(
+            "{} PID {} ({}) for project #{} ({})",
+            if dry_run { "[dry run] Would stop" } else { "Stopping" },
+            pid,
+            process_name(*pid),
+            project_id,
+            slug
+        );
+        if !dry_run {
+            Runtime::kill_pid_tree(*pid).await;
+        }
     }
 
     if let Some(mut child) = old_child {
-        let _ = child.start_kill();
+        if !dry_run {
+            let _ = child.start_kill();
+        }
     }
 
     for _ in 0..6 {
+        if dry_run {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(60)).await;
         let lingering = Runtime::find_project_processes_sysinfo(project_id, slug, &base_dir, &HashSet::new());
+        let lingering = retain_project_owned_pids(project_id, slug, &lingering, None);
         if lingering.is_empty() {
             break;
         }
@@ -267,11 +382,17 @@ pub(crate) async fn kill_project_processes_pure(
 
     if let Some(port_num) = port {
         for _ in 0..12 {
-            let remaining_pids = Runtime::find_pids_on_port(port_num);
-            if remaining_pids.is_empty() && !Runtime::is_port_accepting(port_num).await {
+            if dry_run {
                 break;
             }
-            for pid in remaining_pids {
+            // Only processes of this project: another service holding the port is left alone
+            // (the start then fails with "address in use" instead of killing a stranger).
+            let remaining: HashSet<u32> = Runtime::find_pids_on_port(port_num).into_iter().collect();
+            let remaining = retain_project_owned_pids(project_id, slug, &remaining, None);
+            if remaining.is_empty() {
+                break;
+            }
+            for pid in remaining {
                 Runtime::kill_pid_tree(pid).await;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -308,20 +429,20 @@ impl Runtime {
         }
         #[cfg(unix)]
         {
-            let _ = tokio::process::Command::new("kill")
-                .args(["-9", &format!("-{}", pid)])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
-            let _ = tokio::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await;
+            // Never signal init, ourselves, or a value that would wrap to a negative pid_t:
+            // kill(-1) addresses every process on the host.
+            if pid <= 1 || pid > i32::MAX as u32 || pid == unsafe { libc::getppid() } as u32 {
+                return;
+            }
+            let p = pid as libc::pid_t;
+            unsafe {
+                // Apps are started with setsid(), so their process group carries the whole tree.
+                // Signal the group only when this pid really leads it.
+                if libc::getpgid(p) == p {
+                    libc::kill(-p, libc::SIGKILL);
+                }
+                libc::kill(p, libc::SIGKILL);
+            }
         }
     }
 
@@ -484,6 +605,38 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::is_pid_alive;
+
+    // Linux reads /proc/<pid>/environ directly; macOS hides the environment of platform binaries
+    // such as /bin/sleep, where the guard deliberately errs on the side of not killing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_processes_carrying_the_project_marker_may_be_killed() {
+        use std::collections::HashSet;
+        let mut marked = std::process::Command::new("sleep")
+            .arg("30")
+            .env("WEBDEP_PROJECT_ID", "4242")
+            .spawn()
+            .expect("spawn marked");
+        let mut stranger = std::process::Command::new("sleep").arg("30").spawn().expect("spawn stranger");
+        // Let both children finish exec() so their environment is the one they were given.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let candidates: HashSet<u32> = [1, std::process::id(), marked.id(), stranger.id()].into_iter().collect();
+
+        let owned = super::retain_project_owned_pids(4242, "demo-app", &candidates, None);
+        assert!(owned.contains(&marked.id()), "process with WEBDEP_PROJECT_ID=4242 is ours");
+        assert!(!owned.contains(&stranger.id()), "unmarked process must never be selected");
+        assert!(!owned.contains(&1), "init must never be selected");
+        assert!(!owned.contains(&std::process::id()), "WebDep itself must never be selected");
+
+        // A tracked child counts as ours even without the marker.
+        let tracked = super::retain_project_owned_pids(4242, "demo-app", &candidates, Some(stranger.id()));
+        assert!(tracked.contains(&stranger.id()));
+
+        let _ = marked.kill();
+        let _ = stranger.kill();
+        let _ = marked.wait();
+        let _ = stranger.wait();
+    }
 
     #[test]
     fn test_is_pid_alive_handles_zero_self_and_exited_child() {

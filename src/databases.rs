@@ -536,7 +536,10 @@ impl Databases {
         }
 
         for pid in pids_to_kill {
-            crate::runtime::Runtime::kill_pid_tree(pid).await;
+            // A stale postmaster.pid or another service on the port must never be killed.
+            if crate::runtime::tree::pid_command_contains(pid, "postgres") {
+                crate::runtime::Runtime::kill_pid_tree(pid).await;
+            }
         }
 
         let pid_file = data_dir.join("postmaster.pid");
