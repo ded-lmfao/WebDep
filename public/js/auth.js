@@ -615,7 +615,7 @@ document.getElementById('save-change-password-btn')?.addEventListener('click', a
     toast(
       res.revokedSessions
         ? `Password updated and ${res.revokedSessions} other session(s) signed out.`
-        : 'Password updated in SQLite.',
+        : 'Password updated.',
       'success'
     );
     closeModal('modal-change-password');

@@ -21,17 +21,12 @@ let lastInstallLogs = [];
 function shortVersion(ver) {
   const s = String(ver || '').trim();
   if (!s) return 'Installed';
-  // Condense common outputs cleanly for table cells
-  const cleaned = s
-    .replace(/^Python\s+/i, '')
-    .replace(/^git version\s+/i, '')
-    .replace(/^go version\s+/i, '')
-    .replace(/^rustc\s+/i, '')
-    .replace(/^PHP\s+/i, '')
-    .replace(/^ruby\s+/i, '')
-    .replace(/^openjdk version\s+/i, '')
-    .replace(/^"|"$/g, '');
-  return cleaned.length > 22 ? `${cleaned.slice(0, 21)}…` : cleaned;
+  // Tool banners vary ("git version 2.54.0 (Apple Git-157)", 'openjdk version "17.0.18" 2026-01-20',
+  // "go version go1.26.0 darwin/arm64"): show just the version number, full text stays in the tooltip.
+  const m = s.match(/\d+(?:\.\d+){1,3}/);
+  if (m) return m[0];
+  const cleaned = s.replace(/^"|"$/g, '');
+  return cleaned.length > 16 ? `${cleaned.slice(0, 15)}…` : cleaned;
 }
 
 function setInstallBusy(key, busy) {
@@ -301,7 +296,7 @@ export function renderModulesView() {
             if (st.installed) {
               return `
                 <td>
-                  <span class="badge badge-success" style="font-size:10.5px; font-family:var(--font-mono);" title="${escapeHtml(`${st.version}${st.details ? ` — ${st.details}` : ''}`)}">
+                  <span class="badge badge-success module-version" title="${escapeHtml(`${st.version}${st.details ? ` — ${st.details}` : ''}`)}">
                     ✓ ${escapeHtml(shortVersion(st.version))}
                   </span>
                 </td>
@@ -319,7 +314,7 @@ export function renderModulesView() {
                     ${cellBusy ? 'disabled' : ''}
                     onclick="window.installNodeModules(${n.nodeId}, ['${entry.id}'], 'Install ${escapeHtml(entry.name)} on ${escapeHtml(n.name)}')"
                   >
-                    ${cellBusy ? 'Installing...' : (entry.required ? 'Install*' : 'Install')}
+                    ${cellBusy ? 'Installing…' : 'Install'}
                   </button>
                 </td>
               `;
@@ -336,7 +331,7 @@ export function renderModulesView() {
 
         return `
           <tr>
-            <td style="min-width: 195px;">
+            <td class="modules-node-cell">
               <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
                 <strong style="color:var(--text-main);">${escapeHtml(n.name)}</strong>
                 ${n.isLocal ? '<span class="badge badge-info" style="font-size:9.5px;">Core</span>' : ''}
@@ -385,10 +380,10 @@ export function renderModulesView() {
       matrixWrap,
       `
         <div class="table-responsive">
-          <table class="table">
+          <table class="table modules-matrix">
             <thead>
               <tr>
-                <th>VPS Node</th>
+                <th class="modules-node-cell">VPS Node</th>
                 ${headerCols}
                 <th style="text-align: right;">Actions</th>
               </tr>

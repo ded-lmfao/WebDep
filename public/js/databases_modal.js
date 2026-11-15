@@ -21,7 +21,10 @@ export function openCreateDatabaseModal() {
   const nameEl = document.getElementById('db-create-name');
   if (nameEl) nameEl.value = '';
   const dbNameEl = document.getElementById('db-create-dbname');
-  if (dbNameEl) dbNameEl.value = '';
+  if (dbNameEl) {
+    dbNameEl.value = '';
+    delete dbNameEl.dataset.touched;
+  }
   const userEl = document.getElementById('db-create-user');
   if (userEl) userEl.value = 'app_user';
   const domCreateInput = document.getElementById('db-create-domain');
@@ -36,6 +39,18 @@ export function openCreateDatabaseModal() {
 
   modal.classList.add('active');
 }
+
+// Suggest a PostgreSQL database name from the display name until the user types their own.
+document.getElementById('db-create-dbname')?.addEventListener('input', (e) => {
+  e.target.dataset.touched = '1';
+});
+document.getElementById('db-create-name')?.addEventListener('input', (e) => {
+  const dbNameEl = document.getElementById('db-create-dbname');
+  if (!dbNameEl || dbNameEl.dataset.touched === '1') return;
+  let slug = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
+  if (slug && /^[0-9]/.test(slug)) slug = `db_${slug}`;
+  dbNameEl.value = slug;
+});
 
 export function generateRandomDbPassword(targetInputId) {
   const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789-_.~';

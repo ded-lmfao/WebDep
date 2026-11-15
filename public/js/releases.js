@@ -43,7 +43,7 @@ async function loadReleasesView() {
         return `
           <tr>
             <td><strong>Release #${r.id}</strong></td>
-            <td><span class="sha-pill">${r.short_sha || r.sha.slice(0, 7)}</span></td>
+            <td><span class="sha-pill">${r.short_sha || shortSha(r.sha)}</span></td>
             <td style="max-width: 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(r.message || '')}</td>
             <td>${escapeHtml(r.author || 'Unknown')}</td>
             <td>${formatDate(r.deployed_at || r.created_at)}</td>
@@ -197,7 +197,7 @@ async function loadRollbacksView() {
     const live = releases.find((r) => r.live);
 
     if (live) {
-      liveInfo.innerHTML = `Release #${live.id} &bull; Commit <span class="sha-pill">${live.sha.slice(0, 7)}</span> &bull; <em>"${escapeHtml(live.message || 'No commit message')}"</em> &bull; Deployed ${formatRelativeTime(live.deployed_at || live.created_at)}`;
+      liveInfo.innerHTML = `Release #${live.id} &bull; Commit <span class="sha-pill">${shortSha(live.sha)}</span> &bull; <em>"${escapeHtml(live.message || 'No commit message')}"</em> &bull; Deployed ${formatRelativeTime(live.deployed_at || live.created_at)}`;
     } else {
       liveInfo.textContent = 'No live release active currently.';
     }
@@ -215,7 +215,7 @@ async function loadRollbacksView() {
       setHtmlIfChanged(tbody, slice.map((r) => `
         <tr>
           <td><strong>Release #${r.id}</strong></td>
-          <td><span class="sha-pill">${r.sha.slice(0, 7)}</span></td>
+          <td><span class="sha-pill">${shortSha(r.sha)}</span></td>
           <td style="max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(r.message || '')}</td>
           <td>${escapeHtml(r.author || 'Unknown')}</td>
           <td>${formatDate(r.deployed_at || r.created_at)}</td>
@@ -254,7 +254,7 @@ async function rollbackToRelease(projectId, releaseId) {
 async function deleteRelease(projectId, releaseId) {
   const ok = await showConfirmDialog({
     title: `Delete Release #${releaseId}`,
-    message: `Permanently delete Release #${releaseId} from disk and SQLite?\n\nThis release artifact and rollback point will be removed.`,
+    message: `Permanently delete Release #${releaseId} from disk and the control database?\n\nThis release artifact and rollback point will be removed.`,
     confirmText: 'Delete Release',
     danger: true,
   });

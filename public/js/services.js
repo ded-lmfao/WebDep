@@ -190,7 +190,7 @@ export function renderServicesList() {
     }
 
     const isLocal = !p.repo_url || p.repo_url === 'local' || pt.includes('lavalink');
-    const shaText = p.deployed_sha ? p.deployed_sha.slice(0, 7) : (p.deployedSha ? p.deployedSha.slice(0, 7) : (isLocal ? 'Manual' : 'Auto'));
+    const shaText = p.deployed_sha ? shortSha(p.deployed_sha) : (p.deployedSha ? shortSha(p.deployedSha) : (isLocal ? 'Manual' : 'Auto'));
     const portText = p.port ? `Port ${p.port}` : '';
     const accessText = p.access_mode === 'public' ? 'Public reverse proxy' : (p.access_mode === 'allowlist' || p.access_mode === 'allowed_ips' ? 'IP whitelist' : 'Localhost only');
     const resItem = resByProjId.get(p.id);

@@ -383,6 +383,8 @@ const AUDIT_ACTION_META = {
   'deploy.auto_initial': { label: 'Initial Deploy', cls: 'badge-info' },
   'deploy.success': { label: 'Deploy Succeeded', cls: 'badge-success' },
   'deploy.failed': { label: 'Deploy Failed', cls: 'badge-danger' },
+  'deploy.fail': { label: 'Deploy Failed', cls: 'badge-danger' },
+  'rollback.fail': { label: 'Rollback Failed', cls: 'badge-danger' },
   'rollback.trigger': { label: 'Rollback Started', cls: 'badge-warning' },
   'rollback.start': { label: 'Rollback Started', cls: 'badge-warning' },
   'rollback.success': { label: 'Rollback Succeeded', cls: 'badge-success' },
@@ -436,6 +438,14 @@ const AUDIT_ACTION_META = {
   'user.delete': { label: 'User Removed', cls: 'badge-danger' },
   'auth.login': { label: 'User Signed In', cls: 'badge-neutral' },
 };
+
+// Short label for a deployed revision: 7-char commit SHA, or "files" for manual-upload snapshots.
+function shortSha(sha) {
+  const s = String(sha || '');
+  if (s.startsWith('local-')) return 'files';
+  return s.slice(0, 7);
+}
+window.shortSha = shortSha;
 
 function openModal(modalId) {
   animateModalOpen(modalId);

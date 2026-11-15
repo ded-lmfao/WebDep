@@ -64,7 +64,7 @@ async function loadGithubView() {
         const isLive = c.live;
         return `
           <tr>
-            <td><span class="sha-pill">${c.shortSha || c.sha.slice(0, 7)}</span></td>
+            <td><span class="sha-pill">${c.shortSha || shortSha(c.sha)}</span></td>
             <td style="max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500;">
               ${escapeHtml(c.message)}
             </td>
@@ -93,7 +93,7 @@ async function generateDeployKey(projectId) {
   try {
     const res = await api(`/api/projects/${projectId}/deploy-key`, { method: 'POST' });
     await showCopyDialog({
-      title: 'SSH Deploy Key (Saved in SQLite)',
+      title: 'SSH Deploy Key',
       message: 'Add this public key to your GitHub repository under Settings -> Deploy Keys (allow read access):',
       value: res.publicKey,
     });
@@ -111,7 +111,7 @@ async function rotateWebhookSecret(projectId) {
   if (!ok) return;
   try {
     const res = await api(`/api/projects/${projectId}/webhook-secret/rotate`, { method: 'POST' });
-    toast('Webhook secret rotated and saved in SQLite.', 'success');
+    toast('Webhook secret rotated and saved.', 'success');
     await showCopyDialog({
       title: 'New GitHub Webhook Secret',
       message: 'Paste this secret into your GitHub repository Webhook Secret field:',
@@ -137,13 +137,13 @@ async function fetchProjectUpdates(projectId) {
   toast('Fetching latest commits from GitHub', 'info');
   try {
     const res = await api(`/api/projects/${projectId}/fetch`, { method: 'POST', timeoutMs: 30000 });
-    const shortSha = res.sha ? res.sha.slice(0, 7) : 'latest';
+    const revLabel = res.sha ? shortSha(res.sha) : 'latest';
     if (res.hasNewCommits) {
-      toast(`Fetched new commits (${shortSha}) from GitHub. Ready to deploy.`, 'success');
+      toast(`Fetched new commits (${revLabel}) from GitHub. Ready to deploy.`, 'success');
     } else if (res.needsDeploy) {
-      toast(`Already up to date with GitHub (${shortSha}). Ready to deploy.`, 'success');
+      toast(`Already up to date with GitHub (${revLabel}). Ready to deploy.`, 'success');
     } else {
-      toast(`Already up to date with GitHub (${shortSha}). Live deployment matches.`, 'success');
+      toast(`Already up to date with GitHub (${revLabel}). Live deployment matches.`, 'success');
     }
     await loadProjects();
     if (state.currentView === 'projects') renderProjectsList();
@@ -440,7 +440,7 @@ function renderDeploymentRow(d, isOverview = false) {
   else if (d.status === 'failed') badgeClass = 'badge-danger';
   else if (isRunning) badgeClass = 'badge-warning';
 
-  const sha = d.sha ? `<span class="sha-pill">${d.sha.slice(0, 7)}</span>` : '<span style="color:var(--text-dim)">--</span>';
+  const sha = d.sha ? `<span class="sha-pill">${shortSha(d.sha)}</span>` : '<span style="color:var(--text-dim)">--</span>';
   const duration = d.finished_at && d.started_at ? `${Math.round((d.finished_at - d.started_at) / 1000)}s` : (isRunning ? 'Running' : '--');
   const rawKind = d.kind || 'deploy';
   const kindLabel = rawKind.charAt(0).toUpperCase() + rawKind.slice(1).toLowerCase().replace(/_/g, ' ');
@@ -521,7 +521,7 @@ async function openDeploymentDetails(depId) {
     meta.innerHTML = `
       <div class="dep-details-meta-row">
         <div><strong>Status:</strong> <span class="badge ${data.status === 'success' ? 'badge-success' : data.status === 'failed' ? 'badge-danger' : 'badge-warning'}">${escapeHtml(depStatusLabel)}</span></div>
-        <div><strong>Commit:</strong> ${data.sha ? `<span class="sha-pill">${data.sha.slice(0, 7)}</span>` : '--'}</div>
+        <div><strong>Commit:</strong> ${data.sha ? `<span class="sha-pill">${shortSha(data.sha)}</span>` : '--'}</div>
         <div><strong>Started:</strong> ${formatDate(data.started_at)}</div>
         <div><strong>Duration:</strong> ${data.finished_at && data.started_at ? Math.round((data.finished_at - data.started_at) / 1000) + 's' : '--'}</div>
       </div>

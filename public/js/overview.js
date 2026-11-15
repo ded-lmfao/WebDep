@@ -518,11 +518,11 @@ function renderResourceBreakdown(resources) {
     } else if (r.kind === 'database') {
       subtitle = '<span style="color:var(--text-dim)">PostgreSQL Instance</span>';
     } else if (r.kind === 'service') {
-      const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${r.commitSha.slice(0, 7)}</span>` : '';
+      const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${shortSha(r.commitSha)}</span>` : '';
       subtitle = `<span style="color:var(--text-dim)">Backend Service</span>${sha}`;
     } else {
       const dom = r.domain ? `<a href="http://${escapeHtml(r.domain)}" target="_blank" class="domain-badge" style="font-size:11px;" onclick="event.stopPropagation()">${escapeHtml(r.domain)}</a>` : (r.port ? `<span style="color:var(--text-dim)">${r.port}</span>` : '<span style="color:var(--text-dim)">Local only</span>');
-      const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${r.commitSha.slice(0, 7)}</span>` : '';
+      const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${shortSha(r.commitSha)}</span>` : '';
       subtitle = `${dom}${sha}`;
     }
 

@@ -52,10 +52,14 @@ export function syncGlobalNodeFilterOptions() {
   const nodes = Array.isArray(state.nodes) ? state.nodes : [];
   const current = String(state.selectedNodeFilter || 'all');
 
-  const options = ['<option value="all">All Nodes</option>'];
+  // The filter only makes sense once a second node has joined.
+  select.hidden = nodes.length <= 1;
+
+  const options = ['<option value="all">All nodes</option>'];
   for (const n of nodes) {
-    const label = `${escapeHtml(n.name)} (${escapeHtml(n.meshIp || 'mesh')} · ${escapeHtml(n.status)})`;
-    options.push(`<option value="${n.id}">${label}</option>`);
+    const status = String(n.status || '').toLowerCase();
+    const label = `${escapeHtml(n.name)}${status && status !== 'online' ? ` · ${escapeHtml(status)}` : ''}`;
+    options.push(`<option value="${n.id}" title="${escapeHtml(n.meshIp || '')}">${label}</option>`);
   }
   const html = options.join('');
   if (select._lastHtml !== html) {

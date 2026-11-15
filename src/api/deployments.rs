@@ -42,15 +42,7 @@ pub(crate) async fn deploy_project_handler(
             .execute(&state.db)
             .await;
     }
-    log_audit_project(
-        &state,
-        Some(p.id),
-        &actor.username,
-        "deploy.trigger",
-        Some(&p.name),
-        Some(&format!("Triggered deployment #{} on branch '{}'", dep_id, p.branch)),
-    )
-    .await;
+    // create_deployment() already records the audit entry for this trigger.
 
     if let Some(node_id) = state
         .cluster
@@ -105,15 +97,7 @@ pub(crate) async fn rollback_project_handler(
     let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "manual").await;
     let deployer = state.deployer.clone();
     let target_rel = payload.release_id;
-    log_audit_project(
-        &state,
-        Some(p.id),
-        &actor.username,
-        "rollback.trigger",
-        Some(&p.name),
-        Some(&format!("Triggered rollback #{} to Release #{}", dep_id, target_rel)),
-    )
-    .await;
+    // create_deployment() already records the audit entry for this trigger.
 
     if let Some(node_id) = state
         .cluster

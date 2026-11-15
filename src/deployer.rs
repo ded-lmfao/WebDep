@@ -254,7 +254,11 @@ impl Deployer {
             .bind(action_name)
             .bind(actor)
             .bind(&p.name)
-            .bind(format!("Triggered {} #{} (Trigger: {})", action_title, id, trigger))
+            .bind(if kind != "rollback" && !crate::git::is_local_source(&p.repo_url) {
+                format!("Triggered {} #{} on branch '{}' (trigger: {})", action_title, id, p.branch, trigger)
+            } else {
+                format!("Triggered {} #{} (trigger: {})", action_title, id, trigger)
+            })
             .bind(ts)
             .execute(&self.db)
             .await;

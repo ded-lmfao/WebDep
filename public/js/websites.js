@@ -135,7 +135,7 @@ function renderProjectsList() {
     const isOnline = isProjectOnline(p, resItem);
     const isMaintenance = isProjectMaintenance(p, resItem);
 
-    const shaText = p.deployed_sha ? p.deployed_sha.slice(0, 7) : (p.deployedSha ? p.deployedSha.slice(0, 7) : '');
+    const shaText = p.deployed_sha ? shortSha(p.deployed_sha) : (p.deployedSha ? shortSha(p.deployedSha) : '');
     const branchText = p.branch || 'main';
 
     const diskStr = p.diskFormatted || p.disk_formatted || resItem?.diskFormatted || resItem?.disk_formatted;
@@ -151,40 +151,35 @@ function renderProjectsList() {
 
     const pt = (p.project_type || '').toLowerCase();
     const sc = (p.start_cmd || '').toLowerCase();
-    let typeIconName = 'globe';
-    let typeName = 'Website Application';
     const iconColor = 'var(--text-main)';
-
-    if (pt.includes('node') || pt.includes('express') || sc.includes('node') || sc.includes('npm') || sc.includes('yarn') || sc.includes('pnpm') || sc.includes('bun')) {
-      typeIconName = 'nodejs';
-      typeName = 'Node.js App';
-    } else if (pt.includes('next')) {
-      typeIconName = 'typescript';
-      typeName = 'Next.js App';
-    } else if (pt.includes('react') || pt.includes('typescript')) {
-      typeIconName = 'typescript';
-      typeName = 'React / TS App';
-    } else if (pt.includes('python') || sc.includes('python') || sc.includes('.py')) {
-      typeIconName = 'python';
-      typeName = 'Python Web';
-    } else if (pt.includes('go') || sc.includes('go run') || sc.includes('.go')) {
-      typeIconName = 'go';
-      typeName = 'Go Web App';
-    } else if (pt.includes('rust') || sc.includes('cargo') || sc.includes('.rs')) {
-      typeIconName = 'rust';
-      typeName = 'Rust Web App';
-    } else if (pt.includes('php') || sc.includes('php')) {
-      typeIconName = 'php';
-      typeName = 'PHP Site';
-    } else if (pt.includes('ruby') || sc.includes('ruby') || sc.includes('rails')) {
-      typeIconName = 'ruby';
-      typeName = 'Ruby Web App';
-    } else if (pt.includes('docker') || sc.includes('docker')) {
-      typeIconName = 'docker';
-      typeName = 'Docker Container';
-    } else if (p.project_type) {
-      typeName = p.project_type;
-    }
+    // Prefer the template the site was created with; fall back to sniffing the start command.
+    const TYPE_LABELS = {
+      node: ['nodejs', 'Node.js App'],
+      express: ['nodejs', 'Express App'],
+      nextjs: ['typescript', 'Next.js App'],
+      vite: ['typescript', 'Vite / React App'],
+      python: ['python', 'Python Web'],
+      java: ['java', 'Java App'],
+      go: ['go', 'Go Web App'],
+      rust: ['rust', 'Rust Web App'],
+      php: ['php', 'PHP Site'],
+      ruby: ['ruby', 'Ruby Web App'],
+      docker: ['docker', 'Docker Container'],
+    };
+    const fromCommand = () => {
+      if (sc.includes('python') || sc.includes('.py') || sc.includes('gunicorn') || sc.includes('uvicorn')) return ['python', 'Python Web'];
+      if (sc.includes('java') || sc.includes('.jar')) return ['java', 'Java App'];
+      if (sc.includes('go run') || /(^|\s)\.\/[\w-]+$/.test(sc)) return ['go', 'Go Web App'];
+      if (sc.includes('cargo')) return ['rust', 'Rust Web App'];
+      if (sc.includes('php')) return ['php', 'PHP Site'];
+      if (sc.includes('ruby') || sc.includes('rails')) return ['ruby', 'Ruby Web App'];
+      if (sc.includes('docker')) return ['docker', 'Docker Container'];
+      if (/\b(node|npm|yarn|pnpm|bun)\b/.test(sc)) return ['nodejs', 'Node.js App'];
+      return null;
+    };
+    const detected = (pt !== 'custom' && TYPE_LABELS[pt]) || fromCommand();
+    const typeIconName = detected ? detected[0] : 'globe';
+    const typeName = pt === 'custom' ? 'Custom App' : (detected ? detected[1] : 'Website Application');
 
     const subTitle = typeName;
 
@@ -221,9 +216,11 @@ function renderProjectsList() {
 
         <!-- Badges & Telemetry Row -->
         <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px;">
-          <span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">
+          ${(!p.repo_url || p.repo_url === 'local')
+            ? `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px;" title="Files are uploaded in the Files tab">${icon('folder', { size: 10 })} Manual upload</span>`
+            : `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">
             ${icon('git-branch', { size: 10 })} ${escapeHtml(branchText)}${shaText ? ' &bull; ' + escapeHtml(shaText) : ''}
-          </span>
+          </span>`}
           ${p.port ? `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">Port ${p.port}</span>` : ''}
           ${accessBadge}
           ${diskStr ? `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);" title="On-Disk Storage">${icon('hard-drive', { size: 10 })} ${diskStr}</span>` : ''}
