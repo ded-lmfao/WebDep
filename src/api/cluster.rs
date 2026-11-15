@@ -946,10 +946,9 @@ pub(crate) async fn list_cluster_modules_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let user = require_current_user(&state, &headers).await?;
-    if !user.has_power("system_manage") {
-        return Err((StatusCode::FORBIDDEN, "Permission denied: Requires system_manage.".to_string()));
-    }
+    // Read-only readiness view (no network details) is available to every signed-in user;
+    // installing packages stays Main Admin only.
+    let _user = require_current_user(&state, &headers).await?;
     let catalog = crate::cluster::modules::module_catalog();
     let mut nodes = state
         .cluster
