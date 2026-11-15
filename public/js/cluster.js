@@ -347,8 +347,12 @@ export async function openAddNodeModal() {
 
   try {
     const info = await api('/api/cluster/panel-info', { noCache: true });
-    if (coreUrlEl && info.suggestedPanelUrl) {
-      coreUrlEl.value = info.suggestedPanelUrl;
+    // When the panel is opened through a domain (typically behind a reverse proxy with TLS),
+    // that domain is what other servers can reach; the raw IP:port may not be exposed at all.
+    const host = window.location.hostname;
+    const openedViaDomain = host !== 'localhost' && !/^[\d.]+$/.test(host) && !host.includes(':');
+    if (coreUrlEl) {
+      coreUrlEl.value = openedViaDomain ? window.location.origin : (info.suggestedPanelUrl || window.location.origin);
     }
     if (sugEl) {
       sugEl.innerHTML = '';

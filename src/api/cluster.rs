@@ -1140,7 +1140,8 @@ mod tests {
             .unwrap();
         let tok_json: CreateEnrollTokenResponse = serde_json::from_slice(&tok_body).unwrap();
         assert!(tok_json.join_command.contains("--node --join http://panel.test:8080"));
-        assert!(tok_json.fresh_vps_command.contains("git clone https://github.com/"));
+        assert!(tok_json.fresh_vps_command.starts_with("git clone "));
+        assert!(tok_json.fresh_vps_command.contains(" https://github.com/"));
         assert!(tok_json.service_command.contains("sudo ./start.sh --service --node"));
 
         // Panel info + full join command with detected/custom Core URL & VPS 2 IP

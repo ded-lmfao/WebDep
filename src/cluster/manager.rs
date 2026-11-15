@@ -170,8 +170,19 @@ impl ClusterManager {
 
         let join_command = format!("webdep {args}");
         let service_command = format!("sudo ./start.sh --service {args}");
+        // Workers must run the same code line as the Core: a Core built from a feature branch
+        // clones that branch (main has no Web-Node mode on older releases).
+        let build_branch = env!("WEBDEP_GIT_BRANCH").trim();
+        let branch_flag = if !build_branch.is_empty()
+            && !matches!(build_branch, "HEAD" | "main" | "master")
+            && build_branch.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+        {
+            format!("-b {build_branch} ")
+        } else {
+            String::new()
+        };
         let fresh_vps_command = format!(
-            "git clone https://github.com/{clean_slug}.git webdep && cd webdep && {service_command}"
+            "git clone {branch_flag}https://github.com/{clean_slug}.git webdep && cd webdep && {service_command}"
         );
 
         Ok(CreateEnrollTokenResponse {
