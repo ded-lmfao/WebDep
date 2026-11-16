@@ -397,7 +397,10 @@ pub fn build_container_env_pure(
     let tmp_dir_str = container.tmp_dir.to_string_lossy().trim_start_matches(r"\\?\").to_string();
     let cache_dir_str = container.cache_dir.to_string_lossy().trim_start_matches(r"\\?\").to_string();
 
-    final_env.insert("PORT".to_string(), port_str);
+    final_env.insert("PORT".to_string(), port_str.clone());
+    if p.project_kind != "service" {
+        final_env.entry("SERVER_PORT".to_string()).or_insert(port_str);
+    }
     final_env.insert("WEBDEP_CONTAINER_ID".to_string(), container.container_id.clone());
     final_env.insert("WEBDEP_SITE_SLUG".to_string(), container.slug.clone());
 

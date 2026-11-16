@@ -3,6 +3,18 @@ set -e
 
 cd "$(dirname "$0")"
 APP_DIR="$(pwd)"
+chmod +x "$APP_DIR/start.sh" 2>/dev/null || true
+
+if [[ "$(id -u)" -eq 0 ]]; then
+    SUDO=""
+    HAS_PRIVS=1
+elif command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+    HAS_PRIVS=1
+else
+    SUDO=""
+    HAS_PRIVS=0
+fi
 
 echo "==================================================="
 echo "     WebDep - Multi-Website Hosting Platform"
@@ -41,7 +53,7 @@ if [[ "$MODE" == "--stop" || "$MODE" == "stop" ]]; then
     if command -v systemctl >/dev/null 2>&1; then
         for svc in webdep-node webdep-core webdep; do
             if systemctl is-active --quiet "$svc" 2>/dev/null; then
-                sudo systemctl stop "$svc"
+                $SUDO systemctl stop "$svc"
                 echo "[+] Stopped systemd service '${svc}'."
             fi
         done
@@ -164,12 +176,12 @@ if [[ "$MODE" == "--update" || "$MODE" == "update" ]]; then
         for svc in webdep-core webdep-node webdep; do
             unit="/etc/systemd/system/${svc}.service"
             if [[ -f "$unit" ]] && ! grep -q "KillMode=process" "$unit" 2>/dev/null; then
-                sudo sed -i '/RestartSec=/a KillMode=process' "$unit" 2>/dev/null || true
-                sudo systemctl daemon-reload 2>/dev/null || true
+                $SUDO sed -i '/RestartSec=/a KillMode=process' "$unit" 2>/dev/null || true
+                $SUDO systemctl daemon-reload 2>/dev/null || true
             fi
             if systemctl is-active --quiet "$svc" 2>/dev/null || systemctl is-enabled --quiet "$svc" 2>/dev/null; then
                 echo "[*] Restarting systemd service '${svc}'..."
-                sudo systemctl restart "$svc" || systemctl restart "$svc"
+                $SUDO systemctl restart "$svc" || systemctl restart "$svc"
                 restarted_any=1
             fi
         done
@@ -190,7 +202,15 @@ if grep -q "^HOST=127.0.0.1" .env 2>/dev/null; then
     sed -i 's/^HOST=127.0.0.1/HOST=0.0.0.0/' .env
 fi
 
-# Build from local source when --source/--build is requested, or download prebuilt GitHub Release when missing
+# Build from local source when --source/--build is requested, when running on a non-main branch,
+# or fall back to source if prebuilt GitHub Release is missing/unavailable.
+if [[ "$BUILD_FROM_SOURCE" != "1" ]] && command -v git >/dev/null 2>&1 && [[ -d ".git" ]]; then
+    CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [[ -n "$CUR_BRANCH" && "$CUR_BRANCH" != "main" && "$CUR_BRANCH" != "master" && "$CUR_BRANCH" != "HEAD" && "${WEBDEP_FORCE_RELEASE:-0}" != "1" ]]; then
+        echo "[*] Branch '${CUR_BRANCH}' detected: building from branch source instead of main GitHub Release..."
+        BUILD_FROM_SOURCE=1
+    fi
+fi
 if [[ "$BUILD_FROM_SOURCE" == "1" || ! -f "target/release/webdep" ]]; then
     if [[ "$BUILD_FROM_SOURCE" == "1" ]] || ! install_release_binary; then
         if [[ "$BUILD_FROM_SOURCE" == "1" ]]; then
@@ -198,12 +218,17 @@ if [[ "$BUILD_FROM_SOURCE" == "1" || ! -f "target/release/webdep" ]]; then
         else
             echo "[*] Prebuilt release unavailable; falling back to local Cargo compilation..."
         fi
+        [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+        if [[ -n "${SUDO_USER:-}" ]]; then
+            SUDO_HOME=$(eval echo "~${SUDO_USER}")
+            [[ -f "${SUDO_HOME}/.cargo/env" ]] && source "${SUDO_HOME}/.cargo/env"
+        fi
         if ! command -v cargo >/dev/null 2>&1; then
             echo "[*] Rust (cargo) not found. Installing build essentials & Rust toolchain..."
             if command -v apt-get >/dev/null 2>&1; then
-                sudo apt-get update -y && sudo apt-get install -y curl build-essential pkg-config libssl-dev git
+                $SUDO apt-get update -y && $SUDO apt-get install -y curl build-essential pkg-config libssl-dev git
             elif command -v dnf >/dev/null 2>&1; then
-                sudo dnf install -y curl gcc make pkgconfig openssl-devel git
+                $SUDO dnf install -y curl gcc make pkgconfig openssl-devel git
             fi
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             # shellcheck disable=SC1090
@@ -223,9 +248,9 @@ if [[ -z "${DATABASE_URL:-}" ]] && ! grep -q "^DATABASE_URL=" .env 2>/dev/null; 
     if ! command -v pg_ctl >/dev/null 2>&1 && ! ls /usr/lib/postgresql/*/bin/pg_ctl >/dev/null 2>&1; then
         echo "[*] PostgreSQL server binaries not found. Installing postgresql for zero-config control DB..."
         if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -y && sudo apt-get install -y postgresql postgresql-client
+            $SUDO apt-get update -y && $SUDO apt-get install -y postgresql postgresql-client
         elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y postgresql-server postgresql
+            $SUDO dnf install -y postgresql-server postgresql
         fi
     fi
 fi
@@ -240,35 +265,44 @@ PUBLIC_IP=$(curl -s --max-time 2 https://api.ipify.org || hostname -I 2>/dev/nul
 
 # Automatically configure UFW & iptables firewall rules so ports are open out-of-the-box
 SERVICE_USER="${SUDO_USER:-$(whoami)}"
-if command -v sudo >/dev/null 2>&1; then
+fix_service_permissions() {
+    if [[ -n "$SERVICE_USER" && "$SERVICE_USER" != "root" ]]; then
+        local svc_group
+        svc_group=$(id -gn "$SERVICE_USER" 2>/dev/null || echo "$SERVICE_USER")
+        $SUDO chown -R "${SERVICE_USER}:${svc_group}" "${APP_DIR}/data" "${APP_DIR}/target" 2>/dev/null || true
+        [[ -f "${APP_DIR}/.env" ]] && $SUDO chown "${SERVICE_USER}:${svc_group}" "${APP_DIR}/.env" 2>/dev/null || true
+    fi
+}
+
+if [[ "$HAS_PRIVS" == "1" ]]; then
     echo "[*] Configuring automatic firewall rules (UFW & iptables)..."
     if ! command -v ufw >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update -y >/dev/null 2>&1 && sudo apt-get install -y ufw >/dev/null 2>&1 || true
+        $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y ufw >/dev/null 2>&1 || true
     fi
     P2P_PORT="${WEBDEP_NODE_P2P_PORT:-4601}"
     if command -v ufw >/dev/null 2>&1; then
-        sudo ufw allow OpenSSH >/dev/null 2>&1 || sudo ufw allow 22/tcp >/dev/null 2>&1 || true
-        sudo ufw allow 80/tcp >/dev/null 2>&1 || true
-        sudo ufw allow 443/tcp >/dev/null 2>&1 || true
-        sudo ufw allow 51820/udp >/dev/null 2>&1 || true
-        sudo ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
-        sudo ufw allow "${P2P_PORT}/tcp" >/dev/null 2>&1 || true
-        sudo ufw --force enable >/dev/null 2>&1 || true
+        $SUDO ufw allow OpenSSH >/dev/null 2>&1 || $SUDO ufw allow 22/tcp >/dev/null 2>&1 || true
+        $SUDO ufw allow 80/tcp >/dev/null 2>&1 || true
+        $SUDO ufw allow 443/tcp >/dev/null 2>&1 || true
+        $SUDO ufw allow 51820/udp >/dev/null 2>&1 || true
+        $SUDO ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
+        $SUDO ufw allow "${P2P_PORT}/tcp" >/dev/null 2>&1 || true
+        $SUDO ufw --force enable >/dev/null 2>&1 || true
     fi
     if ! command -v wg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
         echo "[*] Installing wireguard-tools for encrypted multi-node P2P mesh..."
-        sudo apt-get update -y >/dev/null 2>&1 && sudo apt-get install -y wireguard-tools >/dev/null 2>&1 || true
+        $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y wireguard-tools >/dev/null 2>&1 || true
     fi
     if command -v iptables >/dev/null 2>&1; then
         for p in 80 443 "${PORT}" "${P2P_PORT}"; do
-            sudo iptables -C INPUT -p tcp --dport "$p" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || \
-                sudo iptables -I INPUT 1 -p tcp --dport "$p" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || true
+            $SUDO iptables -C INPUT -p tcp --dport "$p" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || \
+                $SUDO iptables -I INPUT 1 -p tcp --dport "$p" -m conntrack --ctstate NEW -j ACCEPT 2>/dev/null || true
         done
     fi
     # Allow WebDep service user to automatically open ports in UFW/iptables, manage WireGuard mesh, reload Caddy, install VPS runtime modules & restart WebDep
     if [[ -d "/etc/sudoers.d" ]]; then
-        echo "${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/sbin/ufw, /usr/sbin/iptables, /usr/bin/wg, /usr/bin/wg-quick, /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /sbin/apk, /usr/bin/apk, /usr/bin/pacman, /usr/bin/systemctl reload caddy, /usr/bin/systemctl restart webdep, /bin/systemctl restart webdep, /usr/bin/systemctl restart webdep-core, /bin/systemctl restart webdep-core, /usr/bin/systemctl restart webdep-node, /bin/systemctl restart webdep-node" | sudo tee /etc/sudoers.d/webdep-firewall >/dev/null 2>&1 || true
-        sudo chmod 0440 /etc/sudoers.d/webdep-firewall 2>/dev/null || true
+        echo "${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/sbin/ufw, /usr/sbin/iptables, /usr/bin/wg, /usr/bin/wg-quick, /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /sbin/apk, /usr/bin/apk, /usr/bin/pacman, /usr/bin/systemctl reload caddy, /usr/bin/systemctl restart webdep, /bin/systemctl restart webdep, /usr/bin/systemctl restart webdep-core, /bin/systemctl restart webdep-core, /usr/bin/systemctl restart webdep-node, /bin/systemctl restart webdep-node" | $SUDO tee /etc/sudoers.d/webdep-firewall >/dev/null 2>&1 || true
+        $SUDO chmod 0440 /etc/sudoers.d/webdep-firewall 2>/dev/null || true
     fi
 fi
 
@@ -282,10 +316,15 @@ if [[ "$ROLE_MODE" == "node" ]]; then
         ./target/release/webdep "${ENROLL_ARGS[@]}"
     fi
     if [[ "$INSTALL_SERVICE" == "1" ]]; then
+        if [[ "$HAS_PRIVS" != "1" ]]; then
+            echo "[!] Installing systemd services requires root privileges or 'sudo'."
+            exit 1
+        fi
         echo "[*] Installing systemd service (/etc/systemd/system/webdep-node.service)..."
         SERVICE_USER="${SUDO_USER:-$(whoami)}"
         USER_HOME=$(eval echo "~${SERVICE_USER}")
-        sudo tee /etc/systemd/system/webdep-node.service >/dev/null <<EOF
+        fix_service_permissions
+        $SUDO tee /etc/systemd/system/webdep-node.service >/dev/null <<EOF
 [Unit]
 Description=WebDep Web-Node Execution & Mesh Agent
 After=network-online.target
@@ -307,9 +346,9 @@ Environment="MALLOC_TRIM_THRESHOLD_=65536"
 [Install]
 WantedBy=multi-user.target
 EOF
-        sudo systemctl daemon-reload
-        sudo systemctl enable webdep-node
-        sudo systemctl restart webdep-node
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable webdep-node
+        $SUDO systemctl restart webdep-node
         echo "[+] Web-Node agent active via systemd ('webdep-node'). Logs: sudo journalctl -u webdep-node -f"
         exit 0
     fi
@@ -317,19 +356,24 @@ EOF
 fi
 
 if [[ "$INSTALL_SERVICE" == "1" ]]; then
+    if [[ "$HAS_PRIVS" != "1" ]]; then
+        echo "[!] Installing systemd services requires root privileges or 'sudo'."
+        exit 1
+    fi
     echo "[*] Installing Web-Core + paired local Web-Node systemd services..."
     SERVICE_USER="${SUDO_USER:-$(whoami)}"
     USER_HOME=$(eval echo "~${SERVICE_USER}")
 
     # Disable legacy single-unit webdep.service if upgrading
     if systemctl is-active --quiet webdep 2>/dev/null || systemctl is-enabled --quiet webdep 2>/dev/null; then
-        sudo systemctl stop webdep 2>/dev/null || true
-        sudo systemctl disable webdep 2>/dev/null || true
+        $SUDO systemctl stop webdep 2>/dev/null || true
+        $SUDO systemctl disable webdep 2>/dev/null || true
     fi
 
     ./target/release/webdep --pair-local
+    fix_service_permissions
 
-    sudo tee /etc/systemd/system/webdep-core.service >/dev/null <<EOF
+    $SUDO tee /etc/systemd/system/webdep-core.service >/dev/null <<EOF
 [Unit]
 Description=WebDep Web-Core Control Plane
 After=network.target
@@ -351,7 +395,7 @@ Environment="MALLOC_TRIM_THRESHOLD_=65536"
 WantedBy=multi-user.target
 EOF
 
-    sudo tee /etc/systemd/system/webdep-node.service >/dev/null <<EOF
+    $SUDO tee /etc/systemd/system/webdep-node.service >/dev/null <<EOF
 [Unit]
 Description=WebDep Local Web-Node Execution & Mesh Agent
 After=network.target webdep-core.service
@@ -374,11 +418,11 @@ Environment="MALLOC_TRIM_THRESHOLD_=65536"
 WantedBy=multi-user.target
 EOF
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable webdep-core webdep-node
-    sudo systemctl restart webdep-core
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable webdep-core webdep-node
+    $SUDO systemctl restart webdep-core
     sleep 1
-    sudo systemctl restart webdep-node
+    $SUDO systemctl restart webdep-node
     echo ""
     echo "[+] Web-Core & Web-Node are now running 24/7 via systemd!"
     echo "    - Panel Address:       ${PUBLIC_IP}:${PORT}"

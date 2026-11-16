@@ -169,7 +169,7 @@ impl ClusterManager {
         }
 
         let join_command = format!("webdep {args}");
-        let service_command = format!("sudo ./start.sh --service {args}");
+        let service_command = format!("sudo bash start.sh --service {args}");
         // Workers must run the same code line as the Core: a Core built from a feature branch
         // clones that branch (main has no Web-Node mode on older releases).
         let build_branch = env!("WEBDEP_GIT_BRANCH").trim();

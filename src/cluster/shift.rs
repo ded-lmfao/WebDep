@@ -560,6 +560,7 @@ pub async fn start_project_shift(
     target_proj.assigned_port = Some(target_port);
     target_proj.deploy_dir = target_deploy_dir.clone();
     let probe_timeout_s = (proj.health_timeout_s.max(30) as u64).clamp(5, 180);
+    let effective_skip_probe = skip_port_probe || proj.project_kind == "service";
 
     if !to_node.is_local {
         let ctx = state.cluster.build_remote_context(&state.projects, project_id).await;
@@ -572,7 +573,7 @@ pub async fn start_project_shift(
                     "project": &target_proj,
                     "context": ctx,
                     "healthTimeoutMs": probe_timeout_s * 1000,
-                    "skipPortProbe": skip_port_probe,
+                    "skipPortProbe": effective_skip_probe,
                 }),
                 Duration::from_secs(probe_timeout_s + 30),
             )
@@ -589,7 +590,7 @@ pub async fn start_project_shift(
             fail_migration(state, migration_id, &e).await;
             return Err((StatusCode::BAD_GATEWAY, e));
         }
-        if !skip_port_probe {
+        if !effective_skip_probe {
             let mut healthy = false;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(probe_timeout_s);
             while tokio::time::Instant::now() < deadline {

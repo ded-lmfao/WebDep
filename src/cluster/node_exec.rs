@@ -1683,8 +1683,28 @@ pub async fn execute_rpc(
             .await
             {
                 Ok(pid) => {
-                    if !skip_port_probe {
-                        if let Some(port) = p.port {
+                    if skip_port_probe {
+                        // Even for background services without a port probe, verify the process survives initial startup
+                        let settle_until = tokio::time::Instant::now() + Duration::from_millis(1200);
+                        while tokio::time::Instant::now() < settle_until {
+                            let exited_status = exec.processes.lock().ok().and_then(|mut map| {
+                                map.get_mut(&p.id)
+                                    .and_then(|child| child.try_wait().ok().flatten())
+                                    .map(|status| status.to_string())
+                            });
+                            if let Some(status) = exited_status {
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+                                let tail = format_tail(&tail_buf);
+                                stop_project_local(&exec, &p, &container).await;
+                                let reason = format!(
+                                    "Target warm-start service exited ({status}) during startup{tail}"
+                                );
+                                send_log(&ws_tx, Some(p.id), None, "shift", "warn", &reason);
+                                return err_resp(req_id, 502, reason);
+                            }
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                        }
+                    } else if let Some(port) = p.port {
                             let timeout_dur = Duration::from_millis(health_timeout_ms.clamp(250, 180_000));
                             let deadline = tokio::time::Instant::now() + timeout_dur;
                             let mut healthy = false;
@@ -1722,7 +1742,6 @@ pub async fn execute_rpc(
                                 send_log(&ws_tx, Some(p.id), None, "shift", "warn", &reason);
                                 return err_resp(req_id, 502, reason);
                             }
-                        }
                     }
                     ok_resp(req_id, json!({ "ok": true, "pid": pid, "port": p.port }))
                 }
