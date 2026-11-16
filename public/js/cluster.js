@@ -594,6 +594,7 @@ export async function confirmStartProjectShift() {
     const mig = await api(`/api/projects/${pid}/move`, {
       method: 'POST',
       body: { targetNodeId, autoCutoverWithoutDns: skipDns },
+      timeoutMs: 600000,
     });
     const history = await api(`/api/projects/${pid}/migrations`, { noCache: true }).catch(() => [mig]);
     renderShiftModalState(mig, Array.isArray(history) ? history : [mig]);
@@ -634,7 +635,10 @@ export async function checkShiftDns() {
 export async function completeShiftCutover() {
   if (!activeShiftMigration) return;
   try {
-    const done = await api(`/api/migrations/${activeShiftMigration.id}/complete`, { method: 'POST' });
+    const done = await api(`/api/migrations/${activeShiftMigration.id}/complete`, {
+      method: 'POST',
+      timeoutMs: 300000,
+    });
     toast(`Shift #${done.id} cutover completed!`, 'success');
     activeShiftMigration = null;
     if (typeof window.refreshProjects === 'function') await window.refreshProjects();
@@ -647,7 +651,10 @@ export async function completeShiftCutover() {
 export async function abortShiftMigration() {
   if (!activeShiftMigration) return;
   try {
-    await api(`/api/migrations/${activeShiftMigration.id}/abort`, { method: 'POST' });
+    await api(`/api/migrations/${activeShiftMigration.id}/abort`, {
+      method: 'POST',
+      timeoutMs: 120000,
+    });
     toast('Shift aborted and target cleaned up; source untouched.', 'info');
     const pid = activeShiftMigration.projectId;
     activeShiftMigration = null;
@@ -666,7 +673,11 @@ export async function evacuateClusterNode(nodeId, nodeName) {
   });
   if (!ok) return;
   try {
-    const res = await api(`/api/cluster/nodes/${nodeId}/evacuate`, { method: 'POST', body: {} });
+    const res = await api(`/api/cluster/nodes/${nodeId}/evacuate`, {
+      method: 'POST',
+      body: {},
+      timeoutMs: 600000,
+    });
     toast(
       `Evacuated ${nodeName}: ${res.shifted.length} shifted, ${res.awaitingDns.length} awaiting DNS, ${res.failed.length} failed.`,
       res.failed.length ? 'warning' : 'success',

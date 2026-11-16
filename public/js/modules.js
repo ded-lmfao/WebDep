@@ -139,7 +139,7 @@ export async function refreshNodeModules(nodeId, nodeName = '') {
   setInstallBusy(busyKey, true);
   renderModulesView();
   try {
-    await api(`/api/cluster/nodes/${nodeId}/modules/refresh`, { method: 'POST' });
+    await api(`/api/cluster/nodes/${nodeId}/modules/refresh`, { method: 'POST', timeoutMs: 60000 });
     await loadModulesView(true);
     toast(`Refreshed modules for ${nodeName || `node #${nodeId}`}`, 'success');
   } catch (err) {
@@ -159,6 +159,7 @@ export async function installNodeModules(nodeId, moduleIds = [], label = '') {
     const res = await api(`/api/cluster/nodes/${nodeId}/modules/install`, {
       method: 'POST',
       body: { moduleIds },
+      timeoutMs: 600000,
     });
     appendInstallLog(label || `Install on Node #${nodeId}`, res);
     await loadModulesView(true);
@@ -190,6 +191,7 @@ export async function installFleetModules(moduleIds = [], title = '') {
     const res = await api('/api/cluster/modules/install-fleet', {
       method: 'POST',
       body: { moduleIds },
+      timeoutMs: 900000,
     });
     appendInstallLog(title || `Fleet Install [${moduleIds.join(', ') || 'missing required'}]`, res);
     await loadModulesView(true);
@@ -200,6 +202,9 @@ export async function installFleetModules(moduleIds = [], title = '') {
       toast('Fleet installation finished with warnings — inspect log output below', 'warning');
     }
   } catch (err) {
+    appendInstallLog(`Fleet Install Error [${moduleIds.join(', ') || 'missing required'}]`, {
+      nodes: [{ nodeId: 0, nodeName: 'Fleet', error: err.message }],
+    });
     toast(`Fleet install failed: ${err.message}`, 'error');
   } finally {
     setInstallBusy(key, false);

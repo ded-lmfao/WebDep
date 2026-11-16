@@ -445,6 +445,17 @@ async fn start_project_local(
     release_dir: Option<&Path>,
     ws_tx: &mpsc::UnboundedSender<ClusterWsMessage>,
 ) -> Result<u32, String> {
+    start_project_local_captured(exec, p, env_vars, release_dir, ws_tx, None).await
+}
+
+async fn start_project_local_captured(
+    exec: &Arc<NodeExecState>,
+    p: &Project,
+    env_vars: HashMap<String, String>,
+    release_dir: Option<&Path>,
+    ws_tx: &mpsc::UnboundedSender<ClusterWsMessage>,
+    captured_tail: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+) -> Result<u32, String> {
     let proj_lock = exec.get_project_lock(p.id);
     let _guard = proj_lock.lock().await;
 
@@ -464,7 +475,17 @@ async fn start_project_local(
 
     let tx_clone = ws_tx.clone();
     let proj_id = p.id;
+    let tail_clone = captured_tail.clone();
     let log_cb: Arc<dyn Fn(&str, &str, &str) + Send + Sync> = Arc::new(move |ch, lvl, msg| {
+        if let Some(ref buf) = tail_clone {
+            if let Ok(mut lines) = buf.lock() {
+                if lines.len() >= 25 {
+                    let excess = lines.len() - 24;
+                    lines.drain(0..excess);
+                }
+                lines.push(msg.to_string());
+            }
+        }
         send_log(&tx_clone, Some(proj_id), None, ch, lvl, msg);
     });
 
@@ -1619,43 +1640,96 @@ pub async fn execute_rpc(
             };
             let ctx: RemoteContextPayload =
                 serde_json::from_value(params["context"].clone()).unwrap_or_default();
-            let health_timeout_ms = params["healthTimeoutMs"].as_u64().unwrap_or(5000);
+            let default_ms = (p.health_timeout_s.max(30) as u64).saturating_mul(1000);
+            let health_timeout_ms = params["healthTimeoutMs"].as_u64().unwrap_or(default_ms);
             let skip_port_probe = params["skipPortProbe"].as_bool().unwrap_or(false);
             let _ = tokio::fs::create_dir_all(&p.deploy_dir).await;
             let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
             apply_and_cache_context(&exec, &p, ctx.clone()).await;
 
-            match start_project_local(&exec, &p, ctx.env, None, &ws_tx).await {
+            let tail_buf = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let format_tail = |buf: &Arc<std::sync::Mutex<Vec<String>>>| -> String {
+                let snippet = buf
+                    .lock()
+                    .ok()
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .rev()
+                            .take(6)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    })
+                    .unwrap_or_default();
+                if snippet.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" | recent output: {snippet}")
+                }
+            };
+
+            match start_project_local_captured(
+                &exec,
+                &p,
+                ctx.env,
+                None,
+                &ws_tx,
+                Some(tail_buf.clone()),
+            )
+            .await
+            {
                 Ok(pid) => {
                     if !skip_port_probe {
                         if let Some(port) = p.port {
-                            let deadline = tokio::time::Instant::now()
-                                + Duration::from_millis(health_timeout_ms.clamp(250, 30_000));
+                            let timeout_dur = Duration::from_millis(health_timeout_ms.clamp(250, 180_000));
+                            let deadline = tokio::time::Instant::now() + timeout_dur;
                             let mut healthy = false;
+                            let mut exited_early: Option<String> = None;
                             while tokio::time::Instant::now() < deadline {
                                 if Runtime::is_port_accepting(port).await {
                                     healthy = true;
                                     break;
                                 }
-                                tokio::time::sleep(Duration::from_millis(120)).await;
+                                if let Ok(mut map) = exec.processes.lock() {
+                                    if let Some(child) = map.get_mut(&p.id) {
+                                        if let Ok(Some(status)) = child.try_wait() {
+                                            exited_early = Some(status.to_string());
+                                            break;
+                                        }
+                                    }
+                                }
+                                tokio::time::sleep(Duration::from_millis(150)).await;
                             }
                             if !healthy {
+                                // Brief settle so async stdout/stderr reader tasks flush last error lines
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+                                let tail = format_tail(&tail_buf);
                                 stop_project_local(&exec, &p, &container).await;
-                                return err_resp(
-                                    req_id,
-                                    502,
+                                let reason = if let Some(status) = exited_early {
                                     format!(
-                                        "Target warm-start health probe failed: port {port} did not accept connections"
-                                    ),
-                                );
+                                        "Target warm-start process exited ({status}) before listening on port {port}{tail}"
+                                    )
+                                } else {
+                                    format!(
+                                        "Target warm-start health probe failed: port {port} did not accept connections within {}s{tail}",
+                                        timeout_dur.as_secs().max(1)
+                                    )
+                                };
+                                send_log(&ws_tx, Some(p.id), None, "shift", "warn", &reason);
+                                return err_resp(req_id, 502, reason);
                             }
                         }
                     }
                     ok_resp(req_id, json!({ "ok": true, "pid": pid, "port": p.port }))
                 }
                 Err(e) => {
+                    let tail = format_tail(&tail_buf);
                     stop_project_local(&exec, &p, &container).await;
-                    err_resp(req_id, 502, format!("Target warm-start failed: {e}"))
+                    err_resp(req_id, 502, format!("Target warm-start failed: {e}{tail}"))
                 }
             }
         }

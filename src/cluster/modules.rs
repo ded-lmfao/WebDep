@@ -607,7 +607,13 @@ fn package_candidates(pm: &str, module_id: &str) -> Vec<Vec<&'static str>> {
         ("apt-get", "git") => vec![vec!["git"]],
         ("apt-get", "node") => vec![vec!["nodejs", "npm"]],
         ("apt-get", "python") => vec![vec!["python3", "python3-pip", "python3-venv"]],
-        ("apt-get", "java") => vec![vec!["default-jdk"]],
+        ("apt-get", "java") => vec![
+            vec!["default-jdk"],
+            vec!["default-jdk-headless"],
+            vec!["openjdk-21-jdk-headless"],
+            vec!["openjdk-17-jdk-headless"],
+            vec!["default-jre-headless"],
+        ],
         ("apt-get", "go") => vec![vec!["golang-go"]],
         ("apt-get", "rust") => vec![vec!["rustc", "cargo"]],
         ("apt-get", "php") => vec![vec!["php-cli", "php-fpm", "composer"], vec!["php-cli"]],
@@ -618,7 +624,12 @@ fn package_candidates(pm: &str, module_id: &str) -> Vec<Vec<&'static str>> {
         ("dnf" | "yum", "git") => vec![vec!["git"]],
         ("dnf" | "yum", "node") => vec![vec!["nodejs", "npm"]],
         ("dnf" | "yum", "python") => vec![vec!["python3", "python3-pip"]],
-        ("dnf" | "yum", "java") => vec![vec!["java-21-openjdk-devel"], vec!["java-17-openjdk-devel"]],
+        ("dnf" | "yum", "java") => vec![
+            vec!["java-21-openjdk-devel"],
+            vec!["java-17-openjdk-devel"],
+            vec!["java-21-openjdk-headless"],
+            vec!["java-17-openjdk-headless"],
+        ],
         ("dnf" | "yum", "go") => vec![vec!["golang"]],
         ("dnf" | "yum", "rust") => vec![vec!["rust", "cargo"]],
         ("dnf" | "yum", "php") => vec![vec!["php-cli", "php-fpm"], vec!["php-cli"]],
@@ -629,7 +640,12 @@ fn package_candidates(pm: &str, module_id: &str) -> Vec<Vec<&'static str>> {
         ("apk", "git") => vec![vec!["git"]],
         ("apk", "node") => vec![vec!["nodejs", "npm"]],
         ("apk", "python") => vec![vec!["python3", "py3-pip"]],
-        ("apk", "java") => vec![vec!["openjdk21"], vec!["openjdk17"]],
+        ("apk", "java") => vec![
+            vec!["openjdk21"],
+            vec!["openjdk17"],
+            vec!["openjdk21-jre"],
+            vec!["openjdk17-jre"],
+        ],
         ("apk", "go") => vec![vec!["go"]],
         ("apk", "rust") => vec![vec!["rust", "cargo"]],
         ("apk", "php") => vec![vec!["php", "composer"], vec!["php"]],
@@ -735,6 +751,7 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
                 continue;
             }
 
+            let mut update_warning = String::new();
             if !index_refreshed {
                 index_refreshed = true;
                 match pm.as_str() {
@@ -742,17 +759,10 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
                         if let Err(e) = run_pkg_cmd(
                             use_sudo,
                             "apt-get",
-                            &["update", "-y"],
+                            &["-o", "DPkg::Lock::Timeout=120", "update", "-y"],
                             &[("DEBIAN_FRONTEND", "noninteractive")],
                         ) {
-                            results.push(ModuleInstallResult {
-                                module_id: id,
-                                success: false,
-                                already_installed: false,
-                                message: "Failed running apt-get update (check sudoers/network)".to_string(),
-                                output: e,
-                            });
-                            continue;
+                            update_warning = format!("[apt-get update warning]\n{e}\n");
                         }
                     }
                     "apk" => {
@@ -770,7 +780,7 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
                     success: false,
                     already_installed: false,
                     message,
-                    output: String::new(),
+                    output: update_warning,
                 });
                 continue;
             }
@@ -780,7 +790,17 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
             for pkgs in candidates {
                 let res = match pm.as_str() {
                     "apt-get" => {
-                        let mut args = vec!["install", "-y", "--no-install-recommends"];
+                        let mut args = vec![
+                            "-o",
+                            "DPkg::Lock::Timeout=120",
+                            "-o",
+                            "Dpkg::Options::=--force-confdef",
+                            "-o",
+                            "Dpkg::Options::=--force-confold",
+                            "install",
+                            "-y",
+                            "--no-install-recommends",
+                        ];
                         args.extend_from_slice(&pkgs);
                         run_pkg_cmd(
                             use_sudo,
@@ -836,12 +856,18 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
                 format!("Installation failed via {pm}")
             };
 
+            let output = if !success && !update_warning.is_empty() {
+                format!("{update_warning}\n{last_out}")
+            } else {
+                last_out
+            };
+
             results.push(ModuleInstallResult {
                 module_id: id,
                 success,
                 already_installed: false,
                 message: msg,
-                output: last_out,
+                output,
             });
         }
 

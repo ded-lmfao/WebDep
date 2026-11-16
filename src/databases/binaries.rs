@@ -178,11 +178,44 @@ pub fn ensure_pg_permissions(_db_dir: &Path, _data_dir: Option<&Path>) {
 }
 
 #[cfg(unix)]
+fn absolutize_existing_or_cwd(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    if path.is_absolute() {
+        return normalize_lexical_path(path);
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => normalize_lexical_path(&cwd.join(path)),
+        Err(_) => normalize_lexical_path(path),
+    }
+}
+
+#[cfg(any(unix, test))]
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(comp.as_os_str());
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
 pub fn ensure_parent_traverse_permissions(_path: &Path) {
     #[cfg(unix)]
     {
         if is_running_as_root() {
-            let mut curr = _path.parent();
+            let abs = absolutize_existing_or_cwd(_path);
+            let mut curr = abs.parent();
             while let Some(dir) = curr {
                 if dir == Path::new("/") || dir.as_os_str().is_empty() {
                     break;
@@ -198,5 +231,21 @@ pub fn ensure_parent_traverse_permissions(_path: &Path) {
                 curr = dir.parent();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_lexical_path_strips_curdir_and_resolves_parentdir() {
+        let p = Path::new("/root/webdep/./data/../data/control-pg");
+        let expected = if cfg!(windows) {
+            PathBuf::from(r"\root\webdep\data\control-pg")
+        } else {
+            PathBuf::from("/root/webdep/data/control-pg")
+        };
+        assert_eq!(normalize_lexical_path(p), expected);
     }
 }

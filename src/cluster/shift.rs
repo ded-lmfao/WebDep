@@ -559,6 +559,7 @@ pub async fn start_project_shift(
     target_proj.port = Some(target_port);
     target_proj.assigned_port = Some(target_port);
     target_proj.deploy_dir = target_deploy_dir.clone();
+    let probe_timeout_s = (proj.health_timeout_s.max(30) as u64).clamp(5, 180);
 
     if !to_node.is_local {
         let ctx = state.cluster.build_remote_context(&state.projects, project_id).await;
@@ -570,9 +571,10 @@ pub async fn start_project_shift(
                 json!({
                     "project": &target_proj,
                     "context": ctx,
+                    "healthTimeoutMs": probe_timeout_s * 1000,
                     "skipPortProbe": skip_port_probe,
                 }),
-                Duration::from_secs(45),
+                Duration::from_secs(probe_timeout_s + 30),
             )
             .await
         {
@@ -589,16 +591,17 @@ pub async fn start_project_shift(
         }
         if !skip_port_probe {
             let mut healthy = false;
-            for _ in 0..35 {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(probe_timeout_s);
+            while tokio::time::Instant::now() < deadline {
                 if Runtime::is_port_accepting(target_port).await {
                     healthy = true;
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(120)).await;
+                tokio::time::sleep(Duration::from_millis(150)).await;
             }
             if !healthy {
                 let msg = format!(
-                    "Local target warm-start health probe failed on port {target_port}"
+                    "Local target warm-start health probe failed on port {target_port} within {probe_timeout_s}s"
                 );
                 cleanup_staged_target(state, &to_node, &target_proj, &target_deploy_dir, Some(target_port)).await;
                 fail_migration(state, migration_id, &msg).await;
