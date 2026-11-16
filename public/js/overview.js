@@ -20,14 +20,12 @@ import {
   formatRate,
   setText,
   setElText,
-  computeMonotoneTangents,
-  buildCubicPaths,
   syncPerfOffset,
   renderSmoothNetFrame,
 } from './app_usage.js';
 
 const OV_NET_WINDOW_MS = 45000;
-const OV_NET_LAG_MS = 1250;
+const OV_NET_LAG_MS = 2200;
 const OV_NET_SVG_W = 420;
 const OV_NET_SVG_H = 56;
 const OV_NET_TOP = 7;
@@ -36,25 +34,67 @@ const OV_NET_Y_ZERO_IN = 48.2;
 const OV_NET_Y_ZERO_OUT = OV_NET_BOTTOM;
 const OV_NET_POLL_MS = 1000;
 
-const _ovNetState = {
-  samples: [],
-  perfToServerOffset: 0,
-  hasOffset: false,
-  playheadTs: null,
-  displayMaxRate: 1024,
-  hoverRatio: null,
-  rafId: null,
-  pollTimer: null,
-  pollInFlight: false,
-  lastFetchAt: 0,
-  lastDrawPerf: 0,
-  lastLiveServerTs: 0,
-  hasDrawnInitial: false,
-  _chartEl: null,
-  _domReady: false,
-  _labelEls: null,
-  _mergeBuf: [],
-};
+function createNetChartState() {
+  return {
+    samples: [],
+    perfToServerOffset: 0,
+    hasOffset: false,
+    playheadTs: null,
+    displayMaxRate: 1024,
+    hoverRatio: null,
+    rafId: null,
+    pollTimer: null,
+    pollInFlight: false,
+    lastFetchAt: 0,
+    lastDrawPerf: 0,
+    lastLiveServerTs: 0,
+    hasDrawnInitial: false,
+    _chartEl: null,
+    _domReady: false,
+    _labelEls: null,
+    _mergeBuf: [],
+  };
+}
+
+const _ovNetState = createNetChartState();
+const _nodeNetCharts = new Map();
+
+function getOrCreateNodeNetChart(nodeId) {
+  const key = String(nodeId);
+  let entry = _nodeNetCharts.get(key);
+  if (!entry) {
+    entry = {
+      state: createNetChartState(),
+      cfg: {
+        svgW: OV_NET_SVG_W,
+        svgH: OV_NET_SVG_H,
+        topPad: OV_NET_TOP,
+        yZeroIn: OV_NET_Y_ZERO_IN,
+        yZeroOut: OV_NET_Y_ZERO_OUT,
+        windowMs: OV_NET_WINDOW_MS,
+        lagMs: 2600,
+        minRawPeak: 0,
+        singleSamplePeakText: 'Peak 0 B/s',
+        ids: {
+          inArea: `ov-node-${key}-in-area`,
+          outArea: `ov-node-${key}-out-area`,
+          inGlow: `ov-node-${key}-in-glow`,
+          outGlow: `ov-node-${key}-out-glow`,
+          inLine: `ov-node-${key}-in-line`,
+          outLine: `ov-node-${key}-out-line`,
+          inDot: `ov-node-${key}-in-dot`,
+          outDot: `ov-node-${key}-out-dot`,
+          crosshair: `ov-node-${key}-crosshair`,
+          peak: `ov-node-${key}-peak`,
+          inVal: `ov-node-${key}-in`,
+          outVal: `ov-node-${key}-out`,
+        },
+      },
+    };
+    _nodeNetCharts.set(key, entry);
+  }
+  return entry;
+}
 
 const OV_NET_CHART_CFG = {
   svgW: OV_NET_SVG_W,
@@ -88,6 +128,9 @@ function stopOverviewNetRaf() {
   }
   _ovNetState.rafId = null;
   _ovNetState.lastDrawPerf = 0;
+  for (const entry of _nodeNetCharts.values()) {
+    entry.state.lastDrawPerf = 0;
+  }
 }
 
 function stopOverviewNetPoller() {
@@ -104,6 +147,13 @@ function resetOverviewNetGraph() {
   _ovNetState.hasDrawnInitial = false;
   _ovNetState.playheadTs = null;
   _ovNetState.hasOffset = false;
+  for (const entry of _nodeNetCharts.values()) {
+    entry.state.samples = [];
+    entry.state.lastLiveServerTs = 0;
+    entry.state.hasDrawnInitial = false;
+    entry.state.playheadTs = null;
+    entry.state.hasOffset = false;
+  }
 }
 
 function ensureOverviewNetDom() {
@@ -188,18 +238,33 @@ function drawOverviewNetFrame(nowPerf = 0) {
   _ovNetState.rafId = null;
 
   if (state.currentView !== 'overview' || (typeof document !== 'undefined' && document.hidden)) {
-    _ovNetState.lastDrawPerf = 0;
+    stopOverviewNetRaf();
     return;
   }
 
-  const chartEl = ensureOverviewNetDom();
-  if (!chartEl) return;
-
-  if (renderSmoothNetFrame(OV_NET_CHART_CFG, _ovNetState, nowPerf)) {
-    _ovNetState.hasDrawnInitial = true;
-    if (_ovNetState.samples.length >= 2) {
-      startOverviewNetRaf();
+  let anyActive = false;
+  const singleEl = document.getElementById('overview-single-stats-grid');
+  if (!singleEl || singleEl.style.display !== 'none') {
+    const chartEl = ensureOverviewNetDom();
+    if (chartEl && renderSmoothNetFrame(OV_NET_CHART_CFG, _ovNetState, nowPerf)) {
+      _ovNetState.hasDrawnInitial = true;
+      if (_ovNetState.samples.length >= 2) anyActive = true;
     }
+  }
+
+  const multiStrip = document.getElementById('overview-nodes-strip');
+  if (multiStrip && multiStrip.style.display !== 'none') {
+    for (const [nid, entry] of _nodeNetCharts.entries()) {
+      if (!document.getElementById(`ov-node-${nid}-in-line`)) continue;
+      if (renderSmoothNetFrame(entry.cfg, entry.state, nowPerf)) {
+        entry.state.hasDrawnInitial = true;
+        if (entry.state.samples.length >= 2) anyActive = true;
+      }
+    }
+  }
+
+  if (anyActive) {
+    startOverviewNetRaf();
   }
 }
 
@@ -207,17 +272,24 @@ function startOverviewNetRaf() {
   if (_ovNetState.rafId !== null || state.currentView !== 'overview') return;
   if (typeof document !== 'undefined' && document.hidden) return;
   if (typeof requestAnimationFrame !== 'function') return;
-  if (_ovNetState.samples.length < 2) {
+
+  let maxSamples = _ovNetState.samples.length;
+  for (const entry of _nodeNetCharts.values()) {
+    if (entry.state.samples.length > maxSamples) {
+      maxSamples = entry.state.samples.length;
+    }
+  }
+  if (maxSamples < 2) {
     drawOverviewNetFrame(typeof performance !== 'undefined' ? performance.now() : 0);
     return;
   }
   _ovNetState.rafId = requestAnimationFrame(drawOverviewNetFrame);
 }
 
-function updateOverviewNetwork(net, opts = {}) {
-  if (!net || typeof net !== 'object') return;
+function normalizeAndMergeNetState(netState, net, opts = {}) {
+  if (!net || typeof net !== 'object') return { inBps: 0, outBps: 0, updated: false };
   const rawHistory = Array.isArray(net.history) ? net.history : [];
-  const normalized = [];
+  const rawSorted = [];
   let normSorted = true;
   let prevNormTs = -Infinity;
   for (let i = 0; i < rawHistory.length; i++) {
@@ -225,57 +297,85 @@ function updateOverviewNetwork(net, opts = {}) {
     if (!pt || typeof pt.ts !== 'number') continue;
     if (pt.ts < prevNormTs) normSorted = false;
     prevNormTs = pt.ts;
-    normalized.push({
+    rawSorted.push({
       ts: pt.ts,
       inboundBps: Math.max(0, Number(pt.inboundBps ?? pt.inbound_bps) || 0),
       outboundBps: Math.max(0, Number(pt.outboundBps ?? pt.outbound_bps) || 0),
     });
   }
   if (!normSorted) {
-    normalized.sort((a, b) => a.ts - b.ts);
+    rawSorted.sort((a, b) => a.ts - b.ts);
   }
 
   const inBps = Math.max(0, Number(net.inboundBps ?? net.inbound_bps) || 0);
   const outBps = Math.max(0, Number(net.outboundBps ?? net.outbound_bps) || 0);
-  if (normalized.length === 0) {
-    normalized.push({ ts: Date.now(), inboundBps: inBps, outboundBps: outBps });
+  if (rawSorted.length === 0) {
+    rawSorted.push({ ts: Date.now(), inboundBps: inBps, outboundBps: outBps });
   }
 
+  // Gentle 3-tap weighted smoothing absorbs single-second OS NIC jitter while keeping exact numeric readouts
+  const normalized = rawSorted.map((pt, idx) => {
+    if (rawSorted.length < 3 || idx === 0 || idx === rawSorted.length - 1) return pt;
+    const prev = rawSorted[idx - 1];
+    const next = rawSorted[idx + 1];
+    return {
+      ts: pt.ts,
+      inboundBps: 0.22 * prev.inboundBps + 0.56 * pt.inboundBps + 0.22 * next.inboundBps,
+      outboundBps: 0.22 * prev.outboundBps + 0.56 * pt.outboundBps + 0.22 * next.outboundBps,
+    };
+  });
+
   const latestServerTs = normalized[normalized.length - 1].ts;
-  // Never let a 2s/3s-cached /api/overview snapshot overwrite or regress live 1s telemetry
+  // For remote nodes (5s heartbeats) keep a steady 1s sample stream during live polling so 60fps playhead never stalls
+  if (!opts.fromSnapshot && opts.keepContinuousTick && Date.now() - latestServerTs > 1100) {
+    const prevLast = normalized[normalized.length - 1];
+    normalized.push({
+      ts: Date.now(),
+      inboundBps: 0.3 * prevLast.inboundBps + 0.7 * inBps,
+      outboundBps: 0.3 * prevLast.outboundBps + 0.7 * outBps,
+    });
+  }
+  const effectiveLatestTs = normalized[normalized.length - 1].ts;
   const staleSnapshot = Boolean(opts.fromSnapshot)
-    && _ovNetState.lastLiveServerTs > 0
-    && latestServerTs <= _ovNetState.lastLiveServerTs;
+    && netState.lastLiveServerTs > 0
+    && effectiveLatestTs <= netState.lastLiveServerTs;
+  if (staleSnapshot) return { inBps, outBps, updated: false };
 
-  if (!staleSnapshot) {
-    if (!opts.fromSnapshot) {
-      _ovNetState.lastLiveServerTs = Math.max(_ovNetState.lastLiveServerTs, latestServerTs);
+  if (!opts.fromSnapshot) {
+    netState.lastLiveServerTs = Math.max(netState.lastLiveServerTs, effectiveLatestTs);
+  }
+
+  const cutoff = effectiveLatestTs - (OV_NET_WINDOW_MS + 12000);
+  const existing = netState.samples;
+  const out = netState._mergeBuf;
+  out.length = 0;
+  let i = 0;
+  let j = 0;
+  while (i < existing.length && existing[i].ts < cutoff) i++;
+  while (j < normalized.length && normalized[j].ts < cutoff) j++;
+  while (i < existing.length && j < normalized.length) {
+    if (existing[i].ts < normalized[j].ts) {
+      out.push(existing[i++]);
+    } else if (normalized[j].ts < existing[i].ts) {
+      out.push(normalized[j++]);
+    } else {
+      out.push(normalized[j++]);
+      i++;
     }
+  }
+  while (i < existing.length) out.push(existing[i++]);
+  while (j < normalized.length) out.push(normalized[j++]);
+  netState._mergeBuf = existing;
+  netState.samples = out;
+  syncPerfOffset(netState, netState.samples, 0.05);
+  return { inBps, outBps, updated: true };
+}
 
-    const cutoff = latestServerTs - (OV_NET_WINDOW_MS + 12000);
-    const existing = _ovNetState.samples;
-    const out = _ovNetState._mergeBuf;
-    out.length = 0;
-    let i = 0;
-    let j = 0;
-    while (i < existing.length && existing[i].ts < cutoff) i++;
-    while (j < normalized.length && normalized[j].ts < cutoff) j++;
-    while (i < existing.length && j < normalized.length) {
-      if (existing[i].ts < normalized[j].ts) {
-        out.push(existing[i++]);
-      } else if (normalized[j].ts < existing[i].ts) {
-        out.push(normalized[j++]);
-      } else {
-        out.push(normalized[j++]);
-        i++;
-      }
-    }
-    while (i < existing.length) out.push(existing[i++]);
-    while (j < normalized.length) out.push(normalized[j++]);
-    _ovNetState._mergeBuf = existing;
-    _ovNetState.samples = out;
-    syncPerfOffset(_ovNetState, _ovNetState.samples, 0.05);
+function updateOverviewNetwork(net, opts = {}) {
+  if (!net || typeof net !== 'object') return;
+  const { inBps, outBps, updated } = normalizeAndMergeNetState(_ovNetState, net, opts);
 
+  if (updated) {
     const { inValEl, outValEl, ifaceEl, totalsEl } = getOverviewLabelEls();
     if (_ovNetState.hoverRatio === null) {
       setElText(inValEl, formatRate(inBps));
@@ -316,7 +416,7 @@ async function fetchOverviewNetwork() {
       updateOverviewNetwork(net, { fromSnapshot: false });
       if (net.perNode && typeof net.perNode === 'object') {
         for (const [nid, nodeNet] of Object.entries(net.perNode)) {
-          updateNodeStripNetwork(nid, nodeNet);
+          updateNodeStripNetwork(nid, nodeNet, { fromSnapshot: false, keepContinuousTick: true });
         }
       }
     }
@@ -490,70 +590,34 @@ function formatOverviewMemMbOrGb(bytes) {
   return `${Math.round(b / 1048576)} MB`;
 }
 
-function buildMiniWaveSvgPaths(history = [], inBps = 0, outBps = 0) {
-  const w = 320;
-  const topPad = 7;
-  const bottom = 50;
-  const raw = Array.isArray(history) && history.length > 0
-    ? history
-    : [{ inboundBps: inBps, outboundBps: outBps }, { inboundBps: inBps, outboundBps: outBps }];
-  const norm = raw.length === 1 ? [raw[0], raw[0]] : raw;
-  let maxRate = 1024;
-  for (const p of norm) {
-    const iv = Number(p.inboundBps ?? p.inbound_bps ?? 0);
-    const ov = Number(p.outboundBps ?? p.outbound_bps ?? 0);
-    if (iv > maxRate) maxRate = iv;
-    if (ov > maxRate) maxRate = ov;
-  }
-  const span = bottom - topPad;
-  const inPts = [];
-  const outPts = [];
-  for (let i = 0; i < norm.length; i++) {
-    const x = (i / (norm.length - 1)) * w;
-    const iv = Math.max(0, Number(norm[i].inboundBps ?? norm[i].inbound_bps ?? 0));
-    const ov = Math.max(0, Number(norm[i].outboundBps ?? norm[i].outbound_bps ?? 0));
-    inPts.push({ x, y: bottom - (iv / maxRate) * span });
-    outPts.push({ x, y: bottom - (ov / maxRate) * span });
-  }
-  const inTangents = computeMonotoneTangents(inPts);
-  const outTangents = computeMonotoneTangents(outPts);
-  const inPaths = buildCubicPaths(inPts, inTangents, bottom);
-  const outPaths = buildCubicPaths(outPts, outTangents, bottom);
-  return {
-    inLine: inPaths.line,
-    inArea: inPaths.area,
-    outLine: outPaths.line,
-    outArea: outPaths.area,
-  };
-}
-
-function updateNodeStripNetwork(nodeId, net) {
+function updateNodeStripNetwork(nodeId, net, opts = {}) {
   if (!net || typeof net !== 'object') return;
-  const inBps = Math.max(0, Number(net.inboundBps ?? net.inbound_bps) || 0);
-  const outBps = Math.max(0, Number(net.outboundBps ?? net.outbound_bps) || 0);
-  const rxTotal = Number(net.totalRxBytes ?? net.total_rx_bytes ?? 0);
-  const txTotal = Number(net.totalTxBytes ?? net.total_tx_bytes ?? 0);
-  const ifaces = Number(net.interfaceCount ?? net.interface_count ?? 0);
+  const entry = getOrCreateNodeNetChart(nodeId);
+  const { inBps, outBps, updated } = normalizeAndMergeNetState(entry.state, net, opts);
 
-  setText(`ov-node-${nodeId}-in`, formatRate(inBps));
-  setText(`ov-node-${nodeId}-out`, formatRate(outBps));
-  setText(`ov-node-${nodeId}-totals`, `↓ ${formatBytesShort(rxTotal)}  ↑ ${formatBytesShort(txTotal)}`);
-  if (ifaces > 0) {
-    const ifaceEl = document.getElementById(`ov-node-${nodeId}-iface`);
-    if (ifaceEl) {
-      const nName = ifaceEl.getAttribute('data-node-name') || 'VPS';
-      setElText(ifaceEl, `${nName} • ${ifaces} NIC${ifaces === 1 ? '' : 's'}`);
+  if (updated) {
+    if (entry.state.hoverRatio === null) {
+      setText(`ov-node-${nodeId}-in`, formatRate(inBps));
+      setText(`ov-node-${nodeId}-out`, formatRate(outBps));
+    }
+    const rxTotal = Number(net.totalRxBytes ?? net.total_rx_bytes ?? 0);
+    const txTotal = Number(net.totalTxBytes ?? net.total_tx_bytes ?? 0);
+    const ifaces = Number(net.interfaceCount ?? net.interface_count ?? 0);
+    setText(`ov-node-${nodeId}-totals`, `↓ ${formatBytesShort(rxTotal)}  ↑ ${formatBytesShort(txTotal)}`);
+    if (ifaces > 0) {
+      const ifaceEl = document.getElementById(`ov-node-${nodeId}-iface`);
+      if (ifaceEl) {
+        const nName = ifaceEl.getAttribute('data-node-name') || 'VPS';
+        setElText(ifaceEl, `${nName} • ${ifaces} NIC${ifaces === 1 ? '' : 's'}`);
+      }
     }
   }
-  const paths = buildMiniWaveSvgPaths(net.history, inBps, outBps);
-  const inLineEl = document.getElementById(`ov-node-${nodeId}-in-line`);
-  const inAreaEl = document.getElementById(`ov-node-${nodeId}-in-area`);
-  const outLineEl = document.getElementById(`ov-node-${nodeId}-out-line`);
-  const outAreaEl = document.getElementById(`ov-node-${nodeId}-out-area`);
-  if (inLineEl) inLineEl.setAttribute('d', paths.inLine);
-  if (inAreaEl) inAreaEl.setAttribute('d', paths.inArea);
-  if (outLineEl) outLineEl.setAttribute('d', paths.outLine);
-  if (outAreaEl) outAreaEl.setAttribute('d', paths.outArea);
+
+  if (!entry.state.hasDrawnInitial) {
+    drawOverviewNetFrame(typeof performance !== 'undefined' ? performance.now() : 0);
+  } else {
+    startOverviewNetRaf();
+  }
 }
 
 function renderOverviewNodesStrip(nodes) {
@@ -586,11 +650,131 @@ function renderOverviewNodesStrip(nodes) {
 
   const canCreate = typeof hasPower === 'function' ? hasPower('projects_manage') : false;
 
-  const html = list.map((n) => {
-    const isUp = n.isLocal || n.status === 'online';
-    const isDraining = n.status === 'draining';
-    const isBestHeadroom = bestNodeId != null && Number(n.id) === Number(bestNodeId);
-    const statusDot = isUp ? 'online' : isDraining ? 'maintenance' : 'offline';
+  // Build structural HTML without mutating SVG path `d` attributes or live KPI values
+  // so `setHtmlIfChanged` keeps the 60fps SVG DOM intact across periodic refreshes.
+  const structSig = list
+    .map((n) => `${n.id}:${n.status}:${n.name}:${n.id === bestNodeId}:${canCreate}`)
+    .join('|');
+
+  if (strip._structSig !== structSig) {
+    strip._structSig = structSig;
+    strip.innerHTML = list.map((n) => {
+      const isUp = n.isLocal || n.status === 'online';
+      const isDraining = n.status === 'draining';
+      const isBestHeadroom = bestNodeId != null && Number(n.id) === Number(bestNodeId);
+      const statusDot = isUp ? 'online' : isDraining ? 'maintenance' : 'offline';
+      const gradInId = `ovNodeGradIn-${n.id}`;
+      const gradOutId = `ovNodeGradOut-${n.id}`;
+      const clipId = `ovNodeClip-${n.id}`;
+
+      return `
+        <div class="overview-node-block">
+          <div class="overview-node-block-head">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <span class="status-dot ${statusDot}"></span>
+              <strong style="font-size:13px; color:var(--text-main);">${escapeHtml(n.name)}</strong>
+              <span id="ov-node-${n.id}-meta-sub" style="font-size:11px; color:var(--text-dim); font-family:var(--font-mono);"></span>
+              ${isBestHeadroom ? '<span class="badge badge-success" style="font-size:10px;">Most free RAM</span>' : ''}
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <button type="button" class="btn btn-secondary btn-sm" style="padding:3px 9px; font-size:11px;" onclick="window.setGlobalNodeFilter('${n.id}')">Inspect</button>
+              ${canCreate && isUp ? `<button type="button" class="btn btn-primary btn-sm" style="padding:3px 9px; font-size:11px;" onclick="window.deployOnOverviewNode(${n.id})">+ Create</button>` : ''}
+            </div>
+          </div>
+          <div class="stats-grid overview-stats-grid">
+            <div class="stat-card stat-card-network">
+              <div class="overview-net-head">
+                <div class="stat-label" style="justify-content:flex-start; gap:6px;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                  </svg>
+                  Network
+                </div>
+                <div class="app-net-legend">
+                  <span class="app-net-pill net-in"><span class="app-net-dot"></span>In <strong id="ov-node-${n.id}-in">0 B/s</strong></span>
+                  <span class="app-net-pill net-out"><span class="app-net-dot"></span>Out <strong id="ov-node-${n.id}-out">0 B/s</strong></span>
+                </div>
+              </div>
+              <div class="app-usage-net-chart overview-net-chart" id="ov-node-${n.id}-chart">
+                <svg class="app-net-svg" viewBox="0 0 ${OV_NET_SVG_W} ${OV_NET_SVG_H}" preserveAspectRatio="none">
+                  <defs>
+                    <clipPath id="${clipId}">
+                      <rect x="0" y="0" width="${OV_NET_SVG_W}" height="${OV_NET_SVG_H}"></rect>
+                    </clipPath>
+                    <linearGradient id="${gradInId}" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stop-color="#4cc38a" stop-opacity="0.28"/>
+                      <stop offset="100%" stop-color="#4cc38a" stop-opacity="0.01"/>
+                    </linearGradient>
+                    <linearGradient id="${gradOutId}" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stop-color="#4f8ef7" stop-opacity="0.26"/>
+                      <stop offset="100%" stop-color="#4f8ef7" stop-opacity="0.01"/>
+                    </linearGradient>
+                  </defs>
+                  <line x1="0" y1="18" x2="${OV_NET_SVG_W}" y2="18" stroke="rgba(238,241,247,0.045)" stroke-dasharray="3 4"/>
+                  <line x1="0" y1="34" x2="${OV_NET_SVG_W}" y2="34" stroke="rgba(238,241,247,0.045)" stroke-dasharray="3 4"/>
+                  <line x1="0" y1="${OV_NET_BOTTOM}" x2="${OV_NET_SVG_W}" y2="${OV_NET_BOTTOM}" stroke="rgba(238,241,247,0.08)"/>
+                  <g clip-path="url(#${clipId})">
+                    <path id="ov-node-${n.id}-in-area" d="" fill="url(#${gradInId})"/>
+                    <path id="ov-node-${n.id}-out-area" d="" fill="url(#${gradOutId})"/>
+                    <path id="ov-node-${n.id}-in-glow" d="" fill="none" stroke="rgba(76, 195, 138, 0.22)" stroke-width="5" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path id="ov-node-${n.id}-out-glow" d="" fill="none" stroke="rgba(79, 142, 247, 0.22)" stroke-width="5" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path id="ov-node-${n.id}-in-line" d="" fill="none" stroke="#4cc38a" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path id="ov-node-${n.id}-out-line" d="" fill="none" stroke="#4f8ef7" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+                  </g>
+                </svg>
+                <div id="ov-node-${n.id}-in-dot" class="app-net-live-marker net-in" style="opacity:0;"></div>
+                <div id="ov-node-${n.id}-out-dot" class="app-net-live-marker net-out" style="opacity:0;"></div>
+                <div id="ov-node-${n.id}-crosshair" class="app-net-crosshair" style="display:none;"></div>
+                <span id="ov-node-${n.id}-peak" class="app-net-scale-chip">Peak 0 B/s</span>
+              </div>
+              <div class="stat-meta overview-net-footer">
+                <span id="ov-node-${n.id}-iface" data-node-name="${escapeHtml(n.name)}">${escapeHtml(n.name)}</span>
+                <span id="ov-node-${n.id}-totals" class="app-net-totals">&darr; 0 B &nbsp;&uarr; 0 B</span>
+              </div>
+            </div>
+
+            <div class="stat-card">
+              <div class="stat-label">CPU</div>
+              <div class="stat-value" id="ov-node-${n.id}-cpu-pct">0%</div>
+              <div class="progress-bar"><div class="progress-fill green" id="ov-node-${n.id}-cpu-bar" style="width:0%;"></div></div>
+              <div class="stat-meta" id="ov-node-${n.id}-cpu-meta">-- Cores</div>
+            </div>
+
+            <div class="stat-card">
+              <div class="stat-label">RAM</div>
+              <div class="stat-value" id="ov-node-${n.id}-mem-pct">0%</div>
+              <div class="progress-bar"><div class="progress-fill green" id="ov-node-${n.id}-mem-bar" style="width:0%;"></div></div>
+              <div class="stat-meta" id="ov-node-${n.id}-mem-meta">-- used</div>
+            </div>
+
+            <div class="stat-card">
+              <div class="stat-label">Disk Free</div>
+              <div class="stat-value" id="ov-node-${n.id}-disk-free">-- GB</div>
+              <div class="progress-bar"><div class="progress-fill green" id="ov-node-${n.id}-disk-bar" style="width:0%;"></div></div>
+              <div class="stat-meta" id="ov-node-${n.id}-disk-meta">-- total</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  for (const n of list) {
+    const chartBox = document.getElementById(`ov-node-${n.id}-chart`);
+    if (chartBox && !chartBox._hoverWired) {
+      chartBox._hoverWired = true;
+      const chartEntry = getOrCreateNodeNetChart(n.id);
+      chartBox.onmousemove = (ev) => {
+        const rect = chartBox.getBoundingClientRect();
+        if (!rect.width) return;
+        chartEntry.state.hoverRatio = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+      };
+      chartBox.onmouseleave = () => {
+        chartEntry.state.hoverRatio = null;
+        const cross = document.getElementById(`ov-node-${n.id}-crosshair`);
+        if (cross) cross.style.display = 'none';
+      };
+    }
 
     const cpuPct = Math.round(Number(n.cpuPct || 0));
     const cpuCores = Number(n.cpuCores || 1);
@@ -600,92 +784,53 @@ function renderOverviewNodesStrip(nodes) {
     const diskPct = Math.min(100, Math.max(0, Number(n.diskPct || 0)));
     const freeGb = (Number(n.diskFree || 0) / 1073741824).toFixed(1);
     const totalGb = (Number(n.diskTotal || 0) / 1073741824).toFixed(1);
-    const inBps = Number(n.inboundBps || 0);
-    const outBps = Number(n.outboundBps || 0);
-    const rxTotal = Number(n.totalRxBytes || 0);
-    const txTotal = Number(n.totalTxBytes || 0);
-    const ifaces = Number(n.interfaceCount || 0);
     const appsCount = Number(n.projectCount || 0);
     const dbsCount = Number(n.databaseCount || 0);
 
-    const cpuCls = cpuPct > 80 ? 'rose' : cpuPct > 50 ? 'amber' : 'green';
-    const memCls = memPct > 85 ? 'rose' : memPct > 65 ? 'amber' : 'green';
-    const diskCls = diskPct > 85 ? 'rose' : diskPct > 70 ? 'amber' : 'green';
-    const paths = buildMiniWaveSvgPaths(n.netHistory, inBps, outBps);
+    setText(
+      `ov-node-${n.id}-meta-sub`,
+      `${n.isLocal ? 'Primary' : 'Worker'}${n.meshIp ? ` • ${n.meshIp}` : ''} • ${appsCount} app${appsCount === 1 ? '' : 's'} • ${dbsCount} DB${dbsCount === 1 ? '' : 's'}`,
+    );
+    setText(`ov-node-${n.id}-cpu-pct`, `${cpuPct}%`);
+    const cpuBar = document.getElementById(`ov-node-${n.id}-cpu-bar`);
+    if (cpuBar) {
+      const cls = `progress-fill ${cpuPct > 80 ? 'rose' : cpuPct > 50 ? 'amber' : 'green'}`;
+      if (cpuBar.className !== cls) cpuBar.className = cls;
+      animateProgressBar(cpuBar, cpuPct);
+    }
+    setText(`ov-node-${n.id}-cpu-meta`, `${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`);
 
-    return `
-      <div class="overview-node-block">
-        <div class="overview-node-block-head">
-          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-            <span class="status-dot ${statusDot}"></span>
-            <strong style="font-size:13px; color:var(--text-main);">${escapeHtml(n.name)}</strong>
-            <span style="font-size:11px; color:var(--text-dim); font-family:var(--font-mono);">
-              ${n.isLocal ? 'Primary' : 'Worker'}${n.meshIp ? ` &bull; ${escapeHtml(n.meshIp)}` : ''} &bull; ${appsCount} app${appsCount === 1 ? '' : 's'} &bull; ${dbsCount} DB${dbsCount === 1 ? '' : 's'}
-            </span>
-            ${isBestHeadroom ? '<span class="badge badge-success" style="font-size:10px;">Most free RAM</span>' : ''}
-          </div>
-          <div style="display:flex; gap:6px; align-items:center;">
-            <button type="button" class="btn btn-secondary btn-sm" style="padding:3px 9px; font-size:11px;" onclick="window.setGlobalNodeFilter('${n.id}')">Inspect</button>
-            ${canCreate && isUp ? `<button type="button" class="btn btn-primary btn-sm" style="padding:3px 9px; font-size:11px;" onclick="window.deployOnOverviewNode(${n.id})">+ Create</button>` : ''}
-          </div>
-        </div>
-        <div class="stats-grid overview-stats-grid">
-          <div class="stat-card stat-card-network">
-            <div class="overview-net-head">
-              <div class="stat-label" style="justify-content:flex-start; gap:6px;">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-                </svg>
-                Network
-              </div>
-              <div class="app-net-legend">
-                <span class="app-net-pill net-in"><span class="app-net-dot"></span>In <strong id="ov-node-${n.id}-in">${escapeHtml(formatRate(inBps))}</strong></span>
-                <span class="app-net-pill net-out"><span class="app-net-dot"></span>Out <strong id="ov-node-${n.id}-out">${escapeHtml(formatRate(outBps))}</strong></span>
-              </div>
-            </div>
-            <div class="app-usage-net-chart overview-net-chart">
-              <svg class="app-net-svg" viewBox="0 0 320 56" preserveAspectRatio="none">
-                <line x1="0" y1="18" x2="320" y2="18" stroke="rgba(238,241,247,0.045)" stroke-dasharray="3 4"/>
-                <line x1="0" y1="34" x2="320" y2="34" stroke="rgba(238,241,247,0.045)" stroke-dasharray="3 4"/>
-                <line x1="0" y1="50" x2="320" y2="50" stroke="rgba(238,241,247,0.08)"/>
-                <path id="ov-node-${n.id}-in-area" d="${paths.inArea}" fill="rgba(76, 195, 138, 0.16)"/>
-                <path id="ov-node-${n.id}-out-area" d="${paths.outArea}" fill="rgba(79, 142, 247, 0.14)"/>
-                <path id="ov-node-${n.id}-in-line" d="${paths.inLine}" fill="none" stroke="#4cc38a" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
-                <path id="ov-node-${n.id}-out-line" d="${paths.outLine}" fill="none" stroke="#4f8ef7" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </div>
-            <div class="stat-meta overview-net-footer">
-              <span id="ov-node-${n.id}-iface" data-node-name="${escapeHtml(n.name)}">${escapeHtml(n.name)} &bull; ${ifaces} NIC${ifaces === 1 ? '' : 's'}</span>
-              <span id="ov-node-${n.id}-totals" class="app-net-totals">&darr; ${escapeHtml(formatBytesShort(rxTotal))} &nbsp;&uarr; ${escapeHtml(formatBytesShort(txTotal))}</span>
-            </div>
-          </div>
+    setText(`ov-node-${n.id}-mem-pct`, `${memPct}%`);
+    const memBar = document.getElementById(`ov-node-${n.id}-mem-bar`);
+    if (memBar) {
+      const cls = `progress-fill ${memPct > 85 ? 'rose' : memPct > 65 ? 'amber' : 'green'}`;
+      if (memBar.className !== cls) memBar.className = cls;
+      animateProgressBar(memBar, memPct);
+    }
+    setText(`ov-node-${n.id}-mem-meta`, `${usedMb} MB / ${totalMb} MB`);
 
-          <div class="stat-card">
-            <div class="stat-label">CPU</div>
-            <div class="stat-value">${cpuPct}%</div>
-            <div class="progress-bar"><div class="progress-fill ${cpuCls}" style="width:${Math.max(2, cpuPct)}%;"></div></div>
-            <div class="stat-meta">${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)</div>
-          </div>
+    setText(`ov-node-${n.id}-disk-free`, `${freeGb} GB`);
+    const diskBar = document.getElementById(`ov-node-${n.id}-disk-bar`);
+    if (diskBar) {
+      const cls = `progress-fill ${diskPct > 85 ? 'rose' : diskPct > 70 ? 'amber' : 'green'}`;
+      if (diskBar.className !== cls) diskBar.className = cls;
+      animateProgressBar(diskBar, diskPct);
+    }
+    setText(`ov-node-${n.id}-disk-meta`, `${totalGb} GB total (${diskPct}% used)`);
 
-          <div class="stat-card">
-            <div class="stat-label">RAM</div>
-            <div class="stat-value">${memPct}%</div>
-            <div class="progress-bar"><div class="progress-fill ${memCls}" style="width:${Math.max(2, memPct)}%;"></div></div>
-            <div class="stat-meta">${usedMb} MB / ${totalMb} MB</div>
-          </div>
-
-          <div class="stat-card">
-            <div class="stat-label">Disk Free</div>
-            <div class="stat-value">${freeGb} GB</div>
-            <div class="progress-bar"><div class="progress-fill ${diskCls}" style="width:${Math.max(2, diskPct)}%;"></div></div>
-            <div class="stat-meta">${totalGb} GB total (${diskPct}% used)</div>
-          </div>
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  setHtmlIfChanged(strip, html);
+    updateNodeStripNetwork(
+      n.id,
+      {
+        inboundBps: n.inboundBps,
+        outboundBps: n.outboundBps,
+        totalRxBytes: n.totalRxBytes,
+        totalTxBytes: n.totalTxBytes,
+        interfaceCount: n.interfaceCount,
+        history: n.netHistory,
+      },
+      { fromSnapshot: true },
+    );
+  }
 }
 
 function deployOnOverviewNode(nodeId) {

@@ -532,8 +532,8 @@ function renderSmoothNetFrame(cfg, netState, nowPerf) {
     }
   }
   const rawPeak = hasInWin ? inWinPeak : visPeak;
-  const targetPeak = Math.max(1024, rawPeak * 1.15);
-  const scaleAlpha = 1 - Math.exp(-dt * 3.5);
+  const targetPeak = Math.max(1024, rawPeak * 1.18);
+  const scaleAlpha = 1 - Math.exp(-dt * 1.4);
   netState.displayMaxRate += (targetPeak - netState.displayMaxRate) * scaleAlpha;
   const maxRate = Math.max(1024, netState.displayMaxRate);
 
