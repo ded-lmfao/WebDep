@@ -20,6 +20,8 @@ import {
   formatRate,
   setText,
   setElText,
+  computeMonotoneTangents,
+  buildCubicPaths,
   syncPerfOffset,
   renderSmoothNetFrame,
 } from './app_usage.js';
@@ -490,11 +492,12 @@ function formatOverviewMemMbOrGb(bytes) {
 
 function buildMiniWaveSvgPaths(history = [], inBps = 0, outBps = 0) {
   const w = 320;
+  const topPad = 7;
   const bottom = 50;
-  const pts = Array.isArray(history) && history.length > 0
+  const raw = Array.isArray(history) && history.length > 0
     ? history
     : [{ inboundBps: inBps, outboundBps: outBps }, { inboundBps: inBps, outboundBps: outBps }];
-  const norm = pts.length === 1 ? [pts[0], pts[0]] : pts;
+  const norm = raw.length === 1 ? [raw[0], raw[0]] : raw;
   let maxRate = 1024;
   for (const p of norm) {
     const iv = Number(p.inboundBps ?? p.inbound_bps ?? 0);
@@ -502,21 +505,26 @@ function buildMiniWaveSvgPaths(history = [], inBps = 0, outBps = 0) {
     if (iv > maxRate) maxRate = iv;
     if (ov > maxRate) maxRate = ov;
   }
-  const inCoords = [];
-  const outCoords = [];
+  const span = bottom - topPad;
+  const inPts = [];
+  const outPts = [];
   for (let i = 0; i < norm.length; i++) {
     const x = (i / (norm.length - 1)) * w;
     const iv = Math.max(0, Number(norm[i].inboundBps ?? norm[i].inbound_bps ?? 0));
     const ov = Math.max(0, Number(norm[i].outboundBps ?? norm[i].outbound_bps ?? 0));
-    const yIn = bottom - (iv / maxRate) * 40;
-    const yOut = bottom - (ov / maxRate) * 40;
-    inCoords.push(`${x.toFixed(1)} ${yIn.toFixed(1)}`);
-    outCoords.push(`${x.toFixed(1)} ${yOut.toFixed(1)}`);
+    inPts.push({ x, y: bottom - (iv / maxRate) * span });
+    outPts.push({ x, y: bottom - (ov / maxRate) * span });
   }
-  const inLine = `M ${inCoords.join(' L ')}`;
-  const inArea = `${inLine} L ${w} ${bottom} L 0 ${bottom} Z`;
-  const outLine = `M ${outCoords.join(' L ')}`;
-  return { inLine, inArea, outLine };
+  const inTangents = computeMonotoneTangents(inPts);
+  const outTangents = computeMonotoneTangents(outPts);
+  const inPaths = buildCubicPaths(inPts, inTangents, bottom);
+  const outPaths = buildCubicPaths(outPts, outTangents, bottom);
+  return {
+    inLine: inPaths.line,
+    inArea: inPaths.area,
+    outLine: outPaths.line,
+    outArea: outPaths.area,
+  };
 }
 
 function updateNodeStripNetwork(nodeId, net) {
@@ -541,9 +549,11 @@ function updateNodeStripNetwork(nodeId, net) {
   const inLineEl = document.getElementById(`ov-node-${nodeId}-in-line`);
   const inAreaEl = document.getElementById(`ov-node-${nodeId}-in-area`);
   const outLineEl = document.getElementById(`ov-node-${nodeId}-out-line`);
+  const outAreaEl = document.getElementById(`ov-node-${nodeId}-out-area`);
   if (inLineEl) inLineEl.setAttribute('d', paths.inLine);
   if (inAreaEl) inAreaEl.setAttribute('d', paths.inArea);
   if (outLineEl) outLineEl.setAttribute('d', paths.outLine);
+  if (outAreaEl) outAreaEl.setAttribute('d', paths.outArea);
 }
 
 function renderOverviewNodesStrip(nodes) {
@@ -606,68 +616,69 @@ function renderOverviewNodesStrip(nodes) {
     return `
       <div class="overview-node-block">
         <div class="overview-node-block-head">
-          <div style="display:flex; align-items:center; gap:7px; flex-wrap:wrap;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
             <span class="status-dot ${statusDot}"></span>
-            <strong style="font-size:12.5px; color:var(--text-main);">${escapeHtml(n.name)}</strong>
-            <span style="font-size:10.5px; color:var(--text-dim); font-family:var(--font-mono);">
+            <strong style="font-size:13px; color:var(--text-main);">${escapeHtml(n.name)}</strong>
+            <span style="font-size:11px; color:var(--text-dim); font-family:var(--font-mono);">
               ${n.isLocal ? 'Primary' : 'Worker'}${n.meshIp ? ` &bull; ${escapeHtml(n.meshIp)}` : ''} &bull; ${appsCount} app${appsCount === 1 ? '' : 's'} &bull; ${dbsCount} DB${dbsCount === 1 ? '' : 's'}
             </span>
-            ${isBestHeadroom ? '<span class="badge badge-success" style="font-size:9.5px; padding:1px 6px;">Most headroom</span>' : ''}
+            ${isBestHeadroom ? '<span class="badge badge-success" style="font-size:10px;">Most free RAM</span>' : ''}
           </div>
-          <div style="display:flex; gap:5px; align-items:center;">
-            <button type="button" class="btn btn-secondary btn-sm" style="padding:2px 7px; font-size:10.5px;" onclick="window.setGlobalNodeFilter('${n.id}')">Focus</button>
-            ${canCreate && isUp ? `<button type="button" class="btn btn-primary btn-sm" style="padding:2px 8px; font-size:10.5px;" onclick="window.deployOnOverviewNode(${n.id})">+ Create</button>` : ''}
+          <div style="display:flex; gap:6px; align-items:center;">
+            <button type="button" class="btn btn-secondary btn-sm" style="padding:3px 9px; font-size:11px;" onclick="window.setGlobalNodeFilter('${n.id}')">Inspect</button>
+            ${canCreate && isUp ? `<button type="button" class="btn btn-primary btn-sm" style="padding:3px 9px; font-size:11px;" onclick="window.deployOnOverviewNode(${n.id})">+ Create</button>` : ''}
           </div>
         </div>
         <div class="stats-grid overview-stats-grid">
           <div class="stat-card stat-card-network">
             <div class="overview-net-head">
-              <div class="stat-label" style="justify-content:flex-start; gap:5px;">Network</div>
+              <div class="stat-label" style="justify-content:flex-start; gap:6px;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                </svg>
+                Network
+              </div>
               <div class="app-net-legend">
-                <span class="app-net-pill net-in"><span class="app-net-dot"></span><strong id="ov-node-${n.id}-in">${escapeHtml(formatRate(inBps))}</strong></span>
-                <span class="app-net-pill net-out"><span class="app-net-dot"></span><strong id="ov-node-${n.id}-out">${escapeHtml(formatRate(outBps))}</strong></span>
+                <span class="app-net-pill net-in"><span class="app-net-dot"></span>In <strong id="ov-node-${n.id}-in">${escapeHtml(formatRate(inBps))}</strong></span>
+                <span class="app-net-pill net-out"><span class="app-net-dot"></span>Out <strong id="ov-node-${n.id}-out">${escapeHtml(formatRate(outBps))}</strong></span>
               </div>
             </div>
             <div class="app-usage-net-chart overview-net-chart">
               <svg class="app-net-svg" viewBox="0 0 320 56" preserveAspectRatio="none">
-                <line x1="0" y1="25" x2="320" y2="25" stroke="rgba(238,241,247,0.045)" stroke-dasharray="3 4"/>
+                <line x1="0" y1="18" x2="320" y2="18" stroke="rgba(238,241,247,0.045)" stroke-dasharray="3 4"/>
+                <line x1="0" y1="34" x2="320" y2="34" stroke="rgba(238,241,247,0.045)" stroke-dasharray="3 4"/>
                 <line x1="0" y1="50" x2="320" y2="50" stroke="rgba(238,241,247,0.08)"/>
                 <path id="ov-node-${n.id}-in-area" d="${paths.inArea}" fill="rgba(76, 195, 138, 0.16)"/>
-                <path id="ov-node-${n.id}-in-line" d="${paths.inLine}" fill="none" stroke="#4cc38a" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
-                <path id="ov-node-${n.id}-out-line" d="${paths.outLine}" fill="none" stroke="#4f8ef7" stroke-width="1.4" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+                <path id="ov-node-${n.id}-out-area" d="${paths.outArea}" fill="rgba(79, 142, 247, 0.14)"/>
+                <path id="ov-node-${n.id}-in-line" d="${paths.inLine}" fill="none" stroke="#4cc38a" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+                <path id="ov-node-${n.id}-out-line" d="${paths.outLine}" fill="none" stroke="#4f8ef7" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
             </div>
             <div class="stat-meta overview-net-footer">
-              <span id="ov-node-${n.id}-iface" data-node-name="${escapeHtml(n.name)}">${ifaces} NIC${ifaces === 1 ? '' : 's'}</span>
-              <span id="ov-node-${n.id}-totals" class="app-net-totals">&darr; ${escapeHtml(formatBytesShort(rxTotal))} &uarr; ${escapeHtml(formatBytesShort(txTotal))}</span>
+              <span id="ov-node-${n.id}-iface" data-node-name="${escapeHtml(n.name)}">${escapeHtml(n.name)} &bull; ${ifaces} NIC${ifaces === 1 ? '' : 's'}</span>
+              <span id="ov-node-${n.id}-totals" class="app-net-totals">&darr; ${escapeHtml(formatBytesShort(rxTotal))} &nbsp;&uarr; ${escapeHtml(formatBytesShort(txTotal))}</span>
             </div>
           </div>
 
           <div class="stat-card">
-            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:6px;">
-              <div class="stat-label">CPU</div>
-              <div class="stat-value">${cpuPct}%</div>
-            </div>
+            <div class="stat-label">CPU</div>
+            <div class="stat-value">${cpuPct}%</div>
             <div class="progress-bar"><div class="progress-fill ${cpuCls}" style="width:${Math.max(2, cpuPct)}%;"></div></div>
-            <div class="stat-meta">${cpuCores} Core${cpuCores === 1 ? '' : 's'}</div>
+            <div class="stat-meta">${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)</div>
           </div>
 
           <div class="stat-card">
-            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:6px;">
-              <div class="stat-label">Memory</div>
-              <div class="stat-value">${memPct}%</div>
-            </div>
+            <div class="stat-label">RAM</div>
+            <div class="stat-value">${memPct}%</div>
             <div class="progress-bar"><div class="progress-fill ${memCls}" style="width:${Math.max(2, memPct)}%;"></div></div>
-            <div class="stat-meta">${usedMb} / ${totalMb} MB</div>
+            <div class="stat-meta">${usedMb} MB / ${totalMb} MB</div>
           </div>
 
           <div class="stat-card">
-            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:6px;">
-              <div class="stat-label">Disk Free</div>
-              <div class="stat-value">${freeGb} GB</div>
-            </div>
+            <div class="stat-label">Disk Free</div>
+            <div class="stat-value">${freeGb} GB</div>
             <div class="progress-bar"><div class="progress-fill ${diskCls}" style="width:${Math.max(2, diskPct)}%;"></div></div>
-            <div class="stat-meta">${totalGb} GB (${diskPct}% used)</div>
+            <div class="stat-meta">${totalGb} GB total (${diskPct}% used)</div>
           </div>
         </div>
       </div>
@@ -736,7 +747,7 @@ function renderResourceBreakdown(resources) {
     const kindBadgeClass = `badge-res-${r.kind}`;
     const iconInfo = getWorkloadIconInfo(r);
     const kindIconSvg = icon(iconInfo.name, { size: 24, cls: `res-icon-${r.kind}` });
-    
+
     const rNodeId = r.nodeId ?? r.node_id;
     const nodeName = (state.nodes || []).length > 1 && rNodeId != null ? getNodeDisplayName(rNodeId) : '';
     const nodeTag = nodeName ? `<span class="badge badge-neutral" style="font-size:10px; margin-left:6px;">${escapeHtml(nodeName)}</span>` : '';
