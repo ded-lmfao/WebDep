@@ -313,7 +313,12 @@ export function setGlobalNodeFilter(nodeId) {
   } else if (state.currentView === 'databases') {
     renderDatabasesList();
   } else if (state.currentView === 'overview') {
-    renderResourceBreakdown();
+    if (typeof window.resetOverviewNetGraph === 'function') window.resetOverviewNetGraph();
+    if (typeof window.loadOverview === 'function') {
+      void window.loadOverview();
+    } else {
+      renderResourceBreakdown();
+    }
   } else if (state.currentView === 'nodes') {
     renderNodesView();
   }

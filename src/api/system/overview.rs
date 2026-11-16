@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -7,6 +7,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::common::*;
+use crate::cluster::manager::RemoteWorkloadTelemetry;
+use crate::cluster::models::ClusterNode;
 
 #[derive(Serialize)]
 pub(crate) struct OverviewProjectItem {
@@ -108,6 +110,18 @@ pub struct ResourceSummary {
     pub total_workloads_count: usize,
 }
 
+#[derive(Deserialize, Default)]
+pub(crate) struct OverviewQuery {
+    #[serde(rename = "nodeId")]
+    pub node_id: Option<String>,
+}
+
+fn parse_node_filter(raw: Option<&str>) -> Option<i64> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"))
+        .and_then(|s| s.parse::<i64>().ok())
+}
+
 #[derive(Serialize)]
 pub(crate) struct OverviewResponse {
     pub projects: Vec<OverviewProjectItem>,
@@ -116,6 +130,10 @@ pub(crate) struct OverviewResponse {
     pub recent: Vec<crate::deployer::Deployment>,
     pub monitor: crate::monitor::SystemMetrics,
     pub network: crate::monitor::NetworkMetrics,
+    #[serde(rename = "nodeCount")]
+    pub node_count: usize,
+    #[serde(rename = "nodeLabel")]
+    pub node_label: String,
 }
 
 pub(crate) fn format_resource_bytes(bytes: u64) -> String {
@@ -300,13 +318,21 @@ async fn load_overview_deployments(
 pub(crate) async fn overview_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<OverviewQuery>,
 ) -> Result<Response, StatusCode> {
     let user = current_user(&state, &headers).await.ok_or(StatusCode::UNAUTHORIZED)?;
     state.monitor.touch_activity();
-    let cache_key = format!("overview:u{}", user.id);
+    let selected_node_id = parse_node_filter(query.node_id.as_deref());
+    let cache_key = format!(
+        "overview:u{}:n{}",
+        user.id,
+        selected_node_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "all".to_string())
+    );
 
     singleflight_json_bytes(&state.cache, cache_key, std::time::Duration::from_secs(2), &headers, || async {
-        compute_overview_bytes(&state, &user).await
+        compute_overview_bytes(&state, &user, selected_node_id).await
     })
     .await
 }
@@ -314,6 +340,7 @@ pub(crate) async fn overview_handler(
 async fn compute_overview_bytes(
     state: &AppState,
     user: &crate::auth::User,
+    selected_node_id: Option<i64>,
 ) -> Result<axum::body::Bytes, StatusCode> {
     let mut projs = state.projects.list().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     projs.retain(|p| !user.disabled && user.can_access_project(p.id));
@@ -340,29 +367,271 @@ async fn compute_overview_bytes(
     let mut recent = state.deployer.list_deployments(None, 25).await;
     recent.retain(|d| !user.disabled && user.can_access_project(d.project_id));
 
+    let nodes = state.cluster.list_nodes().await.unwrap_or_default();
+    let remote_telemetry = state.cluster.get_remote_workload_telemetry().await;
+    let remote_net_history = state.cluster.get_remote_net_history_map().await;
+
     let state = state.clone();
     let user = user.clone();
     tokio::task::spawn_blocking(move || {
-        compute_overview_bytes_sync(&state, &user, projs, raw_dbs, last_success_map, active_map, &mut recent)
+        compute_overview_bytes_sync(
+            &state,
+            &user,
+            selected_node_id,
+            &nodes,
+            &remote_telemetry,
+            &remote_net_history,
+            projs,
+            raw_dbs,
+            last_success_map,
+            active_map,
+            &mut recent,
+        )
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
+struct ScopedClusterScope<'a> {
+    local_node_id: i64,
+    include_local: bool,
+    remote_nodes: Vec<&'a ClusterNode>,
+    node_count: usize,
+    node_label: String,
+}
+
+fn resolve_cluster_scope<'a>(
+    nodes: &'a [ClusterNode],
+    selected_node_id: Option<i64>,
+) -> ScopedClusterScope<'a> {
+    let local_node = nodes.iter().find(|n| n.is_local);
+    let local_node_id = local_node.map(|n| n.id).unwrap_or(1);
+
+    if let Some(target_id) = selected_node_id {
+        if let Some(found) = nodes.iter().find(|n| n.id == target_id) {
+            if found.is_local {
+                return ScopedClusterScope {
+                    local_node_id,
+                    include_local: true,
+                    remote_nodes: Vec::new(),
+                    node_count: 1,
+                    node_label: found.name.clone(),
+                };
+            }
+            return ScopedClusterScope {
+                local_node_id,
+                include_local: false,
+                remote_nodes: vec![found],
+                node_count: 1,
+                node_label: found.name.clone(),
+            };
+        }
+    }
+
+    let remote_nodes: Vec<&ClusterNode> = nodes
+        .iter()
+        .filter(|n| !n.is_local && matches!(n.status.as_str(), "online" | "draining"))
+        .collect();
+    let node_count = 1 + remote_nodes.len();
+    let node_label = if node_count > 1 {
+        format!("Cluster ({node_count} Nodes)")
+    } else {
+        local_node
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| "Whole VPS".to_string())
+    };
+    ScopedClusterScope {
+        local_node_id,
+        include_local: true,
+        remote_nodes,
+        node_count,
+        node_label,
+    }
+}
+
+fn aggregate_scoped_host_metrics(
+    local_monitor: Option<crate::monitor::SystemMetrics>,
+    local_net: Option<crate::monitor::NetworkMetrics>,
+    remote_nodes: &[&ClusterNode],
+    remote_net_history: &std::collections::HashMap<i64, Vec<crate::monitor::NetworkSample>>,
+) -> (crate::monitor::SystemMetrics, crate::monitor::NetworkMetrics) {
+    let mut total_cores: usize = 0;
+    let mut weighted_cpu_sum: f64 = 0.0;
+    let mut mem_used: u64 = 0;
+    let mut mem_total: u64 = 0;
+    let mut disk_used: u64 = 0;
+    let mut disk_total: u64 = 0;
+    let mut uptime_s: u64 = 0;
+    let mut processes = Vec::new();
+
+    if let Some(ref lm) = local_monitor {
+        let cores = lm.cpu.cores.max(1);
+        total_cores = total_cores.saturating_add(cores);
+        weighted_cpu_sum += f64::from(lm.cpu.pct) * (cores as f64);
+        mem_used = mem_used.saturating_add(lm.memory.used);
+        mem_total = mem_total.saturating_add(lm.memory.total);
+        if let Some(ref d) = lm.disk {
+            disk_used = disk_used.saturating_add(d.used);
+            disk_total = disk_total.saturating_add(d.total);
+        }
+        uptime_s = uptime_s.max(lm.uptime_s);
+        processes = lm.processes.clone();
+    }
+
+    for rn in remote_nodes {
+        let cores = rn.capabilities.cpu_cores.max(1);
+        total_cores = total_cores.saturating_add(cores);
+        weighted_cpu_sum += f64::from(rn.metrics.cpu_pct.clamp(0.0, 100.0)) * (cores as f64);
+
+        let r_mem_total = rn.metrics.mem_total;
+        mem_total = mem_total.saturating_add(r_mem_total);
+        mem_used = mem_used.saturating_add(if r_mem_total > 0 {
+            rn.metrics.mem_used.min(r_mem_total)
+        } else {
+            rn.metrics.mem_used
+        });
+
+        let r_disk_total = rn.metrics.disk_total;
+        disk_total = disk_total.saturating_add(r_disk_total);
+        disk_used = disk_used.saturating_add(if r_disk_total > 0 {
+            rn.metrics.disk_used.min(r_disk_total)
+        } else {
+            rn.metrics.disk_used
+        });
+        uptime_s = uptime_s.max(rn.metrics.uptime_s);
+    }
+
+    let safe_cores = total_cores.max(1);
+    let safe_mem_total = mem_total.max(1);
+    let cpu_pct = (weighted_cpu_sum / (safe_cores as f64)).clamp(0.0, 100.0).round() as u8;
+    let mem_pct = ((mem_used as f64 / safe_mem_total as f64) * 100.0).clamp(0.0, 100.0).round() as u8;
+
+    let disk = if disk_total > 0 {
+        let free = disk_total.saturating_sub(disk_used);
+        let pct = ((disk_used as f64 / disk_total as f64) * 100.0).clamp(0.0, 100.0).round() as u8;
+        Some(crate::monitor::DiskMetrics {
+            total: disk_total,
+            used: disk_used,
+            free,
+            pct,
+        })
+    } else {
+        None
+    };
+
+    let sys_metrics = crate::monitor::SystemMetrics {
+        cpu: crate::monitor::CpuMetrics {
+            pct: cpu_pct,
+            cores: safe_cores,
+        },
+        memory: crate::monitor::MemoryMetrics {
+            total: mem_total,
+            used: mem_used,
+            free: mem_total.saturating_sub(mem_used),
+            pct: mem_pct,
+        },
+        disk,
+        uptime_s,
+        processes,
+    };
+
+    let mut inbound_bps: u64 = 0;
+    let mut outbound_bps: u64 = 0;
+    let mut total_rx_bytes: u64 = 0;
+    let mut total_tx_bytes: u64 = 0;
+    let mut interface_count: usize = 0;
+    let mut history: Vec<crate::monitor::NetworkSample> = Vec::new();
+
+    if let Some(ln) = local_net {
+        inbound_bps = inbound_bps.saturating_add(ln.inbound_bps);
+        outbound_bps = outbound_bps.saturating_add(ln.outbound_bps);
+        total_rx_bytes = total_rx_bytes.saturating_add(ln.total_rx_bytes);
+        total_tx_bytes = total_tx_bytes.saturating_add(ln.total_tx_bytes);
+        interface_count = interface_count.saturating_add(ln.interface_count);
+        history = ln.history;
+    }
+
+    for rn in remote_nodes {
+        inbound_bps = inbound_bps.saturating_add(rn.metrics.rx_bytes_sec);
+        outbound_bps = outbound_bps.saturating_add(rn.metrics.tx_bytes_sec);
+        total_rx_bytes = total_rx_bytes.saturating_add(rn.metrics.total_rx_bytes);
+        total_tx_bytes = total_tx_bytes.saturating_add(rn.metrics.total_tx_bytes);
+        interface_count = interface_count.saturating_add(rn.metrics.interface_count.max(1) as usize);
+
+        if let Some(r_hist) = remote_net_history.get(&rn.id) {
+            if history.is_empty() {
+                history = r_hist.clone();
+            } else {
+                for pt in &mut history {
+                    if let Some(match_pt) = r_hist
+                        .iter()
+                        .rev()
+                        .find(|s| s.ts <= pt.ts + 5000)
+                        .or_else(|| r_hist.first())
+                    {
+                        pt.inbound_bps = pt.inbound_bps.saturating_add(match_pt.inbound_bps);
+                        pt.outbound_bps = pt.outbound_bps.saturating_add(match_pt.outbound_bps);
+                    }
+                }
+            }
+        }
+    }
+
+    if history.is_empty() && !remote_nodes.is_empty() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        history.push(crate::monitor::NetworkSample {
+            ts: now_ms,
+            inbound_bps,
+            outbound_bps,
+        });
+    }
+
+    let net_metrics = crate::monitor::NetworkMetrics {
+        inbound_bps,
+        outbound_bps,
+        total_rx_bytes,
+        total_tx_bytes,
+        interface_count,
+        history,
+    };
+
+    (sys_metrics, net_metrics)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn compute_overview_bytes_sync(
     state: &AppState,
-    user: &crate::auth::User,
+    _user: &crate::auth::User,
+    selected_node_id: Option<i64>,
+    nodes: &[ClusterNode],
+    remote_telemetry: &std::collections::HashMap<i64, RemoteWorkloadTelemetry>,
+    remote_net_history: &std::collections::HashMap<i64, Vec<crate::monitor::NetworkSample>>,
     projs: Vec<Project>,
     raw_dbs: Vec<crate::databases::DatabaseOverviewSummary>,
     mut last_success_map: std::collections::HashMap<i64, crate::deployer::Deployment>,
     mut active_map: std::collections::HashMap<i64, crate::deployer::Deployment>,
     recent: &mut Vec<crate::deployer::Deployment>,
 ) -> Result<axum::body::Bytes, StatusCode> {
+    let scope = resolve_cluster_scope(nodes, selected_node_id);
+    let local_monitor = scope.include_local.then(|| state.monitor.sample());
+    let local_net = scope.include_local.then(crate::monitor::get_network_metrics);
+    let (mut monitor, network) = aggregate_scoped_host_metrics(
+        local_monitor,
+        local_net,
+        &scope.remote_nodes,
+        remote_net_history,
+    );
 
-    let mut monitor = state.monitor.sample();
     let total_vps_mem = monitor.memory.total.max(1);
     let total_vps_disk = monitor.disk.as_ref().map(|d| d.total).unwrap_or(1).max(1);
     let num_cores = monitor.cpu.cores.max(1) as f32;
+    let local_cores = scope
+        .include_local
+        .then(|| state.monitor.sample().cpu.cores.max(1) as f32)
+        .unwrap_or(num_cores);
     let total_vps_cpu = monitor.cpu.pct as f32;
     let cwd = cached_cwd();
 
@@ -371,6 +640,10 @@ fn compute_overview_bytes_sync(
 
     let mut proj_effective_pids = std::collections::HashMap::with_capacity(projs.len());
     for p in &projs {
+        let is_local_proj = p.node_id.is_none() || p.node_id == Some(scope.local_node_id);
+        if !is_local_proj {
+            continue;
+        }
         if let Some(pid) = p.app_pid {
             if crate::runtime::process::is_pid_alive(pid) {
                 proj_effective_pids.insert(p.id, pid);
@@ -393,81 +666,117 @@ fn compute_overview_bytes_sync(
     let db_entries = if !raw_dbs.is_empty() {
         let mut entries = Vec::with_capacity(raw_dbs.len());
         for db in raw_dbs {
+            let is_local_db = db.node_id.is_none() || db.node_id == Some(scope.local_node_id);
             let mut d_pid = None;
-            if let Some(ref cid) = db.container_id {
-                if let Some(p_str) = cid.strip_prefix("pid-") {
-                    d_pid = p_str.parse::<u32>().ok();
+            if is_local_db {
+                if let Some(ref cid) = db.container_id {
+                    if let Some(p_str) = cid.strip_prefix("pid-") {
+                        d_pid = p_str.parse::<u32>().ok();
+                    }
+                }
+                if d_pid.is_none() {
+                    let data_dir = std::path::PathBuf::from(&db.data_dir).join("data");
+                    d_pid = crate::databases::read_pg_pid(&data_dir);
+                }
+                if db.status == "running" {
+                    if let Some(pid) = d_pid {
+                        pids_to_query.push(pid);
+                    }
                 }
             }
-            if d_pid.is_none() {
-                let data_dir = std::path::PathBuf::from(&db.data_dir).join("data");
-                d_pid = crate::databases::read_pg_pid(&data_dir);
-            }
-            if db.status == "running" {
-                if let Some(pid) = d_pid {
-                    pids_to_query.push(pid);
-                }
-            }
-            entries.push((db, d_pid));
+            entries.push((db, d_pid, is_local_db));
         }
         entries
     } else {
         Vec::new()
     };
 
-    // Isolate panel daemon metrics to the WebDep process itself so child workloads are never double-counted into the panel
-    let ((panel_raw_cpu, panel_mem), proc_metrics) =
-        state.monitor.get_panel_and_tree_metrics(panel_pid, &pids_to_query);
+    let ((panel_raw_cpu, panel_mem), proc_metrics) = if scope.include_local {
+        state.monitor.get_panel_and_tree_metrics(panel_pid, &pids_to_query)
+    } else {
+        ((0.0, 0), std::collections::HashMap::new())
+    };
     let mut resources = Vec::with_capacity(1 + projs.len() + db_entries.len());
 
-    // 1. WebDep Panel daemon self metrics
-    let panel_cpu = ((panel_raw_cpu / num_cores).min(100.0) * 10.0).round() / 10.0;
-    let panel_mem_pct = ((panel_mem as f64 / total_vps_mem as f64 * 100.0) as f32 * 10.0).round() / 10.0;
+    // 1. WebDep Panel daemon self metrics (only when Local Core node is included in scope)
+    let (panel_cpu, panel_mem_val, panel_disk) = if scope.include_local {
+        let panel_cpu = ((panel_raw_cpu / local_cores).min(100.0) * 10.0).round() / 10.0;
+        let panel_mem_pct = ((panel_mem as f64 / total_vps_mem as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 
-    let panel_exe_size = cached_exe().map(crate::monitor::get_path_disk_size).unwrap_or(0);
-    let panel_db_size = crate::monitor::get_path_disk_size(&cwd.join("data").join("control-pg"))
-        .saturating_add(crate::monitor::get_path_disk_size(&cwd.join("data").join("webdep.sqlite")));
-    let panel_disk = panel_exe_size.saturating_add(panel_db_size);
-    let panel_disk_pct = ((panel_disk as f64 / total_vps_disk as f64 * 100.0) as f32 * 10.0).round() / 10.0;
+        let panel_exe_size = cached_exe().map(crate::monitor::get_path_disk_size).unwrap_or(0);
+        let panel_db_size = crate::monitor::get_path_disk_size(&cwd.join("data").join("control-pg"))
+            .saturating_add(crate::monitor::get_path_disk_size(&cwd.join("data").join("webdep.sqlite")));
+        let panel_disk = panel_exe_size.saturating_add(panel_db_size);
+        let panel_disk_pct = ((panel_disk as f64 / total_vps_disk as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 
-    resources.push(ResourceItem {
-        id: "panel".to_string(),
-        name: "WebDep Control Panel".to_string(),
-        kind: "panel".to_string(),
-        status: "running".to_string(),
-        pid: Some(panel_pid),
-        port: Some(4600),
-        cpu_pct: panel_cpu,
-        memory_bytes: panel_mem,
-        memory_formatted: format_resource_bytes(panel_mem),
-        memory_pct: panel_mem_pct,
-        disk_bytes: panel_disk,
-        disk_formatted: format_resource_bytes(panel_disk),
-        disk_pct: panel_disk_pct,
-        project_id: None,
-        database_id: None,
-        node_id: Some(1),
-        commit_sha: None,
-        domain: None,
-        project_type: Some("panel".to_string()),
-        start_cmd: None,
-    });
+        resources.push(ResourceItem {
+            id: "panel".to_string(),
+            name: "WebDep Control Panel".to_string(),
+            kind: "panel".to_string(),
+            status: "running".to_string(),
+            pid: Some(panel_pid),
+            port: Some(4600),
+            cpu_pct: panel_cpu,
+            memory_bytes: panel_mem,
+            memory_formatted: format_resource_bytes(panel_mem),
+            memory_pct: panel_mem_pct,
+            disk_bytes: panel_disk,
+            disk_formatted: format_resource_bytes(panel_disk),
+            disk_pct: panel_disk_pct,
+            project_id: None,
+            database_id: None,
+            node_id: Some(scope.local_node_id),
+            commit_sha: None,
+            domain: None,
+            project_type: Some("panel".to_string()),
+            start_cmd: None,
+        });
+        (panel_cpu, panel_mem, panel_disk)
+    } else {
+        (0.0, 0, 0)
+    };
 
     let mut items = Vec::with_capacity(projs.len());
 
     for p in projs {
-        let verified_pid = proj_effective_pids.get(&p.id).copied();
-        let active_pid = verified_pid.or(p.app_pid);
-        let is_running = verified_pid.is_some();
-        let (raw_cpu, mem) = if let Some(pid) = verified_pid {
-            proc_metrics.get(&pid).copied().unwrap_or((0.0, 0))
-        } else {
-            (0.0, 0)
-        };
-        let (cpu, mem_pct, mem_fmt) =
-            format_usage_metrics(is_running, raw_cpu, mem, num_cores, total_vps_mem);
+        let eff_node_id = p.node_id.unwrap_or(scope.local_node_id);
+        let is_local_proj = eff_node_id == scope.local_node_id;
+        let in_selected_scope = selected_node_id.is_none() || selected_node_id == Some(eff_node_id);
 
-        let (disk_bytes, disk_fmt) = compute_project_disk_formatted(&p, cwd);
+        let (is_running, active_pid, cpu, mem, mem_pct, mem_fmt, disk_bytes, disk_fmt) = if is_local_proj {
+            let verified_pid = proj_effective_pids.get(&p.id).copied();
+            let active_pid = verified_pid.or(p.app_pid);
+            let is_running = verified_pid.is_some();
+            let (raw_cpu, mem) = if let Some(pid) = verified_pid {
+                proc_metrics.get(&pid).copied().unwrap_or((0.0, 0))
+            } else {
+                (0.0, 0)
+            };
+            let (cpu, mem_pct, mem_fmt) =
+                format_usage_metrics(is_running, raw_cpu, mem, local_cores, total_vps_mem);
+            let (disk_bytes, disk_fmt) = compute_project_disk_formatted(&p, cwd);
+            (is_running, active_pid, cpu, mem, mem_pct, mem_fmt, disk_bytes, disk_fmt)
+        } else {
+            let telem = remote_telemetry.get(&p.id);
+            let is_running = p.app_status == "running";
+            let active_pid = telem.and_then(|t| t.pid).or(p.app_pid);
+            let (cpu, mem) = if is_running {
+                telem.map(|t| (t.cpu_pct, t.memory_bytes)).unwrap_or((0.0, 0))
+            } else {
+                (0.0, 0)
+            };
+            let cpu = if is_running { (cpu * 10.0).round() / 10.0 } else { 0.0 };
+            let mem_pct = if is_running {
+                ((mem as f64 / total_vps_mem as f64 * 100.0) as f32 * 10.0).round() / 10.0
+            } else {
+                0.0
+            };
+            let mem_fmt = format_resource_bytes(if is_running { mem } else { 0 });
+            let disk_bytes = telem.map(|t| t.disk_bytes).unwrap_or(0);
+            let disk_fmt = format_resource_bytes(disk_bytes);
+            (is_running, active_pid, cpu, mem, mem_pct, mem_fmt, disk_bytes, disk_fmt)
+        };
+
         let disk_pct = ((disk_bytes as f64 / total_vps_disk as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 
         let last_success = last_success_map.remove(&p.id);
@@ -475,29 +784,31 @@ fn compute_overview_bytes_sync(
 
         let kind = if p.project_kind == "service" { "service" } else { "website" };
         let res_status = if is_running { "running".to_string() } else { p.app_status.clone() };
-        let p_node_id = p.node_id;
-        resources.push(ResourceItem {
-            id: format!("{}-{}", kind, p.id),
-            name: p.name.clone(),
-            kind: kind.to_string(),
-            status: res_status,
-            pid: active_pid,
-            port: p.port,
-            cpu_pct: cpu,
-            memory_bytes: mem,
-            memory_formatted: mem_fmt.clone(),
-            memory_pct: mem_pct,
-            disk_bytes,
-            disk_formatted: disk_fmt.clone(),
-            disk_pct,
-            project_id: Some(p.id),
-            database_id: None,
-            node_id: p_node_id,
-            commit_sha: p.deployed_sha.clone(),
-            domain: p.domains.first().cloned(),
-            project_type: Some(p.project_type.clone()),
-            start_cmd: Some(p.start_cmd.clone()),
-        });
+        let p_node_id = Some(eff_node_id);
+        if in_selected_scope {
+            resources.push(ResourceItem {
+                id: format!("{}-{}", kind, p.id),
+                name: p.name.clone(),
+                kind: kind.to_string(),
+                status: res_status,
+                pid: active_pid,
+                port: p.port,
+                cpu_pct: cpu,
+                memory_bytes: mem,
+                memory_formatted: mem_fmt.clone(),
+                memory_pct: mem_pct,
+                disk_bytes,
+                disk_formatted: disk_fmt.clone(),
+                disk_pct,
+                project_id: Some(p.id),
+                database_id: None,
+                node_id: p_node_id,
+                commit_sha: p.deployed_sha.clone(),
+                domain: p.domains.first().cloned(),
+                project_type: Some(p.project_type.clone()),
+                start_cmd: Some(p.start_cmd.clone()),
+            });
+        }
 
         items.push(OverviewProjectItem {
             app: OverviewAppStatus {
@@ -518,17 +829,25 @@ fn compute_overview_bytes_sync(
         });
     }
 
-    for (db, d_pid) in db_entries {
+    for (db, d_pid, is_local_db) in db_entries {
+        let eff_node_id = db.node_id.unwrap_or(scope.local_node_id);
+        if selected_node_id.is_some() && selected_node_id != Some(eff_node_id) {
+            continue;
+        }
         let is_running = db.status == "running";
-        let (raw_cpu, mem) = if is_running {
+        let (raw_cpu, mem) = if is_running && is_local_db {
             d_pid.and_then(|pid| proc_metrics.get(&pid).copied()).unwrap_or((0.0, 0))
         } else {
             (0.0, 0)
         };
         let (cpu, mem_pct, mem_fmt) =
-            format_usage_metrics(is_running, raw_cpu, mem, num_cores, total_vps_mem);
+            format_usage_metrics(is_running, raw_cpu, mem, local_cores, total_vps_mem);
 
-        let (db_disk, db_disk_fmt) = compute_database_disk_formatted_dir(&db.data_dir, cwd);
+        let (db_disk, db_disk_fmt) = if is_local_db {
+            compute_database_disk_formatted_dir(&db.data_dir, cwd)
+        } else {
+            (0, format_resource_bytes(0))
+        };
         let db_disk_pct = ((db_disk as f64 / total_vps_disk as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 
         resources.push(ResourceItem {
@@ -547,7 +866,7 @@ fn compute_overview_bytes_sync(
             disk_pct: db_disk_pct,
             project_id: None,
             database_id: Some(db.id),
-            node_id: db.node_id,
+            node_id: Some(eff_node_id),
             commit_sha: None,
             domain: if db.domain.is_empty() { None } else { Some(db.domain) },
             project_type: Some("postgres".to_string()),
@@ -567,27 +886,40 @@ fn compute_overview_bytes_sync(
     });
 
     // Sum of CPU across all workloads (including panel)
-    let sum_all_cpu: f32 = resources.iter().map(|r| r.cpu_pct).sum();
-    let sum_all_cpu = (sum_all_cpu * 10.0).round() / 10.0;
+    let sum_all_cpu: f32 = if scope.node_count <= 1 {
+        let s: f32 = resources.iter().map(|r| r.cpu_pct).sum();
+        (s * 10.0).round() / 10.0
+    } else {
+        // Multi-node: total_vps_cpu is weighted across all nodes' cores, so avoid letting single-node pct exceed cluster average
+        total_vps_cpu
+    };
 
-    // Harmonize VPS total CPU:
-    // A system's total CPU usage is at least the sum of CPU used by its running processes.
-    // If the top card's instantaneous snapshot was lower than the active workloads, raise it so
-    // the top card and the workload breakdown table never contradict each other.
-    let effective_vps_cpu = (total_vps_cpu).max(sum_all_cpu).min(100.0);
+    let effective_vps_cpu = total_vps_cpu.max(sum_all_cpu).min(100.0);
     monitor.cpu.pct = effective_vps_cpu.round() as u8;
 
     let final_panel_cpu = resources.iter().find(|r| r.id == "panel").map(|r| r.cpu_pct).unwrap_or(panel_cpu);
 
     let total_managed_mem: u64 = resources.iter().filter(|r| r.id != "panel").map(|r| r.memory_bytes).sum();
     let total_managed_disk: u64 = resources.iter().filter(|r| r.id != "panel").map(|r| r.disk_bytes).sum();
-    let total_managed_cpu: f32 = resources.iter().filter(|r| r.id != "panel").map(|r| r.cpu_pct).sum();
-    let total_managed_cpu = (total_managed_cpu * 10.0).round() / 10.0;
+    let total_managed_cpu: f32 = if scope.node_count <= 1 {
+        let s: f32 = resources.iter().filter(|r| r.id != "panel").map(|r| r.cpu_pct).sum();
+        (s * 10.0).round() / 10.0
+    } else {
+        // When aggregating multiple nodes, weight each workload's CPU against cluster total cores
+        let mut weighted = 0.0f32;
+        for r in resources.iter().filter(|r| r.id != "panel") {
+            let n_cores = nodes
+                .iter()
+                .find(|n| Some(n.id) == r.node_id)
+                .map(|n| n.capabilities.cpu_cores.max(1) as f32)
+                .unwrap_or(local_cores);
+            weighted += r.cpu_pct * (n_cores / num_cores);
+        }
+        (weighted * 10.0).round() / 10.0
+    };
 
-    let total_all_mem = panel_mem.saturating_add(total_managed_mem);
+    let total_all_mem = panel_mem_val.saturating_add(total_managed_mem);
 
-    // Baseline operating system kernel & system daemon overhead (minimum 64MB or 1.5% of RAM)
-    // Avoids misleading '0 B' system overhead when process RSS sums overcount shared physical pages.
     let min_os_overhead = (total_vps_mem as f64 * 0.015).max(64.0 * 1024.0 * 1024.0) as u64;
     let system_overhead = if monitor.memory.used > total_all_mem.saturating_add(min_os_overhead) {
         monitor.memory.used.saturating_sub(total_all_mem)
@@ -608,8 +940,8 @@ fn compute_overview_bytes_sync(
         total_managed_cpu,
         total_managed_disk,
         total_managed_disk_formatted: format_resource_bytes(total_managed_disk),
-        panel_memory: panel_mem,
-        panel_memory_formatted: format_resource_bytes(panel_mem),
+        panel_memory: panel_mem_val,
+        panel_memory_formatted: format_resource_bytes(panel_mem_val),
         panel_cpu: final_panel_cpu,
         panel_disk,
         panel_disk_formatted: format_resource_bytes(panel_disk),
@@ -620,7 +952,7 @@ fn compute_overview_bytes_sync(
         total_workloads_count: total_count,
     };
 
-    recent.retain(|d| !user.disabled && user.can_access_project(d.project_id));
+    recent.retain(|d| !_user.disabled && _user.can_access_project(d.project_id));
     recent.truncate(10);
 
     let payload = OverviewResponse {
@@ -629,7 +961,9 @@ fn compute_overview_bytes_sync(
         summary,
         recent: recent.clone(),
         monitor,
-        network: crate::monitor::get_network_metrics(),
+        network,
+        node_count: scope.node_count,
+        node_label: scope.node_label,
     };
 
     let json_str = serde_json::to_string(&payload).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -639,10 +973,23 @@ fn compute_overview_bytes_sync(
 pub(crate) async fn overview_network_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<OverviewQuery>,
 ) -> Result<Response, StatusCode> {
     let _user = current_user(&state, &headers).await.ok_or(StatusCode::UNAUTHORIZED)?;
     state.monitor.touch_activity();
-    let mut res = Json(crate::monitor::get_network_metrics()).into_response();
+    let selected_node_id = parse_node_filter(query.node_id.as_deref());
+    let nodes = state.cluster.list_nodes().await.unwrap_or_default();
+    let remote_net_history = state.cluster.get_remote_net_history_map().await;
+    let scope = resolve_cluster_scope(&nodes, selected_node_id);
+    let local_net = scope.include_local.then(crate::monitor::get_network_metrics);
+    let (_, net) = aggregate_scoped_host_metrics(
+        None,
+        local_net,
+        &scope.remote_nodes,
+        &remote_net_history,
+    );
+
+    let mut res = Json(net).into_response();
     res.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store, no-cache, must-revalidate"),
@@ -793,6 +1140,102 @@ mod tests {
         assert!(act.get(&id2).is_none());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn aggregate_scoped_host_metrics_combines_all_online_nodes_and_scopes_single_node() {
+        use crate::cluster::models::{NodeCapabilities, NodeMetrics};
+
+        let make_node = |id: i64, name: &str, is_local: bool, cores: usize, cpu_pct: f32, mem_used_mb: u64, mem_total_mb: u64, disk_used_gb: u64, disk_total_gb: u64| {
+            ClusterNode {
+                id,
+                name: name.to_string(),
+                region: "default".to_string(),
+                tags: Vec::new(),
+                status: "online".to_string(),
+                is_local,
+                public_ip: String::new(),
+                mesh_ip: format!("10.200.0.{id}"),
+                wg_pubkey: String::new(),
+                wg_endpoint: String::new(),
+                node_version: "test".to_string(),
+                capabilities: NodeCapabilities {
+                    cpu_cores: cores,
+                    ..Default::default()
+                },
+                metrics: NodeMetrics {
+                    cpu_pct,
+                    mem_used: mem_used_mb * 1024 * 1024,
+                    mem_total: mem_total_mb * 1024 * 1024,
+                    disk_used: disk_used_gb * 1024 * 1024 * 1024,
+                    disk_total: disk_total_gb * 1024 * 1024 * 1024,
+                    uptime_s: 120,
+                    rx_bytes_sec: 1000 * (id as u64),
+                    tx_bytes_sec: 500 * (id as u64),
+                    total_rx_bytes: 10_000,
+                    total_tx_bytes: 5_000,
+                    interface_count: 2,
+                },
+                last_seen_at: Some(100),
+                created_at: 100,
+                updated_at: 100,
+                project_count: 0,
+                database_count: 0,
+            }
+        };
+
+        let n1 = make_node(1, "Primary", true, 4, 10.0, 1000, 4000, 10, 100);
+        let n2 = make_node(2, "VPS-2", false, 4, 30.0, 2000, 8000, 20, 200);
+        let n3 = make_node(3, "My oracle VPS", false, 4, 20.0, 3000, 12000, 30, 300);
+        let nodes = vec![n1, n2, n3];
+
+        let all_scope = resolve_cluster_scope(&nodes, None);
+        assert_eq!(all_scope.node_count, 3);
+        assert_eq!(all_scope.node_label, "Cluster (3 Nodes)");
+        let local_mon = crate::monitor::SystemMetrics {
+            cpu: crate::monitor::CpuMetrics { pct: 10, cores: 4 },
+            memory: crate::monitor::MemoryMetrics {
+                total: 4000 * 1024 * 1024,
+                used: 1000 * 1024 * 1024,
+                free: 3000 * 1024 * 1024,
+                pct: 25,
+            },
+            disk: Some(crate::monitor::DiskMetrics {
+                total: 100 * 1024 * 1024 * 1024,
+                used: 10 * 1024 * 1024 * 1024,
+                free: 90 * 1024 * 1024 * 1024,
+                pct: 10,
+            }),
+            uptime_s: 120,
+            processes: Vec::new(),
+        };
+        let (all_sys, all_net) = aggregate_scoped_host_metrics(
+            Some(local_mon),
+            None,
+            &all_scope.remote_nodes,
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(all_sys.cpu.cores, 12);
+        assert_eq!(all_sys.cpu.pct, 20);
+        assert_eq!(all_sys.memory.total, 24000 * 1024 * 1024);
+        assert_eq!(all_sys.memory.used, 6000 * 1024 * 1024);
+        assert_eq!(all_sys.disk.unwrap().total, 600 * 1024 * 1024 * 1024);
+        assert_eq!(all_net.inbound_bps, 2000 + 3000);
+
+        let n2_scope = resolve_cluster_scope(&nodes, Some(2));
+        assert_eq!(n2_scope.node_count, 1);
+        assert_eq!(n2_scope.node_label, "VPS-2");
+        assert!(!n2_scope.include_local);
+        let (n2_sys, n2_net) = aggregate_scoped_host_metrics(
+            None,
+            None,
+            &n2_scope.remote_nodes,
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(n2_sys.cpu.cores, 4);
+        assert_eq!(n2_sys.cpu.pct, 30);
+        assert_eq!(n2_sys.memory.total, 8000 * 1024 * 1024);
+        assert_eq!(n2_net.inbound_bps, 2000);
     }
 }
 

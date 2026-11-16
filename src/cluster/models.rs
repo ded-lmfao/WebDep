@@ -97,6 +97,12 @@ pub struct NodeMetrics {
     pub rx_bytes_sec: u64,
     #[serde(default)]
     pub tx_bytes_sec: u64,
+    #[serde(default)]
+    pub total_rx_bytes: u64,
+    #[serde(default)]
+    pub total_tx_bytes: u64,
+    #[serde(default)]
+    pub interface_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +141,10 @@ pub struct NodeWorkloadPlacement {
     pub app_status: String,
     #[serde(default)]
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub cpu_pct: f32,
+    #[serde(default)]
+    pub memory_bytes: u64,
     #[serde(default)]
     pub disk_bytes: u64,
     #[serde(default)]

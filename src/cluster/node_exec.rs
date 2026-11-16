@@ -184,6 +184,7 @@ impl NodeExecState {
             out
         };
 
+        let mut active_pids = Vec::new();
         for w in &mut list {
             let in_mem_pid = tracked_pids.get(&w.project_id).copied().flatten();
             let port_pid = if in_mem_pid.is_none() {
@@ -197,18 +198,53 @@ impl NodeExecState {
             w.pid = active_pid;
 
             if w.app_status != "maintenance" {
-                w.app_status = if active_pid.is_some() {
+                w.app_status = if let Some(pid) = active_pid {
+                    active_pids.push(pid);
                     "running".to_string()
                 } else {
                     "stopped".to_string()
                 };
+            } else if let Some(pid) = active_pid {
+                active_pids.push(pid);
             }
 
-            if !w.deploy_dir.trim().is_empty() {
-                let dpath = Path::new(&w.deploy_dir);
+            let mut total_disk = 0u64;
+            let deploy_path = (!w.deploy_dir.trim().is_empty()).then(|| PathBuf::from(&w.deploy_dir));
+            if let Some(ref dpath) = deploy_path {
                 if dpath.exists() {
-                    w.disk_bytes = get_path_disk_size(dpath);
+                    total_disk = total_disk.saturating_add(get_path_disk_size(dpath));
                 }
+            }
+            if !w.slug.trim().is_empty() {
+                let cpath = self.data_dir.join("containers").join(&w.slug);
+                if cpath.exists() && deploy_path.as_ref() != Some(&cpath) {
+                    total_disk = total_disk.saturating_add(get_path_disk_size(&cpath));
+                }
+            }
+            if total_disk > 0 {
+                w.disk_bytes = total_disk;
+            }
+        }
+
+        if !active_pids.is_empty() {
+            let num_cores = self.monitor.sample().cpu.cores.max(1) as f32;
+            let (_, proc_metrics) = self
+                .monitor
+                .get_panel_and_tree_metrics(std::process::id(), &active_pids);
+            for w in &mut list {
+                if let Some(pid) = w.pid {
+                    let (raw_cpu, mem) = proc_metrics.get(&pid).copied().unwrap_or((0.0, 0));
+                    w.cpu_pct = ((raw_cpu / num_cores).min(100.0) * 10.0).round() / 10.0;
+                    w.memory_bytes = mem;
+                } else {
+                    w.cpu_pct = 0.0;
+                    w.memory_bytes = 0;
+                }
+            }
+        } else {
+            for w in &mut list {
+                w.cpu_pct = 0.0;
+                w.memory_bytes = 0;
             }
         }
         list
@@ -235,6 +271,8 @@ impl NodeExecState {
                     .unwrap_or(p.app_status.as_str())
                     .to_string(),
                 pid,
+                cpu_pct: 0.0,
+                memory_bytes: 0,
                 disk_bytes: 0,
                 deploy_dir: p.deploy_dir.clone(),
             });
@@ -2875,6 +2913,8 @@ mod tests {
                 port: Some(43001),
                 app_status: "stopped".to_string(),
                 pid: None,
+                cpu_pct: 0.0,
+                memory_bytes: 0,
                 disk_bytes: 0,
                 deploy_dir: data_dir.join("sites/keep-app").to_string_lossy().to_string(),
             },
@@ -2885,6 +2925,8 @@ mod tests {
                 port: Some(43002),
                 app_status: "running".to_string(),
                 pid: None,
+                cpu_pct: 0.0,
+                memory_bytes: 0,
                 disk_bytes: 0,
                 deploy_dir: data_dir.join("sites/stale-app").to_string_lossy().to_string(),
             },
@@ -2895,6 +2937,8 @@ mod tests {
                 port: Some(43003),
                 app_status: "running".to_string(),
                 pid: None,
+                cpu_pct: 0.0,
+                memory_bytes: 0,
                 disk_bytes: 0,
                 deploy_dir: data_dir.join("sites/moved-away").to_string_lossy().to_string(),
             },

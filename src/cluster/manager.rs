@@ -51,6 +51,14 @@ fn generate_secret(prefix: &str) -> String {
     format!("{prefix}{}", hex::encode(bytes))
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RemoteWorkloadTelemetry {
+    pub pid: Option<u32>,
+    pub cpu_pct: f32,
+    pub memory_bytes: u64,
+    pub disk_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RpcReply {
     pub ok: bool,
@@ -66,6 +74,8 @@ pub struct ClusterManager {
     pending_rpc: RwLock<HashMap<String, oneshot::Sender<RpcReply>>>,
     rpc_seq: AtomicU64,
     remote_disk_bytes: RwLock<HashMap<i64, u64>>,
+    remote_workload_telemetry: RwLock<HashMap<i64, RemoteWorkloadTelemetry>>,
+    remote_net_history: RwLock<HashMap<i64, Vec<crate::monitor::NetworkSample>>>,
 }
 
 impl ClusterManager {
@@ -77,6 +87,8 @@ impl ClusterManager {
             pending_rpc: RwLock::new(HashMap::new()),
             rpc_seq: AtomicU64::new(1),
             remote_disk_bytes: RwLock::new(HashMap::new()),
+            remote_workload_telemetry: RwLock::new(HashMap::new()),
+            remote_net_history: RwLock::new(HashMap::new()),
         }
     }
 
@@ -626,6 +638,22 @@ impl ClusterManager {
         .execute(&self.db)
         .await
         .map_err(|e| format!("Failed updating node #{node_id} metrics: {e}"))?;
+
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(now * 1000);
+        let mut hist_guard = self.remote_net_history.write().await;
+        let entry = hist_guard.entry(node_id).or_default();
+        if entry.len() >= 60 {
+            let excess = entry.len() - 59;
+            entry.drain(0..excess);
+        }
+        entry.push(crate::monitor::NetworkSample {
+            ts: ts_ms,
+            inbound_bps: metrics.rx_bytes_sec,
+            outbound_bps: metrics.tx_bytes_sec,
+        });
         Ok(())
     }
 
@@ -860,6 +888,16 @@ impl ClusterManager {
         self.remote_disk_bytes.read().await.get(&project_id).copied()
     }
 
+    pub async fn get_remote_workload_telemetry(&self) -> HashMap<i64, RemoteWorkloadTelemetry> {
+        self.remote_workload_telemetry.read().await.clone()
+    }
+
+    pub async fn get_remote_net_history_map(
+        &self,
+    ) -> HashMap<i64, Vec<crate::monitor::NetworkSample>> {
+        self.remote_net_history.read().await.clone()
+    }
+
     pub async fn call_node(
         &self,
         node_id: i64,
@@ -958,10 +996,24 @@ impl ClusterManager {
             return;
         }
         let mut disk_guard = self.remote_disk_bytes.write().await;
+        let mut telem_guard = self.remote_workload_telemetry.write().await;
         for w in workloads {
             if w.disk_bytes > 0 {
                 disk_guard.insert(w.project_id, w.disk_bytes);
             }
+            let prev_disk = telem_guard
+                .get(&w.project_id)
+                .map(|t| t.disk_bytes)
+                .unwrap_or(0);
+            telem_guard.insert(
+                w.project_id,
+                RemoteWorkloadTelemetry {
+                    pid: w.pid,
+                    cpu_pct: w.cpu_pct,
+                    memory_bytes: w.memory_bytes,
+                    disk_bytes: if w.disk_bytes > 0 { w.disk_bytes } else { prev_disk },
+                },
+            );
             let pid_i64 = w.pid.map(|p| p as i64);
             let normalized_status = match w.app_status.as_str() {
                 "running" | "stopped" | "maintenance" | "idle" => w.app_status.as_str(),

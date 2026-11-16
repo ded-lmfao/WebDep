@@ -4,7 +4,7 @@
  */
 
 import { icon } from './icons.js';
-import { state, setHtmlIfChanged, escapeHtml, matchesNodeFilter } from './state.js';
+import { state, setHtmlIfChanged, escapeHtml, matchesNodeFilter, getNodeDisplayName } from './state.js';
 import { api } from './api.js';
 import {
   consumePendingViewStagger,
@@ -94,6 +94,14 @@ function stopOverviewNetPoller() {
     _ovNetState.pollTimer = null;
   }
   stopOverviewNetRaf();
+}
+
+function resetOverviewNetGraph() {
+  _ovNetState.samples = [];
+  _ovNetState.lastLiveServerTs = 0;
+  _ovNetState.hasDrawnInitial = false;
+  _ovNetState.playheadTs = null;
+  _ovNetState.hasOffset = false;
 }
 
 function ensureOverviewNetDom() {
@@ -273,9 +281,12 @@ function updateOverviewNetwork(net, opts = {}) {
     }
 
     const ifaces = Number(net.interfaceCount ?? net.interface_count ?? 0);
+    const scopeLabel = state.overview?.nodeLabel || (state.selectedNodeFilter && state.selectedNodeFilter !== 'all'
+      ? getNodeDisplayName(state.selectedNodeFilter) || 'Selected VPS'
+      : 'Whole VPS');
     setElText(
       ifaceEl,
-      ifaces > 0 ? `Whole VPS • ${ifaces} NIC${ifaces === 1 ? '' : 's'}` : 'Whole VPS NIC'
+      ifaces > 0 ? `${scopeLabel} • ${ifaces} NIC${ifaces === 1 ? '' : 's'}` : `${scopeLabel} NIC`
     );
 
     const rxTotal = Number(net.totalRxBytes ?? net.total_rx_bytes ?? 0);
@@ -297,7 +308,8 @@ async function fetchOverviewNetwork() {
   _ovNetState.pollInFlight = true;
   _ovNetState.lastFetchAt = Date.now();
   try {
-    const net = await api('/api/overview/network', { noCache: true });
+    const nodeParam = encodeURIComponent(String(state.selectedNodeFilter || 'all'));
+    const net = await api(`/api/overview/network?nodeId=${nodeParam}`, { noCache: true });
     if (net && typeof net === 'object') {
       updateOverviewNetwork(net, { fromSnapshot: false });
     }
@@ -512,18 +524,22 @@ function renderResourceBreakdown(resources) {
     const iconInfo = getWorkloadIconInfo(r);
     const kindIconSvg = icon(iconInfo.name, { size: 24, cls: `res-icon-${r.kind}` });
     
+    const rNodeId = r.nodeId ?? r.node_id;
+    const nodeName = (state.nodes || []).length > 1 && rNodeId != null ? getNodeDisplayName(rNodeId) : '';
+    const nodeTag = nodeName ? `<span class="badge badge-neutral" style="font-size:10px; margin-left:6px;">${escapeHtml(nodeName)}</span>` : '';
+
     let subtitle = '';
     if (r.kind === 'panel') {
-      subtitle = '<span style="color:var(--text-dim)">Core Platform Daemon</span>';
+      subtitle = `<span style="color:var(--text-dim)">Core Platform Daemon</span>${nodeTag}`;
     } else if (r.kind === 'database') {
-      subtitle = '<span style="color:var(--text-dim)">PostgreSQL Instance</span>';
+      subtitle = `<span style="color:var(--text-dim)">PostgreSQL Instance</span>${nodeTag}`;
     } else if (r.kind === 'service') {
       const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${shortSha(r.commitSha)}</span>` : '';
-      subtitle = `<span style="color:var(--text-dim)">Backend Service</span>${sha}`;
+      subtitle = `<span style="color:var(--text-dim)">Backend Service</span>${sha}${nodeTag}`;
     } else {
       const dom = r.domain ? `<a href="http://${escapeHtml(r.domain)}" target="_blank" class="domain-badge" style="font-size:11px;" onclick="event.stopPropagation()">${escapeHtml(r.domain)}</a>` : (r.port ? `<span style="color:var(--text-dim)">${r.port}</span>` : '<span style="color:var(--text-dim)">Local only</span>');
       const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${shortSha(r.commitSha)}</span>` : '';
-      subtitle = `${dom}${sha}`;
+      subtitle = `${dom}${sha}${nodeTag}`;
     }
 
     const pId = r.projectId ?? r.project_id;
@@ -631,7 +647,8 @@ function filterResourceBreakdown(filter) {
 
 async function loadOverview() {
   try {
-    const data = await api('/api/overview');
+    const nodeParam = encodeURIComponent(String(state.selectedNodeFilter || 'all'));
+    const data = await api(`/api/overview?nodeId=${nodeParam}`);
     state.overview = data;
     if (Array.isArray(data.projects)) {
       state.projects = data.projects.map((x) => x.project);
@@ -682,7 +699,12 @@ async function loadOverview() {
       if (cpuBar.className !== nextCls) cpuBar.className = nextCls;
       animateProgressBar(cpuBar, cpuPct);
     }
-    setElText(els.cpuMeta, `${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`);
+    const cpuMetaLabel = Number(data.nodeCount || 1) > 1
+      ? `${cpuCores} Cores • ${data.nodeCount} Nodes (${cpuPct}% avg)`
+      : (data.nodeLabel && state.selectedNodeFilter !== 'all'
+        ? `${data.nodeLabel} • ${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`
+        : `${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`);
+    setElText(els.cpuMeta, cpuMetaLabel);
 
     const memPct = m.memory?.pct || 0;
     const usedMb = ((m.memory?.used || 0) / 1048576).toFixed(0);
@@ -773,6 +795,7 @@ window.loadOverview = loadOverview;
 window.renderResourceBreakdown = renderResourceBreakdown;
 window.filterResourceBreakdown = filterResourceBreakdown;
 window.stopOverviewNetPoller = stopOverviewNetPoller;
+window.resetOverviewNetGraph = resetOverviewNetGraph;
 
 export {
   loadOverview,
@@ -780,4 +803,5 @@ export {
   filterResourceBreakdown,
   updateOverviewNetwork,
   stopOverviewNetPoller,
+  resetOverviewNetGraph,
 };

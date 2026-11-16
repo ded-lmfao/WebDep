@@ -180,7 +180,7 @@ impl MetricsSampler {
         sys.refresh_memory();
         let disks = Disks::new_with_refreshed_list();
         let networks = Networks::new_with_refreshed_list();
-        let (last_rx, last_tx) = sum_network_bytes(&networks);
+        let (last_rx, last_tx, _) = sum_network_bytes(&networks);
         Self {
             sys,
             disks,
@@ -215,7 +215,7 @@ impl MetricsSampler {
             })
             .unwrap_or((0, 0));
 
-        let (rx_now, tx_now) = sum_network_bytes(&self.networks);
+        let (rx_now, tx_now, iface_count) = sum_network_bytes(&self.networks);
         let elapsed = self.last_ts.elapsed().as_secs_f64().max(0.1);
         let rx_bytes_sec = ((rx_now.saturating_sub(self.last_rx)) as f64 / elapsed) as u64;
         let tx_bytes_sec = ((tx_now.saturating_sub(self.last_tx)) as f64 / elapsed) as u64;
@@ -232,13 +232,17 @@ impl MetricsSampler {
             uptime_s: System::uptime(),
             rx_bytes_sec,
             tx_bytes_sec,
+            total_rx_bytes: rx_now,
+            total_tx_bytes: tx_now,
+            interface_count: iface_count,
         }
     }
 }
 
-fn sum_network_bytes(networks: &Networks) -> (u64, u64) {
+fn sum_network_bytes(networks: &Networks) -> (u64, u64, u32) {
     let mut rx = 0u64;
     let mut tx = 0u64;
+    let mut count = 0u32;
     for (iface, data) in networks {
         let lower = iface.to_ascii_lowercase();
         if lower == "lo" || lower.starts_with("loopback") {
@@ -246,8 +250,9 @@ fn sum_network_bytes(networks: &Networks) -> (u64, u64) {
         }
         rx = rx.saturating_add(data.total_received());
         tx = tx.saturating_add(data.total_transmitted());
+        count = count.saturating_add(1);
     }
-    (rx, tx)
+    (rx, tx, count)
 }
 
 pub async fn run_node_agent(data_dir: PathBuf) {

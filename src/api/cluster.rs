@@ -1712,6 +1712,8 @@ mod tests {
                     port: Some(49123),
                     app_status: "running".to_string(),
                     pid: Some(42424),
+                    cpu_pct: 0.0,
+                    memory_bytes: 0,
                     disk_bytes: 20480,
                     deploy_dir: proj.deploy_dir.clone(),
                 }],
