@@ -432,8 +432,8 @@
 
         <!-- ==================== 1. OVERVIEW VIEW ==================== -->
         <section id="view-overview" class="view-section active">
-          <!-- Compact Quick Stats Strip -->
-          <div class="stats-grid overview-stats-grid">
+          <!-- Compact Quick Stats Strip (Single VPS / Filtered Node) -->
+          <div class="stats-grid overview-stats-grid" id="overview-single-stats-grid">
             <div class="stat-card stat-card-network" id="overview-card-network">
               <div class="overview-net-head">
                 <div class="stat-label" style="justify-content: flex-start; gap: 6px;">
@@ -482,6 +482,9 @@
               <div class="stat-meta" id="stat-disk-meta">-- total</div>
             </div>
           </div>
+
+          <!-- Per-VPS Separate Capacity Cards (shown automatically in multi-node clusters) -->
+          <div id="overview-nodes-strip" class="overview-nodes-strip" style="display: none;"></div>
 
           <!-- Active Deployment Pipeline (Only visible when a deployment is active) -->
           <div id="overview-active-deployment-box" style="display: none;" class="card">

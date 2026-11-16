@@ -122,6 +122,36 @@ fn parse_node_filter(raw: Option<&str>) -> Option<i64> {
         .and_then(|s| s.parse::<i64>().ok())
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OverviewNodeSummary {
+    pub id: i64,
+    pub name: String,
+    pub region: String,
+    pub status: String,
+    pub is_local: bool,
+    pub mesh_ip: String,
+    pub public_ip: String,
+    pub cpu_cores: usize,
+    pub cpu_pct: u8,
+    pub mem_used: u64,
+    pub mem_total: u64,
+    pub mem_free: u64,
+    pub mem_pct: u8,
+    pub disk_used: u64,
+    pub disk_total: u64,
+    pub disk_free: u64,
+    pub disk_pct: u8,
+    pub inbound_bps: u64,
+    pub outbound_bps: u64,
+    pub total_rx_bytes: u64,
+    pub total_tx_bytes: u64,
+    pub interface_count: usize,
+    pub net_history: Vec<crate::monitor::NetworkSample>,
+    pub project_count: i64,
+    pub database_count: i64,
+}
+
 #[derive(Serialize)]
 pub(crate) struct OverviewResponse {
     pub projects: Vec<OverviewProjectItem>,
@@ -130,6 +160,7 @@ pub(crate) struct OverviewResponse {
     pub recent: Vec<crate::deployer::Deployment>,
     pub monitor: crate::monitor::SystemMetrics,
     pub network: crate::monitor::NetworkMetrics,
+    pub nodes: Vec<OverviewNodeSummary>,
     #[serde(rename = "nodeCount")]
     pub node_count: usize,
     #[serde(rename = "nodeLabel")]
@@ -394,59 +425,184 @@ async fn compute_overview_bytes(
 
 struct ScopedClusterScope<'a> {
     local_node_id: i64,
+    focused_node_id: i64,
     include_local: bool,
     remote_nodes: Vec<&'a ClusterNode>,
     node_count: usize,
     node_label: String,
 }
 
+/// Resolves which single host populates the top quick-stat cards (`monitor` / `network`).
+/// Never merges distinct VPSes together: when viewing "All nodes", top cards show the Primary
+/// Control Node while `OverviewResponse.nodes` renders each VPS separately side-by-side.
 fn resolve_cluster_scope<'a>(
     nodes: &'a [ClusterNode],
     selected_node_id: Option<i64>,
 ) -> ScopedClusterScope<'a> {
     let local_node = nodes.iter().find(|n| n.is_local);
     let local_node_id = local_node.map(|n| n.id).unwrap_or(1);
+    let total_nodes = nodes.len().max(1);
 
     if let Some(target_id) = selected_node_id {
         if let Some(found) = nodes.iter().find(|n| n.id == target_id) {
             if found.is_local {
                 return ScopedClusterScope {
                     local_node_id,
+                    focused_node_id: found.id,
                     include_local: true,
                     remote_nodes: Vec::new(),
-                    node_count: 1,
+                    node_count: total_nodes,
                     node_label: found.name.clone(),
                 };
             }
             return ScopedClusterScope {
                 local_node_id,
+                focused_node_id: found.id,
                 include_local: false,
                 remote_nodes: vec![found],
-                node_count: 1,
+                node_count: total_nodes,
                 node_label: found.name.clone(),
             };
         }
     }
 
-    let remote_nodes: Vec<&ClusterNode> = nodes
-        .iter()
-        .filter(|n| !n.is_local && matches!(n.status.as_str(), "online" | "draining"))
-        .collect();
-    let node_count = 1 + remote_nodes.len();
-    let node_label = if node_count > 1 {
-        format!("Cluster ({node_count} Nodes)")
-    } else {
-        local_node
-            .map(|n| n.name.clone())
-            .unwrap_or_else(|| "Whole VPS".to_string())
-    };
+    let node_label = local_node
+        .map(|n| n.name.clone())
+        .unwrap_or_else(|| "Primary".to_string());
     ScopedClusterScope {
         local_node_id,
+        focused_node_id: local_node_id,
         include_local: true,
-        remote_nodes,
-        node_count,
+        remote_nodes: Vec::new(),
+        node_count: total_nodes,
         node_label,
     }
+}
+
+fn build_overview_node_summaries(
+    nodes: &[ClusterNode],
+    local_monitor: Option<&crate::monitor::SystemMetrics>,
+    local_net: Option<&crate::monitor::NetworkMetrics>,
+    remote_net_history: &std::collections::HashMap<i64, Vec<crate::monitor::NetworkSample>>,
+) -> Vec<OverviewNodeSummary> {
+    let mut out: Vec<OverviewNodeSummary> = nodes
+        .iter()
+        .map(|n| {
+            if n.is_local {
+                if let Some(lm) = local_monitor {
+                    let mem_total = lm.memory.total;
+                    let mem_used = lm.memory.used.min(mem_total.max(lm.memory.used));
+                    let mem_free = mem_total.saturating_sub(mem_used);
+                    let mem_pct = if mem_total > 0 {
+                        ((mem_used as f64 / mem_total as f64) * 100.0).clamp(0.0, 100.0).round() as u8
+                    } else {
+                        lm.memory.pct
+                    };
+                    let (disk_used, disk_total, disk_free, disk_pct) = lm
+                        .disk
+                        .as_ref()
+                        .map(|d| (d.used, d.total, d.free, d.pct))
+                        .unwrap_or((0, 0, 0, 0));
+                    return OverviewNodeSummary {
+                        id: n.id,
+                        name: n.name.clone(),
+                        region: n.region.clone(),
+                        status: n.status.clone(),
+                        is_local: true,
+                        mesh_ip: n.mesh_ip.clone(),
+                        public_ip: n.public_ip.clone(),
+                        cpu_cores: lm.cpu.cores.max(1),
+                        cpu_pct: lm.cpu.pct,
+                        mem_used,
+                        mem_total,
+                        mem_free,
+                        mem_pct,
+                        disk_used,
+                        disk_total,
+                        disk_free,
+                        disk_pct,
+                        inbound_bps: local_net.map(|ln| ln.inbound_bps).unwrap_or(0),
+                        outbound_bps: local_net.map(|ln| ln.outbound_bps).unwrap_or(0),
+                        total_rx_bytes: local_net.map(|ln| ln.total_rx_bytes).unwrap_or(0),
+                        total_tx_bytes: local_net.map(|ln| ln.total_tx_bytes).unwrap_or(0),
+                        interface_count: local_net.map(|ln| ln.interface_count).unwrap_or(0),
+                        net_history: local_net.map(|ln| ln.history.clone()).unwrap_or_default(),
+                        project_count: n.project_count,
+                        database_count: n.database_count,
+                    };
+                }
+            }
+
+            let mem_total = n.metrics.mem_total;
+            let mem_used = if mem_total > 0 {
+                n.metrics.mem_used.min(mem_total)
+            } else {
+                n.metrics.mem_used
+            };
+            let mem_free = mem_total.saturating_sub(mem_used);
+            let mem_pct = if mem_total > 0 {
+                ((mem_used as f64 / mem_total as f64) * 100.0).clamp(0.0, 100.0).round() as u8
+            } else {
+                0
+            };
+
+            let disk_total = n.metrics.disk_total;
+            let disk_used = if disk_total > 0 {
+                n.metrics.disk_used.min(disk_total)
+            } else {
+                n.metrics.disk_used
+            };
+            let disk_free = disk_total.saturating_sub(disk_used);
+            let disk_pct = if disk_total > 0 {
+                ((disk_used as f64 / disk_total as f64) * 100.0).clamp(0.0, 100.0).round() as u8
+            } else {
+                0
+            };
+
+            let mut hist = remote_net_history.get(&n.id).cloned().unwrap_or_default();
+            if hist.is_empty() && (n.metrics.rx_bytes_sec > 0 || n.metrics.tx_bytes_sec > 0) {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                hist.push(crate::monitor::NetworkSample {
+                    ts: now_ms,
+                    inbound_bps: n.metrics.rx_bytes_sec,
+                    outbound_bps: n.metrics.tx_bytes_sec,
+                });
+            }
+
+            OverviewNodeSummary {
+                id: n.id,
+                name: n.name.clone(),
+                region: n.region.clone(),
+                status: n.status.clone(),
+                is_local: n.is_local,
+                mesh_ip: n.mesh_ip.clone(),
+                public_ip: n.public_ip.clone(),
+                cpu_cores: n.capabilities.cpu_cores.max(1),
+                cpu_pct: n.metrics.cpu_pct.clamp(0.0, 100.0).round() as u8,
+                mem_used,
+                mem_total,
+                mem_free,
+                mem_pct,
+                disk_used,
+                disk_total,
+                disk_free,
+                disk_pct,
+                inbound_bps: n.metrics.rx_bytes_sec,
+                outbound_bps: n.metrics.tx_bytes_sec,
+                total_rx_bytes: n.metrics.total_rx_bytes,
+                total_tx_bytes: n.metrics.total_tx_bytes,
+                interface_count: n.metrics.interface_count.max(1) as usize,
+                net_history: hist,
+                project_count: n.project_count,
+                database_count: n.database_count,
+            }
+        })
+        .collect();
+    out.sort_by_key(|n| (!n.is_local, n.id));
+    out
 }
 
 fn aggregate_scoped_host_metrics(
@@ -616,8 +772,17 @@ fn compute_overview_bytes_sync(
     recent: &mut Vec<crate::deployer::Deployment>,
 ) -> Result<axum::body::Bytes, StatusCode> {
     let scope = resolve_cluster_scope(nodes, selected_node_id);
-    let local_monitor = scope.include_local.then(|| state.monitor.sample());
-    let local_net = scope.include_local.then(crate::monitor::get_network_metrics);
+    let local_mon_sample = state.monitor.sample();
+    let local_net_sample = crate::monitor::get_network_metrics();
+    let overview_nodes = build_overview_node_summaries(
+        nodes,
+        Some(&local_mon_sample),
+        Some(&local_net_sample),
+        remote_net_history,
+    );
+
+    let local_monitor = scope.include_local.then_some(local_mon_sample);
+    let local_net = scope.include_local.then_some(local_net_sample);
     let (mut monitor, network) = aggregate_scoped_host_metrics(
         local_monitor,
         local_net,
@@ -630,7 +795,7 @@ fn compute_overview_bytes_sync(
     let num_cores = monitor.cpu.cores.max(1) as f32;
     let local_cores = scope
         .include_local
-        .then(|| state.monitor.sample().cpu.cores.max(1) as f32)
+        .then_some(num_cores)
         .unwrap_or(num_cores);
     let total_vps_cpu = monitor.cpu.pct as f32;
     let cwd = cached_cwd();
@@ -766,8 +931,14 @@ fn compute_overview_bytes_sync(
                 (0.0, 0)
             };
             let cpu = if is_running { (cpu * 10.0).round() / 10.0 } else { 0.0 };
+            let host_mem_total = nodes
+                .iter()
+                .find(|n| n.id == eff_node_id)
+                .map(|n| n.metrics.mem_total)
+                .filter(|&v| v > 0)
+                .unwrap_or(total_vps_mem);
             let mem_pct = if is_running {
-                ((mem as f64 / total_vps_mem as f64 * 100.0) as f32 * 10.0).round() / 10.0
+                ((mem as f64 / host_mem_total as f64 * 100.0) as f32 * 10.0).round() / 10.0
             } else {
                 0.0
             };
@@ -777,7 +948,17 @@ fn compute_overview_bytes_sync(
             (is_running, active_pid, cpu, mem, mem_pct, mem_fmt, disk_bytes, disk_fmt)
         };
 
-        let disk_pct = ((disk_bytes as f64 / total_vps_disk as f64 * 100.0) as f32 * 10.0).round() / 10.0;
+        let host_disk_total = if is_local_proj {
+            total_vps_disk
+        } else {
+            nodes
+                .iter()
+                .find(|n| n.id == eff_node_id)
+                .map(|n| n.metrics.disk_total)
+                .filter(|&v| v > 0)
+                .unwrap_or(total_vps_disk)
+        };
+        let disk_pct = ((disk_bytes as f64 / host_disk_total as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 
         let last_success = last_success_map.remove(&p.id);
         let active = active_map.remove(&p.id);
@@ -885,38 +1066,25 @@ fn compute_overview_bytes_sync(
         }
     });
 
-    // Sum of CPU across all workloads (including panel)
-    let sum_all_cpu: f32 = if scope.node_count <= 1 {
-        let s: f32 = resources.iter().map(|r| r.cpu_pct).sum();
-        (s * 10.0).round() / 10.0
-    } else {
-        // Multi-node: total_vps_cpu is weighted across all nodes' cores, so avoid letting single-node pct exceed cluster average
-        total_vps_cpu
+    // Sum CPU/RAM only for workloads running on the focused VPS (`scope.focused_node_id`)
+    // so remote workloads shown in the "All nodes" table never subtract from Primary's RAM/CPU.
+    let on_focused = |r: &&ResourceItem| -> bool {
+        r.id != "panel" && r.node_id == Some(scope.focused_node_id)
     };
+    let focused_managed_cpu: f32 = {
+        let s: f32 = resources.iter().filter(on_focused).map(|r| r.cpu_pct).sum();
+        (s * 10.0).round() / 10.0
+    };
+    let sum_all_cpu: f32 = ((panel_cpu + focused_managed_cpu) * 10.0).round() / 10.0;
 
     let effective_vps_cpu = total_vps_cpu.max(sum_all_cpu).min(100.0);
     monitor.cpu.pct = effective_vps_cpu.round() as u8;
 
     let final_panel_cpu = resources.iter().find(|r| r.id == "panel").map(|r| r.cpu_pct).unwrap_or(panel_cpu);
 
-    let total_managed_mem: u64 = resources.iter().filter(|r| r.id != "panel").map(|r| r.memory_bytes).sum();
-    let total_managed_disk: u64 = resources.iter().filter(|r| r.id != "panel").map(|r| r.disk_bytes).sum();
-    let total_managed_cpu: f32 = if scope.node_count <= 1 {
-        let s: f32 = resources.iter().filter(|r| r.id != "panel").map(|r| r.cpu_pct).sum();
-        (s * 10.0).round() / 10.0
-    } else {
-        // When aggregating multiple nodes, weight each workload's CPU against cluster total cores
-        let mut weighted = 0.0f32;
-        for r in resources.iter().filter(|r| r.id != "panel") {
-            let n_cores = nodes
-                .iter()
-                .find(|n| Some(n.id) == r.node_id)
-                .map(|n| n.capabilities.cpu_cores.max(1) as f32)
-                .unwrap_or(local_cores);
-            weighted += r.cpu_pct * (n_cores / num_cores);
-        }
-        (weighted * 10.0).round() / 10.0
-    };
+    let total_managed_mem: u64 = resources.iter().filter(on_focused).map(|r| r.memory_bytes).sum();
+    let total_managed_disk: u64 = resources.iter().filter(on_focused).map(|r| r.disk_bytes).sum();
+    let total_managed_cpu: f32 = focused_managed_cpu;
 
     let total_all_mem = panel_mem_val.saturating_add(total_managed_mem);
 
@@ -962,6 +1130,7 @@ fn compute_overview_bytes_sync(
         recent: recent.clone(),
         monitor,
         network,
+        nodes: overview_nodes,
         node_count: scope.node_count,
         node_label: scope.node_label,
     };
@@ -981,7 +1150,8 @@ pub(crate) async fn overview_network_handler(
     let nodes = state.cluster.list_nodes().await.unwrap_or_default();
     let remote_net_history = state.cluster.get_remote_net_history_map().await;
     let scope = resolve_cluster_scope(&nodes, selected_node_id);
-    let local_net = scope.include_local.then(crate::monitor::get_network_metrics);
+    let local_net_sample = crate::monitor::get_network_metrics();
+    let local_net = scope.include_local.then(|| local_net_sample.clone());
     let (_, net) = aggregate_scoped_host_metrics(
         None,
         local_net,
@@ -989,7 +1159,34 @@ pub(crate) async fn overview_network_handler(
         &remote_net_history,
     );
 
-    let mut res = Json(net).into_response();
+    let per_node: std::collections::HashMap<String, crate::monitor::NetworkMetrics> = nodes
+        .iter()
+        .map(|n| {
+            let nm = if n.is_local {
+                local_net_sample.clone()
+            } else {
+                crate::monitor::NetworkMetrics {
+                    inbound_bps: n.metrics.rx_bytes_sec,
+                    outbound_bps: n.metrics.tx_bytes_sec,
+                    total_rx_bytes: n.metrics.total_rx_bytes,
+                    total_tx_bytes: n.metrics.total_tx_bytes,
+                    interface_count: n.metrics.interface_count.max(1) as usize,
+                    history: remote_net_history.get(&n.id).cloned().unwrap_or_default(),
+                }
+            };
+            (n.id.to_string(), nm)
+        })
+        .collect();
+
+    let mut val = serde_json::to_value(&net).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert(
+            "perNode".to_string(),
+            serde_json::to_value(per_node).unwrap_or_else(|_| serde_json::json!({})),
+        );
+    }
+
+    let mut res = Json(val).into_response();
     res.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store, no-cache, must-revalidate"),
@@ -1191,7 +1388,10 @@ mod tests {
 
         let all_scope = resolve_cluster_scope(&nodes, None);
         assert_eq!(all_scope.node_count, 3);
-        assert_eq!(all_scope.node_label, "Cluster (3 Nodes)");
+        assert_eq!(all_scope.node_label, "Primary");
+        assert!(all_scope.include_local);
+        assert!(all_scope.remote_nodes.is_empty());
+
         let local_mon = crate::monitor::SystemMetrics {
             cpu: crate::monitor::CpuMetrics { pct: 10, cores: 4 },
             memory: crate::monitor::MemoryMetrics {
@@ -1209,21 +1409,32 @@ mod tests {
             uptime_s: 120,
             processes: Vec::new(),
         };
-        let (all_sys, all_net) = aggregate_scoped_host_metrics(
+        let node_cards = build_overview_node_summaries(
+            &nodes,
+            Some(&local_mon),
+            None,
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(node_cards.len(), 3);
+        assert_eq!(node_cards[0].name, "Primary");
+        assert_eq!(node_cards[0].mem_free, 3000 * 1024 * 1024);
+        assert_eq!(node_cards[1].name, "VPS-2");
+        assert_eq!(node_cards[1].mem_free, 6000 * 1024 * 1024);
+        assert_eq!(node_cards[2].name, "My oracle VPS");
+        assert_eq!(node_cards[2].mem_free, 9000 * 1024 * 1024);
+
+        let (all_sys, _) = aggregate_scoped_host_metrics(
             Some(local_mon),
             None,
             &all_scope.remote_nodes,
             &std::collections::HashMap::new(),
         );
-        assert_eq!(all_sys.cpu.cores, 12);
-        assert_eq!(all_sys.cpu.pct, 20);
-        assert_eq!(all_sys.memory.total, 24000 * 1024 * 1024);
-        assert_eq!(all_sys.memory.used, 6000 * 1024 * 1024);
-        assert_eq!(all_sys.disk.unwrap().total, 600 * 1024 * 1024 * 1024);
-        assert_eq!(all_net.inbound_bps, 2000 + 3000);
+        // Top cards must show Primary alone (4 cores / 4000 MB), NOT combined across VPSes
+        assert_eq!(all_sys.cpu.cores, 4);
+        assert_eq!(all_sys.memory.total, 4000 * 1024 * 1024);
 
         let n2_scope = resolve_cluster_scope(&nodes, Some(2));
-        assert_eq!(n2_scope.node_count, 1);
+        assert_eq!(n2_scope.focused_node_id, 2);
         assert_eq!(n2_scope.node_label, "VPS-2");
         assert!(!n2_scope.include_local);
         let (n2_sys, n2_net) = aggregate_scoped_host_metrics(

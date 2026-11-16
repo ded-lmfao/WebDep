@@ -1147,3 +1147,63 @@
   border-top: 1px solid var(--border-subtle);
   flex-wrap: wrap;
 }
+
+/* Per-VPS Separate Compact 4-Box Strips inside Overview */
+.overview-nodes-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.overview-node-block {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.overview-node-block-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.overview-node-block .overview-stats-grid {
+  margin-top: 0;
+  margin-bottom: 0;
+  gap: 8px;
+}
+
+.overview-node-block .stat-card {
+  padding: 7px 10px;
+  gap: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.overview-node-block .stat-value {
+  font-size: 15px;
+  line-height: 1.15;
+}
+
+.overview-node-block .stat-label {
+  font-size: 10px;
+}
+
+.overview-node-block .stat-meta {
+  font-size: 10px;
+}
+
+.overview-node-block .progress-bar {
+  height: 3px;
+}
+
+.overview-node-block .overview-net-chart {
+  height: 24px;
+  min-height: 24px;
+}

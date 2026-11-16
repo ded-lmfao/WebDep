@@ -312,6 +312,11 @@ async function fetchOverviewNetwork() {
     const net = await api(`/api/overview/network?nodeId=${nodeParam}`, { noCache: true });
     if (net && typeof net === 'object') {
       updateOverviewNetwork(net, { fromSnapshot: false });
+      if (net.perNode && typeof net.perNode === 'object') {
+        for (const [nid, nodeNet] of Object.entries(net.perNode)) {
+          updateNodeStripNetwork(nid, nodeNet);
+        }
+      }
     }
   } catch {
     // Keep last rendered global VPS network graph silently on transient network glitches
@@ -473,6 +478,214 @@ function getOverviewDomEls() {
   };
   _ovDomCache.els = els;
   return els;
+}
+
+function formatOverviewMemMbOrGb(bytes) {
+  const b = Number(bytes || 0);
+  if (!Number.isFinite(b) || b <= 0) return '0 MB';
+  const gb = b / 1073741824;
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return `${Math.round(b / 1048576)} MB`;
+}
+
+function buildMiniWaveSvgPaths(history = [], inBps = 0, outBps = 0) {
+  const w = 320;
+  const bottom = 50;
+  const pts = Array.isArray(history) && history.length > 0
+    ? history
+    : [{ inboundBps: inBps, outboundBps: outBps }, { inboundBps: inBps, outboundBps: outBps }];
+  const norm = pts.length === 1 ? [pts[0], pts[0]] : pts;
+  let maxRate = 1024;
+  for (const p of norm) {
+    const iv = Number(p.inboundBps ?? p.inbound_bps ?? 0);
+    const ov = Number(p.outboundBps ?? p.outbound_bps ?? 0);
+    if (iv > maxRate) maxRate = iv;
+    if (ov > maxRate) maxRate = ov;
+  }
+  const inCoords = [];
+  const outCoords = [];
+  for (let i = 0; i < norm.length; i++) {
+    const x = (i / (norm.length - 1)) * w;
+    const iv = Math.max(0, Number(norm[i].inboundBps ?? norm[i].inbound_bps ?? 0));
+    const ov = Math.max(0, Number(norm[i].outboundBps ?? norm[i].outbound_bps ?? 0));
+    const yIn = bottom - (iv / maxRate) * 40;
+    const yOut = bottom - (ov / maxRate) * 40;
+    inCoords.push(`${x.toFixed(1)} ${yIn.toFixed(1)}`);
+    outCoords.push(`${x.toFixed(1)} ${yOut.toFixed(1)}`);
+  }
+  const inLine = `M ${inCoords.join(' L ')}`;
+  const inArea = `${inLine} L ${w} ${bottom} L 0 ${bottom} Z`;
+  const outLine = `M ${outCoords.join(' L ')}`;
+  return { inLine, inArea, outLine };
+}
+
+function updateNodeStripNetwork(nodeId, net) {
+  if (!net || typeof net !== 'object') return;
+  const inBps = Math.max(0, Number(net.inboundBps ?? net.inbound_bps) || 0);
+  const outBps = Math.max(0, Number(net.outboundBps ?? net.outbound_bps) || 0);
+  const rxTotal = Number(net.totalRxBytes ?? net.total_rx_bytes ?? 0);
+  const txTotal = Number(net.totalTxBytes ?? net.total_tx_bytes ?? 0);
+  const ifaces = Number(net.interfaceCount ?? net.interface_count ?? 0);
+
+  setText(`ov-node-${nodeId}-in`, formatRate(inBps));
+  setText(`ov-node-${nodeId}-out`, formatRate(outBps));
+  setText(`ov-node-${nodeId}-totals`, `↓ ${formatBytesShort(rxTotal)}  ↑ ${formatBytesShort(txTotal)}`);
+  if (ifaces > 0) {
+    const ifaceEl = document.getElementById(`ov-node-${nodeId}-iface`);
+    if (ifaceEl) {
+      const nName = ifaceEl.getAttribute('data-node-name') || 'VPS';
+      setElText(ifaceEl, `${nName} • ${ifaces} NIC${ifaces === 1 ? '' : 's'}`);
+    }
+  }
+  const paths = buildMiniWaveSvgPaths(net.history, inBps, outBps);
+  const inLineEl = document.getElementById(`ov-node-${nodeId}-in-line`);
+  const inAreaEl = document.getElementById(`ov-node-${nodeId}-in-area`);
+  const outLineEl = document.getElementById(`ov-node-${nodeId}-out-line`);
+  if (inLineEl) inLineEl.setAttribute('d', paths.inLine);
+  if (inAreaEl) inAreaEl.setAttribute('d', paths.inArea);
+  if (outLineEl) outLineEl.setAttribute('d', paths.outLine);
+}
+
+function renderOverviewNodesStrip(nodes) {
+  const strip = document.getElementById('overview-nodes-strip');
+  const singleGrid = document.getElementById('overview-single-stats-grid');
+  if (!strip) return;
+  const list = Array.isArray(nodes) ? nodes : [];
+  const selectedId = String(state.selectedNodeFilter || 'all');
+  const showSeparateStrips = list.length > 1 && selectedId === 'all';
+
+  if (!showSeparateStrips) {
+    if (singleGrid) singleGrid.style.display = '';
+    strip.style.display = 'none';
+    setHtmlIfChanged(strip, '');
+    return;
+  }
+
+  if (singleGrid) singleGrid.style.display = 'none';
+  strip.style.display = 'flex';
+
+  let bestNodeId = null;
+  let maxFreeRam = -1;
+  for (const n of list) {
+    const isUp = n.isLocal || n.status === 'online';
+    if (isUp && Number(n.memFree || 0) > maxFreeRam) {
+      maxFreeRam = Number(n.memFree || 0);
+      bestNodeId = n.id;
+    }
+  }
+
+  const canCreate = typeof hasPower === 'function' ? hasPower('projects_manage') : false;
+
+  const html = list.map((n) => {
+    const isUp = n.isLocal || n.status === 'online';
+    const isDraining = n.status === 'draining';
+    const isBestHeadroom = bestNodeId != null && Number(n.id) === Number(bestNodeId);
+    const statusDot = isUp ? 'online' : isDraining ? 'maintenance' : 'offline';
+
+    const cpuPct = Math.round(Number(n.cpuPct || 0));
+    const cpuCores = Number(n.cpuCores || 1);
+    const memPct = Math.round(Number(n.memPct || 0));
+    const usedMb = Math.round(Number(n.memUsed || 0) / 1048576);
+    const totalMb = Math.round(Number(n.memTotal || 0) / 1048576);
+    const diskPct = Math.min(100, Math.max(0, Number(n.diskPct || 0)));
+    const freeGb = (Number(n.diskFree || 0) / 1073741824).toFixed(1);
+    const totalGb = (Number(n.diskTotal || 0) / 1073741824).toFixed(1);
+    const inBps = Number(n.inboundBps || 0);
+    const outBps = Number(n.outboundBps || 0);
+    const rxTotal = Number(n.totalRxBytes || 0);
+    const txTotal = Number(n.totalTxBytes || 0);
+    const ifaces = Number(n.interfaceCount || 0);
+    const appsCount = Number(n.projectCount || 0);
+    const dbsCount = Number(n.databaseCount || 0);
+
+    const cpuCls = cpuPct > 80 ? 'rose' : cpuPct > 50 ? 'amber' : 'green';
+    const memCls = memPct > 85 ? 'rose' : memPct > 65 ? 'amber' : 'green';
+    const diskCls = diskPct > 85 ? 'rose' : diskPct > 70 ? 'amber' : 'green';
+    const paths = buildMiniWaveSvgPaths(n.netHistory, inBps, outBps);
+
+    return `
+      <div class="overview-node-block">
+        <div class="overview-node-block-head">
+          <div style="display:flex; align-items:center; gap:7px; flex-wrap:wrap;">
+            <span class="status-dot ${statusDot}"></span>
+            <strong style="font-size:12.5px; color:var(--text-main);">${escapeHtml(n.name)}</strong>
+            <span style="font-size:10.5px; color:var(--text-dim); font-family:var(--font-mono);">
+              ${n.isLocal ? 'Primary' : 'Worker'}${n.meshIp ? ` &bull; ${escapeHtml(n.meshIp)}` : ''} &bull; ${appsCount} app${appsCount === 1 ? '' : 's'} &bull; ${dbsCount} DB${dbsCount === 1 ? '' : 's'}
+            </span>
+            ${isBestHeadroom ? '<span class="badge badge-success" style="font-size:9.5px; padding:1px 6px;">Most headroom</span>' : ''}
+          </div>
+          <div style="display:flex; gap:5px; align-items:center;">
+            <button type="button" class="btn btn-secondary btn-sm" style="padding:2px 7px; font-size:10.5px;" onclick="window.setGlobalNodeFilter('${n.id}')">Focus</button>
+            ${canCreate && isUp ? `<button type="button" class="btn btn-primary btn-sm" style="padding:2px 8px; font-size:10.5px;" onclick="window.deployOnOverviewNode(${n.id})">+ Create</button>` : ''}
+          </div>
+        </div>
+        <div class="stats-grid overview-stats-grid">
+          <div class="stat-card stat-card-network">
+            <div class="overview-net-head">
+              <div class="stat-label" style="justify-content:flex-start; gap:5px;">Network</div>
+              <div class="app-net-legend">
+                <span class="app-net-pill net-in"><span class="app-net-dot"></span><strong id="ov-node-${n.id}-in">${escapeHtml(formatRate(inBps))}</strong></span>
+                <span class="app-net-pill net-out"><span class="app-net-dot"></span><strong id="ov-node-${n.id}-out">${escapeHtml(formatRate(outBps))}</strong></span>
+              </div>
+            </div>
+            <div class="app-usage-net-chart overview-net-chart">
+              <svg class="app-net-svg" viewBox="0 0 320 56" preserveAspectRatio="none">
+                <line x1="0" y1="25" x2="320" y2="25" stroke="rgba(238,241,247,0.045)" stroke-dasharray="3 4"/>
+                <line x1="0" y1="50" x2="320" y2="50" stroke="rgba(238,241,247,0.08)"/>
+                <path id="ov-node-${n.id}-in-area" d="${paths.inArea}" fill="rgba(76, 195, 138, 0.16)"/>
+                <path id="ov-node-${n.id}-in-line" d="${paths.inLine}" fill="none" stroke="#4cc38a" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+                <path id="ov-node-${n.id}-out-line" d="${paths.outLine}" fill="none" stroke="#4f8ef7" stroke-width="1.4" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <div class="stat-meta overview-net-footer">
+              <span id="ov-node-${n.id}-iface" data-node-name="${escapeHtml(n.name)}">${ifaces} NIC${ifaces === 1 ? '' : 's'}</span>
+              <span id="ov-node-${n.id}-totals" class="app-net-totals">&darr; ${escapeHtml(formatBytesShort(rxTotal))} &uarr; ${escapeHtml(formatBytesShort(txTotal))}</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:6px;">
+              <div class="stat-label">CPU</div>
+              <div class="stat-value">${cpuPct}%</div>
+            </div>
+            <div class="progress-bar"><div class="progress-fill ${cpuCls}" style="width:${Math.max(2, cpuPct)}%;"></div></div>
+            <div class="stat-meta">${cpuCores} Core${cpuCores === 1 ? '' : 's'}</div>
+          </div>
+
+          <div class="stat-card">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:6px;">
+              <div class="stat-label">Memory</div>
+              <div class="stat-value">${memPct}%</div>
+            </div>
+            <div class="progress-bar"><div class="progress-fill ${memCls}" style="width:${Math.max(2, memPct)}%;"></div></div>
+            <div class="stat-meta">${usedMb} / ${totalMb} MB</div>
+          </div>
+
+          <div class="stat-card">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; gap:6px;">
+              <div class="stat-label">Disk Free</div>
+              <div class="stat-value">${freeGb} GB</div>
+            </div>
+            <div class="progress-bar"><div class="progress-fill ${diskCls}" style="width:${Math.max(2, diskPct)}%;"></div></div>
+            <div class="stat-meta">${totalGb} GB (${diskPct}% used)</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  setHtmlIfChanged(strip, html);
+}
+
+function deployOnOverviewNode(nodeId) {
+  if (typeof window.setGlobalNodeFilter === 'function') {
+    window.setGlobalNodeFilter(String(nodeId));
+  } else {
+    state.selectedNodeFilter = String(nodeId);
+  }
+  if (typeof window.openAddWebsiteModal === 'function') {
+    window.openAddWebsiteModal(nodeId);
+  }
 }
 
 function renderResourceBreakdown(resources) {
@@ -699,11 +912,9 @@ async function loadOverview() {
       if (cpuBar.className !== nextCls) cpuBar.className = nextCls;
       animateProgressBar(cpuBar, cpuPct);
     }
-    const cpuMetaLabel = Number(data.nodeCount || 1) > 1
-      ? `${cpuCores} Cores • ${data.nodeCount} Nodes (${cpuPct}% avg)`
-      : (data.nodeLabel && state.selectedNodeFilter !== 'all'
-        ? `${data.nodeLabel} • ${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`
-        : `${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`);
+    const cpuMetaLabel = data.nodeLabel
+      ? `${data.nodeLabel} • ${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`
+      : `${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`;
     setElText(els.cpuMeta, cpuMetaLabel);
 
     const memPct = m.memory?.pct || 0;
@@ -745,7 +956,8 @@ async function loadOverview() {
     }
     setElText(els.resCountBadge, `${sum.runningWorkloadsCount || 0} / ${sum.totalWorkloadsCount || 0} Running`);
 
-    // Render active resources telemetry table
+    // Render per-VPS separate capacity comparison cards + active workloads table
+    renderOverviewNodesStrip(data.nodes);
     renderResourceBreakdown(data.resources);
 
     // Keep service pipelines synchronized with live telemetry & deployments
@@ -796,6 +1008,7 @@ window.renderResourceBreakdown = renderResourceBreakdown;
 window.filterResourceBreakdown = filterResourceBreakdown;
 window.stopOverviewNetPoller = stopOverviewNetPoller;
 window.resetOverviewNetGraph = resetOverviewNetGraph;
+window.deployOnOverviewNode = deployOnOverviewNode;
 
 export {
   loadOverview,
@@ -804,4 +1017,5 @@ export {
   updateOverviewNetwork,
   stopOverviewNetPoller,
   resetOverviewNetGraph,
+  deployOnOverviewNode,
 };
