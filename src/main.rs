@@ -244,6 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
+    crate::cluster::shift::fail_stale_interrupted_migrations(&db).await;
     cluster.start_staleness_reaper();
     if !cli.core_only {
         match cluster

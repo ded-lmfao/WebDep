@@ -305,6 +305,47 @@ fn x25519_ladder_51(k: &[u8; 32], u_bytes: &[u8; 32]) -> [u8; 32] {
     x2.mul(z2.inv()).to_bytes()
 }
 
+fn extract_url_host(url: &str) -> Option<String> {
+    let stripped = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))?;
+    let host_port = stripped.split('/').next()?.trim();
+    if host_port.is_empty() {
+        return None;
+    }
+    let host = if host_port.starts_with('[') {
+        host_port.split(']').next()?.trim_start_matches('[')
+    } else {
+        host_port.split(':').next()?
+    };
+    if host.is_empty() || host == "127.0.0.1" || host == "localhost" || host == "::1" {
+        return None;
+    }
+    Some(host.to_string())
+}
+
+fn resolve_peer_endpoint(manifest: &NodeStateManifest, peer: &PeerConfig) -> Option<String> {
+    let ep = peer.wg_endpoint.trim();
+    if !ep.is_empty() && !ep.starts_with("127.0.0.1:") && !ep.starts_with("localhost:") {
+        return Some(ep.to_string());
+    }
+    let pub_ip = peer.public_ip.trim();
+    if !pub_ip.is_empty() && pub_ip != "127.0.0.1" && pub_ip != "::1" && pub_ip != "0.0.0.0" {
+        return Some(format!("{pub_ip}:{DEFAULT_WG_PORT}"));
+    }
+    if peer.node_id == 1 {
+        if let Some(core_host) = extract_url_host(&manifest.core_url) {
+            return Some(format!("{core_host}:{DEFAULT_WG_PORT}"));
+        }
+    }
+    if !ep.is_empty() {
+        Some(ep.to_string())
+    } else {
+        None
+    }
+}
+
 pub fn render_wg_conf(manifest: &NodeStateManifest) -> String {
     let mut out = String::new();
     out.push_str("[Interface]\n");
@@ -312,6 +353,8 @@ pub fn render_wg_conf(manifest: &NodeStateManifest) -> String {
     out.push_str(&format!("PrivateKey = {}\n", manifest.wg_private_key));
     out.push_str(&format!("Address = {}/16\n", manifest.mesh_ip));
     out.push_str(&format!("ListenPort = {}\n", manifest.wg_listen_port));
+    // Clamp MTU to 1280 so WireGuard avoids Path-MTU blackholes across cloud overlays (e.g. Oracle OCI)
+    out.push_str("MTU = 1280\n");
 
     for peer in &manifest.peers {
         if peer.node_id == manifest.node_id || peer.wg_pubkey.trim().is_empty() || peer.mesh_ip.trim().is_empty() {
@@ -321,8 +364,8 @@ pub fn render_wg_conf(manifest: &NodeStateManifest) -> String {
         out.push_str(&format!("# {} (node #{})\n", peer.name, peer.node_id));
         out.push_str(&format!("PublicKey = {}\n", peer.wg_pubkey));
         out.push_str(&format!("AllowedIPs = {}/32\n", peer.mesh_ip));
-        if !peer.wg_endpoint.trim().is_empty() {
-            out.push_str(&format!("Endpoint = {}\n", peer.wg_endpoint));
+        if let Some(ep) = resolve_peer_endpoint(manifest, peer) {
+            out.push_str(&format!("Endpoint = {ep}\n"));
         }
         out.push_str("PersistentKeepalive = 25\n");
     }
@@ -419,14 +462,35 @@ pub async fn reconcile_mesh_network(manifest: &NodeStateManifest, data_dir: &Pat
                     .output()
                     .await;
             }
-        }
-        if command_exists("ufw") && crate::runtime::port::firewall_management_enabled() {
+            // Enforce safe MTU on live interface (`wg syncconf` preserves existing interface MTU)
             let _ = tokio::process::Command::new("sudo")
-                .args(["ufw", "allow", &format!("{}/udp", manifest.wg_listen_port)])
+                .args(["ip", "link", "set", "dev", "webdep0", "mtu", "1280"])
                 .output()
                 .await;
-            let _ = tokio::process::Command::new("sudo")
-                .args(["ufw", "allow", "from", "10.200.0.0/16"])
+        }
+        if crate::runtime::port::firewall_management_enabled() {
+            if command_exists("ufw") {
+                let _ = tokio::process::Command::new("sudo")
+                    .args(["ufw", "allow", &format!("{}/udp", manifest.wg_listen_port)])
+                    .output()
+                    .await;
+                let _ = tokio::process::Command::new("sudo")
+                    .args(["ufw", "allow", "from", "10.200.0.0/16"])
+                    .output()
+                    .await;
+            }
+            // Insert iptables ACCEPT rules ahead of cloud vendor REJECT rules (e.g. Oracle OCI)
+            let wg_port = manifest.wg_listen_port;
+            let ipt_cmd = format!(
+                "(sudo -n iptables -C INPUT -p udp --dport {wg_port} -j ACCEPT >/dev/null 2>&1 || \
+                  sudo -n iptables -I INPUT 1 -p udp --dport {wg_port} -j ACCEPT >/dev/null 2>&1 || true) && \
+                 (sudo -n iptables -C INPUT -i webdep0 -j ACCEPT >/dev/null 2>&1 || \
+                  sudo -n iptables -I INPUT 1 -i webdep0 -j ACCEPT >/dev/null 2>&1 || true) && \
+                 (sudo -n iptables -C INPUT -s 10.200.0.0/16 -j ACCEPT >/dev/null 2>&1 || \
+                  sudo -n iptables -I INPUT 1 -s 10.200.0.0/16 -j ACCEPT >/dev/null 2>&1 || true)"
+            );
+            let _ = tokio::process::Command::new("sh")
+                .args(["-c", &ipt_cmd])
                 .output()
                 .await;
         }
@@ -532,8 +596,37 @@ mod tests {
         };
         let conf = render_wg_conf(&manifest);
         assert!(conf.contains("Address = 10.200.0.1/16"));
+        assert!(conf.contains("MTU = 1280"));
         assert!(!conf.contains("PublicKey = pub1=="));
         assert!(conf.contains("PublicKey = pub2=="));
         assert!(conf.contains("AllowedIPs = 10.200.0.2/32"));
+
+        // Verify loopback Core endpoint on worker resolves to core_url host
+        let worker_manifest = NodeStateManifest {
+            node_id: 3,
+            name: "oracle".to_string(),
+            region: "ap".to_string(),
+            core_url: "http://145.79.134.188:4600".to_string(),
+            core_ws_url: "ws://145.79.134.188:4600/api/cluster/node-ws".to_string(),
+            mesh_ip: "10.200.0.3".to_string(),
+            public_ip: "130.210.62.154".to_string(),
+            wg_private_key: "priv3==".to_string(),
+            wg_pubkey: "pub3==".to_string(),
+            wg_listen_port: 51820,
+            node_token: "tok3".to_string(),
+            peers: vec![PeerConfig {
+                node_id: 1,
+                name: "core".to_string(),
+                mesh_ip: "10.200.0.1".to_string(),
+                public_ip: "127.0.0.1".to_string(),
+                wg_pubkey: "pub1==".to_string(),
+                wg_endpoint: "127.0.0.1:51820".to_string(),
+                status: "online".to_string(),
+            }],
+            workloads: vec![],
+            updated_at: 100,
+        };
+        let worker_conf = render_wg_conf(&worker_manifest);
+        assert!(worker_conf.contains("Endpoint = 145.79.134.188:51820"));
     }
 }

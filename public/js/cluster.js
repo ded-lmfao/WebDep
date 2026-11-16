@@ -51,41 +51,16 @@ function formatUptimeShort(secs) {
 
 export { matchesNodeFilter, getNodeDisplayName };
 
-export function syncGlobalNodeFilterOptions() {
-  const select = document.getElementById('global-node-filter');
-  if (!select) return;
-  const nodes = Array.isArray(state.nodes) ? state.nodes : [];
-  const current = String(state.selectedNodeFilter || 'all');
-
-  // The filter only makes sense once a second node has joined.
-  select.hidden = nodes.length <= 1;
-
-  const options = ['<option value="all">All nodes</option>'];
-  for (const n of nodes) {
-    const status = String(n.status || '').toLowerCase();
-    const label = `${escapeHtml(n.name)}${status && status !== 'online' ? ` · ${escapeHtml(status)}` : ''}`;
-    options.push(`<option value="${n.id}" title="${escapeHtml(n.meshIp || '')}">${label}</option>`);
-  }
-  const html = options.join('');
-  if (select._lastHtml !== html) {
-    select._lastHtml = html;
-    select.innerHTML = html;
-  }
-  if (current !== 'all' && !nodes.some((n) => String(n.id) === current)) {
-    state.selectedNodeFilter = 'all';
-    select.value = 'all';
-  } else {
-    select.value = current;
-  }
-}
-
 export async function loadNodes(force = false) {
   try {
     const list = await api('/api/cluster/nodes', force ? { noCache: true } : {});
     state.nodes = Array.isArray(list) ? list : [];
+    const current = String(state.selectedNodeFilter || 'all');
+    if (current !== 'all' && !state.nodes.some((n) => String(n.id) === current)) {
+      state.selectedNodeFilter = 'all';
+    }
     const badge = document.getElementById('badge-nodes-count');
     if (badge) badge.textContent = String(state.nodes.length);
-    syncGlobalNodeFilterOptions();
   } catch (err) {
     console.warn('Failed to load cluster nodes:', err);
   }
@@ -309,8 +284,6 @@ export function renderNodesView(enrollTokens = null) {
 
 export function setGlobalNodeFilter(nodeId) {
   state.selectedNodeFilter = String(nodeId || 'all');
-  const select = document.getElementById('global-node-filter');
-  if (select) select.value = state.selectedNodeFilter;
 
   if (state.currentView === 'projects' && typeof window.renderProjectsList === 'function') {
     window.renderProjectsList();
@@ -525,13 +498,148 @@ export async function removeClusterNode(nodeId, nodeName) {
   }
 }
 
-document.getElementById('global-node-filter')?.addEventListener('change', (e) => {
-  setGlobalNodeFilter(e.target.value);
-});
-
 let activeShiftMigration = null;
+let shiftProgressTimer = null;
+let shiftAutoCloseTimer = null;
+let shiftInFlight = false;
+let shiftMaxPct = 0;
 
-function renderShiftModalState(mig, historyList = []) {
+const SHIFT_STEPS = [
+  'Preflight',
+  'Transfer',
+  'Warm Start',
+  'Cutover',
+  'Cleanup',
+];
+
+const SHIFT_STAGE_META = {
+  preflight: { pct: 12, step: 0, label: 'Checking nodes & reserving port', tone: 'active' },
+  pending: { pct: 12, step: 0, label: 'Queued for live shift', tone: 'active' },
+  packing: { pct: 28, step: 1, label: 'Packing app files & container data', tone: 'active' },
+  transferring: { pct: 48, step: 1, label: 'Streaming P2P archive to target VPS', tone: 'active' },
+  starting: { pct: 68, step: 2, label: 'Warm-starting app & health probing', tone: 'active' },
+  awaiting_dns: { pct: 80, step: 3, label: 'Warmed on target — awaiting DNS cutover', tone: 'waiting' },
+  cutting_over: { pct: 86, step: 3, label: 'Switching traffic & project ownership', tone: 'active' },
+  cleaning_source: { pct: 94, step: 4, label: 'Stopping old instance & cleaning source VPS', tone: 'active' },
+  finalizing: { pct: 97, step: 4, label: 'Refreshing cluster & project state', tone: 'active' },
+  completed: { pct: 100, step: 5, label: 'App shifted completely!', tone: 'complete' },
+  failed: { pct: 0, step: 0, label: 'Shift failed', tone: 'failed' },
+  aborted: { pct: 0, step: 0, label: 'Shift aborted', tone: 'failed' },
+};
+
+function stopShiftProgressPoller() {
+  if (shiftProgressTimer) {
+    clearInterval(shiftProgressTimer);
+    shiftProgressTimer = null;
+  }
+  if (shiftAutoCloseTimer) {
+    clearTimeout(shiftAutoCloseTimer);
+    shiftAutoCloseTimer = null;
+  }
+}
+
+function startShiftProgressPoller(pid) {
+  stopShiftProgressPoller();
+  if (!pid) return;
+  shiftProgressTimer = setInterval(async () => {
+    const modal = document.getElementById('modal-move-project-node');
+    if (!modal || !modal.classList.contains('active')) {
+      stopShiftProgressPoller();
+      return;
+    }
+    try {
+      const history = await api(`/api/projects/${pid}/migrations`, { noCache: true });
+      if (!Array.isArray(history) || !history.length) return;
+      const latest = history[0];
+      if (!latest) return;
+      // Hold below 100% while local HTTP request/refresh is still finishing
+      renderShiftModalState(latest, history, { allowComplete: !shiftInFlight });
+      if (!shiftInFlight && !['running', 'pending'].includes(latest.status)) {
+        stopShiftProgressPoller();
+      }
+    } catch (_) {}
+  }, 450);
+}
+
+function renderShiftProgressHtml(mig, opts = {}) {
+  const allowComplete = opts.allowComplete !== false;
+  const stageKey = mig?.status === 'failed'
+    ? 'failed'
+    : mig?.status === 'aborted'
+      ? 'aborted'
+      : mig?.status === 'completed'
+        ? (allowComplete ? 'completed' : 'finalizing')
+        : (mig?.stage || 'preflight');
+  const meta = SHIFT_STAGE_META[stageKey] || SHIFT_STAGE_META.preflight;
+
+  let pct = meta.pct;
+  if (stageKey === 'failed' || stageKey === 'aborted') {
+    pct = Math.max(10, Math.min(94, shiftMaxPct || 25));
+  } else if (stageKey === 'completed' && allowComplete) {
+    pct = 100;
+    shiftMaxPct = 100;
+  } else {
+    shiftMaxPct = Math.min(97, Math.max(shiftMaxPct, pct));
+    pct = shiftMaxPct;
+  }
+
+  const toneCls = meta.tone === 'complete'
+    ? 'is-complete'
+    : meta.tone === 'waiting'
+      ? 'is-waiting'
+      : meta.tone === 'failed'
+        ? 'is-failed'
+        : 'is-active';
+
+  const badgeCls = meta.tone === 'complete'
+    ? 'badge-success'
+    : meta.tone === 'waiting'
+      ? 'badge-warning'
+      : meta.tone === 'failed'
+        ? 'badge-danger'
+        : 'badge-info';
+
+  const idLabel = mig?.id ? `Shift #${mig.id}` : 'Starting Live Shift';
+  const fromLabel = escapeHtml(mig?.fromNodeName || 'Source');
+  const toLabel = escapeHtml(mig?.toNodeName || 'Target');
+  const bytesVal = Number(mig?.transferBytes || 0);
+  const metaBits = [
+    mig?.targetPort ? `Port <code>${mig.targetPort}</code>` : '',
+    bytesVal > 0 ? `Transferred <strong>${formatBytesHuman(bytesVal)}</strong>` : '',
+  ].filter(Boolean).join(' &bull; ');
+
+  const stepsHtml = SHIFT_STEPS.map((label, idx) => {
+    let cls = 'shift-step-pill';
+    if (meta.tone === 'failed' && idx === (meta.step ?? 0)) cls += ' is-failed';
+    else if (meta.step > idx) cls += ' is-done';
+    else if (meta.step === idx && meta.tone !== 'complete') cls += ' is-current';
+    return `<span class="${cls}">${escapeHtml(label)}</span>`;
+  }).join('');
+
+  return `
+    <div class="shift-progress-wrap">
+      <div class="shift-progress-head">
+        <div>
+          <strong style="font-size:13px; color:var(--text-main);">${idLabel}: ${fromLabel} &rarr; ${toLabel}</strong>
+          <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px;">${escapeHtml(meta.label)}</div>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span class="shift-progress-pct">${pct}%</span>
+          <span class="badge ${badgeCls}">${escapeHtml(stageKey === 'finalizing' ? 'finalizing' : (mig?.stage || 'preflight'))}</span>
+          ${mig?.id && ['running', 'pending'].includes(mig.status) ? '<button type="button" class="btn btn-danger btn-sm" style="padding:2px 8px; font-size:11px;" onclick="abortShiftMigration()">Abort</button>' : ''}
+        </div>
+      </div>
+      <div class="shift-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}">
+        <div class="shift-progress-fill ${toneCls}" style="width: ${pct}%;"></div>
+      </div>
+      <div class="shift-steps-row">${stepsHtml}</div>
+      ${metaBits ? `<div style="font-size:11.5px; color:var(--text-dim); margin-top:2px;">${metaBits}</div>` : ''}
+      ${stageKey === 'failed' && mig?.error ? `<div style="font-size:11.5px; color:#fca5a5; margin-top:2px;">${escapeHtml(mig.error)}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderShiftModalState(mig, historyList = [], opts = {}) {
   const setupEl = document.getElementById('shift-setup-panel');
   const activeEl = document.getElementById('shift-active-panel');
   const bannerEl = document.getElementById('shift-stage-banner');
@@ -540,21 +648,22 @@ function renderShiftModalState(mig, historyList = []) {
   const startBtn = document.getElementById('shift-start-btn');
   const histEl = document.getElementById('shift-history-box');
 
-  if (mig && ['running', 'pending', 'awaiting_dns'].includes(mig.status)) {
-    activeShiftMigration = mig;
-    if (setupEl) setupEl.style.display = 'none';
+  const allowComplete = opts.allowComplete !== false;
+  const showActive = Boolean(
+    mig && (
+      ['running', 'pending', 'awaiting_dns'].includes(mig.status)
+      || opts.forceShowProgress
+      || (mig.status === 'completed' && opts.showCompleted)
+    )
+  );
+
+  if (showActive) {
+    activeShiftMigration = ['running', 'pending', 'awaiting_dns'].includes(mig.status) ? mig : null;
+    if (setupEl) setupEl.style.display = opts.keepSetupVisible ? 'block' : 'none';
     if (activeEl) activeEl.style.display = 'flex';
-    if (startBtn) startBtn.style.display = 'none';
+    if (startBtn) startBtn.style.display = opts.keepSetupVisible ? '' : 'none';
     if (bannerEl) {
-      bannerEl.innerHTML = `
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
-          <strong>Shift #${mig.id}: ${escapeHtml(mig.fromNodeName || 'Source')} &rarr; ${escapeHtml(mig.toNodeName || 'Target')}</strong>
-          <span class="badge ${mig.status === 'awaiting_dns' ? 'badge-warning' : 'badge-info'}">${escapeHtml(mig.stage)}</span>
-        </div>
-        <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">
-          Target port: <code>${mig.targetPort || '--'}</code> &bull; Transferred: <strong>${formatBytesHuman(mig.transferBytes || 0)}</strong>
-        </div>
-      `;
+      setHtmlIfChanged(bannerEl, renderShiftProgressHtml(mig, { allowComplete }));
     }
     if (dnsCard) {
       dnsCard.style.display = mig.status === 'awaiting_dns' ? 'block' : 'none';
@@ -583,12 +692,13 @@ function renderShiftModalState(mig, historyList = []) {
 
   if (histEl) {
     if (!historyList || !historyList.length) {
-      histEl.textContent = 'No prior migrations recorded for this website.';
+      setHtmlIfChanged(histEl, 'No prior migrations recorded for this website.');
     } else {
-      histEl.innerHTML = `<div style="margin-bottom:4px; font-weight:600; color:var(--text-muted);">Recent Shifts</div>` +
+      const histHtml = `<div style="margin-bottom:4px; font-weight:600; color:var(--text-muted);">Recent Shifts</div>` +
         historyList.slice(0, 4).map((h) =>
           `<div>#${h.id}: ${escapeHtml(h.fromNodeName || '?')} &rarr; ${escapeHtml(h.toNodeName || '?')} &bull; <span class="badge badge-neutral">${escapeHtml(h.status)}</span> (${formatBytesHuman(h.transferBytes || 0)})</div>`
         ).join('');
+      setHtmlIfChanged(histEl, histHtml);
     }
   }
 }
@@ -600,6 +710,9 @@ export async function openMoveToNodeModal(projectId) {
     toast('Select a website first.', 'warning');
     return;
   }
+  stopShiftProgressPoller();
+  shiftInFlight = false;
+  shiftMaxPct = 0;
   state.selectedProjectId = pid;
   await loadNodes(true);
 
@@ -623,6 +736,9 @@ export async function openMoveToNodeModal(projectId) {
     : null;
   renderShiftModalState(active, Array.isArray(history) ? history : []);
   openModal('modal-move-project-node');
+  if (active && ['running', 'pending'].includes(active.status)) {
+    startShiftProgressPoller(pid);
+  }
 }
 
 export async function confirmStartProjectShift() {
@@ -638,24 +754,84 @@ export async function confirmStartProjectShift() {
     btn.disabled = true;
     btn.textContent = 'Shifting...';
   }
+
+  const proj = (state.projects || []).find((x) => Number(x.id) === pid);
+  const fromNode = (state.nodes || []).find((n) => Number(n.id) === Number(proj?.node_id));
+  const toNode = (state.nodes || []).find((n) => Number(n.id) === targetNodeId);
+
+  shiftInFlight = true;
+  shiftMaxPct = 10;
+  renderShiftModalState(
+    {
+      id: null,
+      projectId: pid,
+      fromNodeName: fromNode?.name || 'Source',
+      toNodeName: toNode?.name || 'Target',
+      stage: 'preflight',
+      status: 'running',
+      targetPort: 0,
+      transferBytes: 0,
+    },
+    [],
+    { allowComplete: false, forceShowProgress: true },
+  );
+  startShiftProgressPoller(pid);
+
   try {
     const mig = await api(`/api/projects/${pid}/move`, {
       method: 'POST',
       body: { targetNodeId, autoCutoverWithoutDns: skipDns },
       timeoutMs: 600000,
     });
+    stopShiftProgressPoller();
     const history = await api(`/api/projects/${pid}/migrations`, { noCache: true }).catch(() => [mig]);
-    renderShiftModalState(mig, Array.isArray(history) ? history : [mig]);
+
     if (mig.status === 'completed') {
-      toast(`Live shift #${mig.id} completed cleanly!`, 'success');
+      // Keep progress below 100% until all cluster/project state refreshes finish
+      renderShiftModalState(mig, Array.isArray(history) ? history : [mig], {
+        allowComplete: false,
+        showCompleted: true,
+      });
       if (typeof window.refreshProjects === 'function') await window.refreshProjects();
-      closeModal('modal-move-project-node');
+      await loadNodes(true).catch(() => {});
+      shiftInFlight = false;
+      renderShiftModalState(mig, Array.isArray(history) ? history : [mig], {
+        allowComplete: true,
+        showCompleted: true,
+      });
+      toast(`Live shift #${mig.id} completed cleanly!`, 'success');
+      shiftAutoCloseTimer = setTimeout(() => closeModal('modal-move-project-node'), 750);
     } else if (mig.status === 'awaiting_dns') {
+      shiftInFlight = false;
+      renderShiftModalState(mig, Array.isArray(history) ? history : [mig], { allowComplete: false });
       toast('Target warmed & staged on HTTP! Complete DNS update to finish HTTPS cutover.', 'info');
+    } else {
+      shiftInFlight = false;
+      renderShiftModalState(mig, Array.isArray(history) ? history : [mig], { allowComplete: false });
     }
   } catch (err) {
+    stopShiftProgressPoller();
+    shiftInFlight = false;
+    const history = await api(`/api/projects/${pid}/migrations`, { noCache: true }).catch(() => []);
+    const failedMig = (Array.isArray(history) && history[0]) || {
+      id: null,
+      projectId: pid,
+      fromNodeName: fromNode?.name || 'Source',
+      toNodeName: toNode?.name || 'Target',
+      stage: 'failed',
+      status: 'failed',
+      error: err.message,
+      transferBytes: 0,
+    };
+    renderShiftModalState(failedMig, Array.isArray(history) ? history : [], {
+      allowComplete: false,
+      forceShowProgress: true,
+      keepSetupVisible: true,
+    });
     toast(`Shift failed: ${err.message}`, 'error');
   } finally {
+    shiftInFlight = false;
+    stopShiftProgressPoller();
     if (btn) {
       btn.disabled = false;
       btn.textContent = 'Start Live P2P Shift';
@@ -671,8 +847,8 @@ export async function checkShiftDns() {
     renderShiftModalState(res.migration, Array.isArray(history) ? history : []);
     toast(
       res.dnsVerified
-        ? `DNS verified pointing to ${res.expectedIp}! Ready to complete cutover.`
-        : `DNS resolved [${(res.resolvedIps || []).join(', ') || 'none'}] (expected ${res.expectedIp})`,
+        ? 'DNS verified pointing to target VPS! Ready to complete cutover.'
+        : 'DNS does not point to target VPS yet.',
       res.dnsVerified ? 'success' : 'warning',
     );
   } catch (err) {
@@ -682,17 +858,56 @@ export async function checkShiftDns() {
 
 export async function completeShiftCutover() {
   if (!activeShiftMigration) return;
+  const pid = activeShiftMigration.projectId;
+  const cutBtn = document.getElementById('shift-complete-cutover-btn');
+  if (cutBtn) {
+    cutBtn.disabled = true;
+    cutBtn.textContent = 'Cutting over...';
+  }
+  shiftInFlight = true;
+  renderShiftModalState(
+    { ...activeShiftMigration, stage: 'cutting_over', status: 'running' },
+    [],
+    { allowComplete: false, forceShowProgress: true },
+  );
+  startShiftProgressPoller(pid);
   try {
     const done = await api(`/api/migrations/${activeShiftMigration.id}/complete`, {
       method: 'POST',
       timeoutMs: 300000,
     });
+    stopShiftProgressPoller();
+    const history = await api(`/api/projects/${pid}/migrations`, { noCache: true }).catch(() => [done]);
+    renderShiftModalState(done, Array.isArray(history) ? history : [done], {
+      allowComplete: false,
+      showCompleted: true,
+    });
+    if (typeof window.refreshProjects === 'function') await window.refreshProjects();
+    await loadNodes(true).catch(() => {});
+    shiftInFlight = false;
+    renderShiftModalState(done, Array.isArray(history) ? history : [done], {
+      allowComplete: true,
+      showCompleted: true,
+    });
     toast(`Shift #${done.id} cutover completed!`, 'success');
     activeShiftMigration = null;
-    if (typeof window.refreshProjects === 'function') await window.refreshProjects();
-    closeModal('modal-move-project-node');
+    shiftAutoCloseTimer = setTimeout(() => closeModal('modal-move-project-node'), 750);
   } catch (err) {
+    stopShiftProgressPoller();
+    shiftInFlight = false;
+    const history = await api(`/api/projects/${pid}/migrations`, { noCache: true }).catch(() => []);
+    const latest = Array.isArray(history) ? history[0] : activeShiftMigration;
+    renderShiftModalState(latest, Array.isArray(history) ? history : [], {
+      allowComplete: false,
+      forceShowProgress: true,
+    });
     toast(`Cutover failed: ${err.message}`, 'error');
+  } finally {
+    shiftInFlight = false;
+    if (cutBtn) {
+      cutBtn.disabled = false;
+      cutBtn.textContent = 'Complete Cutover Now';
+    }
   }
 }
 
@@ -703,6 +918,9 @@ export async function abortShiftMigration() {
       method: 'POST',
       timeoutMs: 120000,
     });
+    stopShiftProgressPoller();
+    shiftInFlight = false;
+    shiftMaxPct = 0;
     toast('Shift aborted and target cleaned up; source untouched.', 'info');
     const pid = activeShiftMigration.projectId;
     activeShiftMigration = null;

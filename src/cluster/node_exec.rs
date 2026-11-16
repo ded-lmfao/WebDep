@@ -2686,7 +2686,19 @@ async fn p2p_receive_shift_tar(
 
     let mut received_bytes = 0u64;
     let mut stream = body.into_data_stream();
-    while let Some(chunk_res) = stream.next().await {
+    loop {
+        let next_chunk = tokio::time::timeout(Duration::from_secs(45), stream.next())
+            .await
+            .map_err(|_| {
+                let _ = std::fs::remove_file(&tmp_archive);
+                (
+                    StatusCode::REQUEST_TIMEOUT,
+                    "P2P upload stream stalled for 45s".to_string(),
+                )
+            })?;
+        let Some(chunk_res) = next_chunk else {
+            break;
+        };
         let chunk = chunk_res.map_err(|e| {
             let _ = std::fs::remove_file(&tmp_archive);
             (StatusCode::BAD_REQUEST, format!("Stream read failed: {e}"))
@@ -2778,27 +2790,38 @@ pub async fn stream_archive_to_target(
     let headers = format!(
         "PUT {req_path} HTTP/1.1\r\nHost: {host_hdr}\r\nContent-Type: {content_type}\r\nContent-Length: {total_len}\r\nConnection: close\r\n\r\n"
     );
-    stream
-        .write_all(headers.as_bytes())
+    tokio::time::timeout(Duration::from_secs(15), stream.write_all(headers.as_bytes()))
         .await
+        .map_err(|_| format!("Timed out writing P2P headers to {host_hdr}"))?
         .map_err(|e| format!("Failed writing P2P HTTP request headers: {e}"))?;
 
     let mut file = tokio::fs::File::open(archive_path)
         .await
         .map_err(|e| format!("Failed opening archive for streaming: {e}"))?;
-    tokio::io::copy(&mut file, &mut stream)
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Failed reading archive chunk: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        tokio::time::timeout(Duration::from_secs(20), stream.write_all(&buf[..n]))
+            .await
+            .map_err(|_| format!("P2P stream write to {host_hdr} stalled for >20s"))?
+            .map_err(|e| format!("Failed streaming archive payload: {e}"))?;
+    }
+    tokio::time::timeout(Duration::from_secs(15), stream.flush())
         .await
-        .map_err(|e| format!("Failed streaming archive payload: {e}"))?;
-    stream
-        .flush()
-        .await
+        .map_err(|_| format!("Timed out flushing P2P stream to {host_hdr}"))?
         .map_err(|e| format!("Failed flushing P2P stream: {e}"))?;
 
     let mut reader = TokioBufReader::new(stream);
     let mut status_line = String::new();
-    reader
-        .read_line(&mut status_line)
+    tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut status_line))
         .await
+        .map_err(|_| format!("Timed out waiting for P2P HTTP response from {host_hdr}"))?
         .map_err(|e| format!("Failed reading P2P HTTP status: {e}"))?;
     let status_code: u16 = status_line
         .split_whitespace()
@@ -2806,19 +2829,23 @@ pub async fn stream_archive_to_target(
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    loop {
-        let mut line = String::new();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("Failed reading P2P HTTP response headers: {e}"))?;
-        if n == 0 || line == "\r\n" || line == "\n" {
-            break;
+    let body_bytes = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let mut line = String::new();
+            let n = reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| format!("Failed reading P2P HTTP response headers: {e}"))?;
+            if n == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
         }
-    }
-
-    let mut body_bytes = Vec::new();
-    let _ = reader.read_to_end(&mut body_bytes).await;
+        let mut out = Vec::new();
+        let _ = reader.read_to_end(&mut out).await;
+        Ok::<Vec<u8>, String>(out)
+    })
+    .await
+    .map_err(|_| format!("Timed out reading P2P HTTP body from {host_hdr}"))??;
     let body_text = String::from_utf8_lossy(&body_bytes).to_string();
     if !(200..300).contains(&status_code) {
         return Err(format!("Peer returned HTTP {status_code}: {body_text}"));

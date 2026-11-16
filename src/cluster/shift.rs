@@ -377,7 +377,7 @@ pub async fn start_project_shift(
     .to_string();
 
     let _ = sqlx::query(
-        "UPDATE migrations SET stage = 'transferring', target_port = $2, notes = $3 WHERE id = $1",
+        "UPDATE migrations SET stage = 'packing', target_port = $2, notes = $3 WHERE id = $1",
     )
     .bind(migration_id)
     .bind(i64::from(target_port))
@@ -457,6 +457,10 @@ pub async fn start_project_shift(
     };
 
     let bytes_transferred: i64 = if from_is_remote {
+        let _ = sqlx::query("UPDATE migrations SET stage = 'transferring' WHERE id = $1")
+            .bind(migration_id)
+            .execute(&state.db)
+            .await;
         let push_res = state
             .cluster
             .call_node(
@@ -521,6 +525,14 @@ pub async fn start_project_shift(
                 return Err((StatusCode::INTERNAL_SERVER_ERROR, msg));
             }
         };
+
+        let _ = sqlx::query(
+            "UPDATE migrations SET stage = 'transferring', transfer_bytes = $2 WHERE id = $1",
+        )
+        .bind(migration_id)
+        .bind(comp_bytes)
+        .execute(&state.db)
+        .await;
 
         let mut pushed = false;
         let mut last_err = String::from("No reachable target P2P URL");
@@ -790,6 +802,13 @@ pub async fn complete_migration_cutover(
     target_proj.assigned_port = Some(mig.target_port as u16);
     target_proj.deploy_dir = target_deploy_dir.clone();
 
+    let _ = sqlx::query(
+        "UPDATE migrations SET stage = 'cutting_over', status = 'running' WHERE id = $1",
+    )
+    .bind(migration_id)
+    .execute(&state.db)
+    .await;
+
     // Stage 2: Enable full HTTPS Caddy config on Target
     if !to_node.is_local {
         let mut node_projects = state
@@ -855,11 +874,10 @@ pub async fn complete_migration_cutover(
 
     sqlx::query(
         "UPDATE migrations
-         SET stage = 'completed',
-             status = 'completed',
+         SET stage = 'cleaning_source',
+             status = 'running',
              cutover_mode = $2,
-             dns_verified_at = COALESCE(dns_verified_at, $3),
-             finished_at = $3
+             dns_verified_at = COALESCE(dns_verified_at, $3)
          WHERE id = $1",
     )
     .bind(migration_id)
@@ -986,6 +1004,20 @@ pub async fn complete_migration_cutover(
         }
     }
 
+    let finished_at = now_secs();
+    sqlx::query(
+        "UPDATE migrations
+         SET stage = 'completed',
+             status = 'completed',
+             finished_at = $2
+         WHERE id = $1",
+    )
+    .bind(migration_id)
+    .bind(finished_at)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed finalizing migration record: {e}")))?;
+
     state.logs.add(
         Some(proj.id),
         None,
@@ -1001,6 +1033,27 @@ pub async fn complete_migration_cutover(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Migration not found".to_string()))
+}
+
+pub async fn fail_stale_interrupted_migrations(db: &sqlx::PgPool) {
+    let now = now_secs();
+    let res = sqlx::query(
+        "UPDATE migrations
+         SET stage = 'failed',
+             status = 'failed',
+             error = COALESCE(NULLIF(error, ''), 'Interrupted by server restart before shift completed'),
+             finished_at = $1
+         WHERE status IN ('running', 'pending')",
+    )
+    .bind(now)
+    .execute(db)
+    .await;
+    if let Ok(done) = res {
+        let count = done.rows_affected();
+        if count > 0 {
+            tracing::warn!("Marked {} interrupted in-flight shift(s) as failed on startup", count);
+        }
+    }
 }
 
 pub async fn abort_migration(
