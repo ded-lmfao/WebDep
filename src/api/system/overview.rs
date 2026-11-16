@@ -149,6 +149,8 @@ pub(crate) struct OverviewNodeSummary {
     pub interface_count: usize,
     pub net_history: Vec<crate::monitor::NetworkSample>,
     pub project_count: i64,
+    pub website_count: i64,
+    pub service_count: i64,
     pub database_count: i64,
 }
 
@@ -510,7 +512,18 @@ fn build_overview_node_summaries(
                         status: n.status.clone(),
                         is_local: true,
                         mesh_ip: n.mesh_ip.clone(),
-                        public_ip: n.public_ip.clone(),
+                        public_ip: {
+                            let raw = n.public_ip.trim();
+                            if raw.is_empty() || raw == "127.0.0.1" {
+                                std::env::var("PUBLIC_IP")
+                                    .ok()
+                                    .map(|v| v.trim().to_string())
+                                    .filter(|v| !v.is_empty())
+                                    .unwrap_or_else(|| n.public_ip.clone())
+                            } else {
+                                n.public_ip.clone()
+                            }
+                        },
                         cpu_cores: lm.cpu.cores.max(1),
                         cpu_pct: lm.cpu.pct,
                         mem_used,
@@ -528,6 +541,8 @@ fn build_overview_node_summaries(
                         interface_count: local_net.map(|ln| ln.interface_count).unwrap_or(0),
                         net_history: local_net.map(|ln| ln.history.clone()).unwrap_or_default(),
                         project_count: n.project_count,
+                        website_count: n.project_count,
+                        service_count: 0,
                         database_count: n.database_count,
                     };
                 }
@@ -597,6 +612,8 @@ fn build_overview_node_summaries(
                 interface_count: n.metrics.interface_count.max(1) as usize,
                 net_history: hist,
                 project_count: n.project_count,
+                website_count: n.project_count,
+                service_count: 0,
                 database_count: n.database_count,
             }
         })
@@ -774,12 +791,36 @@ fn compute_overview_bytes_sync(
     let scope = resolve_cluster_scope(nodes, selected_node_id);
     let local_mon_sample = state.monitor.sample();
     let local_net_sample = crate::monitor::get_network_metrics();
-    let overview_nodes = build_overview_node_summaries(
+    let mut overview_nodes = build_overview_node_summaries(
         nodes,
         Some(&local_mon_sample),
         Some(&local_net_sample),
         remote_net_history,
     );
+    let mut node_websites: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut node_services: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut node_dbs: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for p in &projs {
+        let nid = p.node_id.unwrap_or(scope.local_node_id);
+        if p.project_kind == "service" {
+            *node_services.entry(nid).or_insert(0) += 1;
+        } else {
+            *node_websites.entry(nid).or_insert(0) += 1;
+        }
+    }
+    for db in &raw_dbs {
+        let nid = db.node_id.unwrap_or(scope.local_node_id);
+        *node_dbs.entry(nid).or_insert(0) += 1;
+    }
+    for node_summary in &mut overview_nodes {
+        let websites = node_websites.get(&node_summary.id).copied().unwrap_or(0);
+        let services = node_services.get(&node_summary.id).copied().unwrap_or(0);
+        let dbs = node_dbs.get(&node_summary.id).copied().unwrap_or(node_summary.database_count);
+        node_summary.website_count = websites;
+        node_summary.service_count = services;
+        node_summary.project_count = websites + services;
+        node_summary.database_count = dbs;
+    }
 
     let local_monitor = scope.include_local.then_some(local_mon_sample);
     let local_net = scope.include_local.then_some(local_net_sample);

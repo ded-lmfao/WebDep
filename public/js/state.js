@@ -21,6 +21,7 @@ const state = {
   databases: [],
   nodes: [],
   selectedNodeFilter: 'all',
+  overviewInspectNodeId: null,
   overview: null,
   activeDeployment: null,
   activeDepPollTimer: null,
@@ -712,12 +713,106 @@ function getNodeDisplayName(nodeId) {
   return found ? found.name : `Node #${nodeId}`;
 }
 
+function isPrivateOrLocalIp(ip) {
+  const s = String(ip || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+  if (!s || s === 'localhost' || s === '::1') return true;
+  if (s.startsWith('fe80:') || s.startsWith('fc') || s.startsWith('fd')) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 127 || a === 10 || a === 0) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
+function isSensitivePublicIp(val) {
+  const s = String(val || '').trim().replace(/^\[|\]$/g, '');
+  if (!s) return false;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(s)) {
+    return !isPrivateOrLocalIp(s);
+  }
+  if (s.includes(':') && /^[0-9a-fA-F:]+$/.test(s)) {
+    return !isPrivateOrLocalIp(s);
+  }
+  return false;
+}
+
+function hasSensitivePublicIpv4(text) {
+  const raw = String(text || '');
+  const re = /\b(\d{1,3}(?:\.\d{1,3}){3})\b/g;
+  let match;
+  while ((match = re.exec(raw)) !== null) {
+    if (!isPrivateOrLocalIp(match[1])) return true;
+  }
+  return false;
+}
+
+function getNodeEffectivePublicIp(node) {
+  const raw = String(node?.publicIp || '').trim();
+  if (isSensitivePublicIp(raw)) return raw;
+  if (node?.isLocal) {
+    const host = String(window.location.hostname || '').trim();
+    if (isSensitivePublicIp(host)) return host;
+  }
+  return '';
+}
+
+async function copyBlurIpButton(btnEl) {
+  const ip = btnEl?.getAttribute('data-copy-ip') || '';
+  if (!ip) return;
+  await copyTextToClipboard(ip, 'Public IP copied to clipboard');
+  if (btnEl) {
+    btnEl.classList.add('copied');
+    const actionEl = btnEl.querySelector('.ip-blur-action');
+    if (actionEl) actionEl.textContent = 'Copied';
+    clearTimeout(btnEl._copyResetTimer);
+    btnEl._copyResetTimer = setTimeout(() => {
+      btnEl.classList.remove('copied');
+      if (actionEl) actionEl.textContent = 'Copy';
+    }, 1500);
+  }
+}
+
+function renderBlurPublicIpPill(ip, opts = {}) {
+  const clean = String(ip || '').trim();
+  if (!clean) return '';
+  const label = opts.label || 'IP';
+  return `<button type="button" class="ip-blur-copy" data-copy-ip="${escapeHtml(clean)}" onclick="window.copyBlurIpButton(this)" aria-label="Copy VPS public IP"><span class="ip-blur-label">${escapeHtml(label)}</span><span class="ip-blur-text">${escapeHtml(clean)}</span><span class="ip-blur-action">Copy</span></button>`;
+}
+
+function renderBlurredPublicIpText(text) {
+  const raw = String(text || '');
+  if (!raw) return '';
+  const re = /(\b\d{1,3}(?:\.\d{1,3}){3}\b)/g;
+  return raw
+    .split(re)
+    .map((part) => {
+      if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(part) && !isPrivateOrLocalIp(part)) {
+        return `<span class="ip-blur-inline">${escapeHtml(part)}</span>`;
+      }
+      return escapeHtml(part);
+    })
+    .join('');
+}
+
+window.copyBlurIpButton = copyBlurIpButton;
+
 export {
   PAGE_SIZE,
   state,
   setHtmlIfChanged,
   matchesNodeFilter,
   getNodeDisplayName,
+  isPrivateOrLocalIp,
+  isSensitivePublicIp,
+  hasSensitivePublicIpv4,
+  getNodeEffectivePublicIp,
+  copyBlurIpButton,
+  renderBlurPublicIpPill,
+  renderBlurredPublicIpText,
   paginateAndRender,
   goToTablePage,
   PIPELINE_STAGES,

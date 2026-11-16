@@ -3,7 +3,7 @@
  * Creation wizard, connection details viewer, and network allowlist access dialogs.
  */
 
-import { state, showConfirmDialog, copyTextToClipboard, setBtnLoading } from './state.js';
+import { state, showConfirmDialog, copyTextToClipboard, setBtnLoading, hasSensitivePublicIpv4 } from './state.js';
 import { api, toast } from './api.js';
 
 export function openCreateDatabaseModal() {
@@ -227,8 +227,11 @@ export function showDatabaseDetails(id) {
     el.dataset.realValue = url;
     el.value = maskUrlPassword(url);
   };
+  const extEl = document.getElementById('db-detail-external-url');
+  const extVal = db.externalUrl || db.external_url || '';
   setUrl(document.getElementById('db-detail-internal-url'), db.internalUrl || db.internal_url || '');
-  setUrl(document.getElementById('db-detail-external-url'), db.externalUrl || db.external_url || '');
+  setUrl(extEl, extVal);
+  if (extEl) extEl.classList.toggle('ip-blur-input', hasSensitivePublicIpv4(extVal));
   const nameEl = document.getElementById('db-detail-dbname');
   if (nameEl) nameEl.value = db.dbName || db.db_name || '';
   const userEl = document.getElementById('db-detail-user');
@@ -241,7 +244,10 @@ export function showDatabaseDetails(id) {
     passEl.type = 'password';
   }
   const psqlEl = document.getElementById('db-detail-psql');
-  if (psqlEl) psqlEl.value = db.psqlCommand || db.psql_command || '';
+  if (psqlEl) {
+    psqlEl.value = db.psqlCommand || db.psql_command || '';
+    psqlEl.classList.toggle('ip-blur-input', hasSensitivePublicIpv4(psqlEl.value));
+  }
 
   const extWrap = document.getElementById('db-detail-external-url-wrap');
   if (extWrap) {

@@ -70,6 +70,15 @@ function switchWebsiteTab(tab) {
 }
 window.switchWebsiteTab = switchWebsiteTab;
 
+function parseOverviewNodeParam(param) {
+  if (param === null || param === undefined) return null;
+  const raw = String(param).trim();
+  const match = /^vps(\d+)$/i.exec(raw) || /^(\d+)$/.exec(raw);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
 function navigateTo(viewName, entityParam = null) {
   if (!state.user || !state.csrf || state.pendingMfaToken) {
     showLogin();
@@ -77,6 +86,23 @@ function navigateTo(viewName, entityParam = null) {
   }
   if (viewName === 'backups') viewName = 'releases';
   state.currentView = viewName;
+
+  if (viewName === 'overview') {
+    const inspectNodeId = parseOverviewNodeParam(entityParam);
+    state.overviewInspectNodeId = inspectNodeId;
+    state.selectedEntityKind = 'project';
+    const routeParam = inspectNodeId ? `vps${inspectNodeId}` : null;
+    const targetPath = routeParam ? `/overview/${routeParam}` : '/overview';
+    const curPath = window.location.pathname || '/';
+    if (curPath !== targetPath || window.location.hash) {
+      try {
+        window.history.pushState({ view: 'overview', param: routeParam }, '', targetPath);
+      } catch (_) { }
+    }
+    renderCurrentView();
+    return;
+  }
+  state.overviewInspectNodeId = null;
 
   if (typeof entityParam === 'string' && entityParam.startsWith('db-')) {
     const dbId = Number(entityParam.slice(3));
@@ -134,12 +160,19 @@ function handleHashRoute() {
   if (view === 'backups') view = 'releases';
 
   let routeParam = parts[1] || null;
-  if (routeParam && routeParam.startsWith('db-')) {
+  if (view === 'overview') {
+    state.selectedEntityKind = 'project';
+    const inspectNodeId = parseOverviewNodeParam(routeParam);
+    state.overviewInspectNodeId = inspectNodeId;
+    routeParam = inspectNodeId ? `vps${inspectNodeId}` : null;
+  } else if (routeParam && routeParam.startsWith('db-')) {
+    state.overviewInspectNodeId = null;
     const dbId = Number(routeParam.slice(3));
     state.selectedEntityKind = 'database';
     if (dbId) state.selectedDatabaseId = dbId;
     if (!DATABASE_WORKSPACE_TABS.has(view)) view = 'deployments';
   } else {
+    state.overviewInspectNodeId = null;
     state.selectedEntityKind = 'project';
     const pid = routeParam ? Number(routeParam) : null;
     if (pid) state.selectedProjectId = pid;
@@ -200,6 +233,11 @@ function updateBreadcrumbs() {
     const parentView = p.project_kind === 'service' ? 'services' : 'projects';
     const parentLabel = p.project_kind === 'service' ? 'Services' : 'Websites';
     secEl.innerHTML = `<span style="cursor:pointer; color:var(--text-muted);" onclick="navigateTo('${parentView}')">${parentLabel}</span> &rsaquo; <strong style="color:var(--text-main);">${escapeHtml(p.name)}</strong> &rsaquo; <span style="color:var(--accent-light);">${escapeHtml(tabLabels[state.currentView] || state.currentView)}</span>`;
+  } else if (state.currentView === 'overview' && state.overviewInspectNodeId) {
+    const nodeList = Array.isArray(state.overview?.nodes) && state.overview.nodes.length ? state.overview.nodes : (state.nodes || []);
+    const node = nodeList.find((n) => Number(n.id) === Number(state.overviewInspectNodeId));
+    const nodeLabel = node ? node.name : `VPS ${state.overviewInspectNodeId}`;
+    secEl.innerHTML = `<span style="cursor:pointer; color:var(--text-muted);" onclick="navigateTo('overview')">System Overview</span> &rsaquo; <strong style="color:var(--text-main);">${escapeHtml(nodeLabel)}</strong>`;
   } else {
     const globalLabels = {
       overview: 'System Overview',

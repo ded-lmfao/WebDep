@@ -1175,3 +1175,212 @@
   margin-top: 0;
   margin-bottom: 0;
 }
+
+.overview-node-header-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.overview-node-name {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-main);
+  letter-spacing: -0.01em;
+}
+
+.overview-role-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.67rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.overview-role-pill.is-core {
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.28);
+}
+
+.overview-role-pill.is-worker {
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+  border-color: rgba(148, 163, 184, 0.24);
+}
+
+.overview-hosted-pills {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.overview-hosted-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+}
+
+.overview-hosted-pill.has-items {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.overview-hosted-pill-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.overview-hosted-pill-dot.web { background: #38bdf8; }
+.overview-hosted-pill-dot.svc { background: #a78bfa; }
+.overview-hosted-pill-dot.db  { background: #34d399; }
+
+.ip-blur-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text-muted);
+  font-size: 0.71rem;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ip-blur-copy:hover {
+  border-color: rgba(148, 163, 184, 0.35);
+  background: rgba(30, 41, 59, 0.75);
+  color: var(--text-main);
+}
+
+.ip-blur-copy.copied {
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #34d399;
+}
+
+.ip-blur-label {
+  font-family: inherit;
+  font-size: 0.64rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+
+.ip-blur-text {
+  display: inline-block;
+  filter: blur(5.5px);
+  -webkit-filter: blur(5.5px);
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+  color: var(--text-main);
+}
+
+.ip-blur-copy:hover .ip-blur-text,
+.ip-blur-copy:focus .ip-blur-text,
+.ip-blur-copy:focus-visible .ip-blur-text,
+.ip-blur-copy:active .ip-blur-text {
+  filter: blur(5.5px);
+  -webkit-filter: blur(5.5px);
+}
+
+.ip-blur-action {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.ip-blur-copy.copied .ip-blur-action {
+  color: #34d399;
+}
+
+.overview-inspect-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.overview-inspect-topbar-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.overview-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.overview-back-btn:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.ip-blur-inline {
+  display: inline-block;
+  filter: blur(5.5px);
+  -webkit-filter: blur(5.5px);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ip-blur-inline:hover,
+.ip-blur-inline:focus,
+.ip-blur-inline:active {
+  filter: blur(5.5px);
+  -webkit-filter: blur(5.5px);
+}
+
+.ip-blur-input,
+.ip-blur-input:hover,
+.ip-blur-input:focus,
+.ip-blur-input:focus-visible,
+.ip-blur-input:active {
+  filter: blur(5px);
+  -webkit-filter: blur(5px);
+  user-select: none;
+  -webkit-user-select: none;
+}

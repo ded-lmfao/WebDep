@@ -227,6 +227,7 @@ export function showLogin(skipIntro = false) {
   state.releases = [];
   state.selectedProjectId = null;
   state.selectedDatabaseId = null;
+  state.overviewInspectNodeId = null;
   state.currentView = 'overview';
   state.lastOverviewSig = null;
   for (const id of LOGOUT_CLEAR_CONTAINERS) {

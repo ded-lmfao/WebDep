@@ -9,6 +9,11 @@ import {
   setHtmlIfChanged,
   matchesNodeFilter,
   getNodeDisplayName,
+  getNodeEffectivePublicIp,
+  isSensitivePublicIp,
+  hasSensitivePublicIpv4,
+  renderBlurPublicIpPill,
+  renderBlurredPublicIpText,
   escapeHtml,
   formatRelativeTime,
   openModal,
@@ -176,6 +181,7 @@ export function renderNodesView(enrollTokens = null) {
         .map((c) => `<span class="badge badge-neutral" style="font-size: 10.5px;">${escapeHtml(c)}</span>`)
         .join(' ');
 
+      const pubIp = getNodeEffectivePublicIp(n);
       const isSelectedFilter = String(state.selectedNodeFilter || 'all') === String(n.id);
 
       return `
@@ -191,7 +197,7 @@ export function renderNodesView(enrollTokens = null) {
               <div class="node-card-meta">
                 <span class="node-meta-item">Region <strong style="color: var(--text-main);">${escapeHtml(n.region || 'default')}</strong></span>
                 <span class="node-meta-item">Mesh <code>${escapeHtml(n.meshIp || '--')}</code></span>
-                ${n.publicIp ? `<span class="node-meta-item">IP <code>${escapeHtml(n.publicIp)}</code></span>` : ''}
+                ${pubIp ? `<span class="node-meta-item">${renderBlurPublicIpPill(pubIp, { label: 'Public IP' })}</span>` : ''}
               </div>
             </div>
             <div style="text-align: right; font-size: 11.5px; color: var(--text-dim); white-space: nowrap;">
@@ -333,6 +339,20 @@ export function setAddNodeTargetIp(ip) {
   }
 }
 
+function syncIpInputBlur(el) {
+  if (!el) return;
+  el.classList.toggle('ip-blur-input', hasSensitivePublicIpv4(el.value));
+}
+
+function bindIpBlurInput(el) {
+  if (!el) return;
+  syncIpInputBlur(el);
+  if (!el.dataset.ipBlurBound) {
+    el.dataset.ipBlurBound = '1';
+    el.addEventListener('input', () => syncIpInputBlur(el));
+  }
+}
+
 export async function openAddNodeModal() {
   const labelEl = document.getElementById('add-node-label');
   const regionEl = document.getElementById('add-node-region');
@@ -344,8 +364,14 @@ export async function openAddNodeModal() {
   const nextNum = Math.max(2, (state.nodes || []).length + 1);
   if (labelEl) labelEl.value = `VPS-${nextNum}`;
   if (regionEl && !regionEl.value.trim()) regionEl.value = 'mumbai-IND';
-  if (targetIpEl) targetIpEl.value = '';
-  if (coreUrlEl) coreUrlEl.value = window.location.origin;
+  if (targetIpEl) {
+    targetIpEl.value = '';
+    bindIpBlurInput(targetIpEl);
+  }
+  if (coreUrlEl) {
+    coreUrlEl.value = window.location.origin;
+    bindIpBlurInput(coreUrlEl);
+  }
   if (sugEl) sugEl.innerHTML = '<span>Detecting panel IP...</span>';
   if (outEl) outEl.style.display = 'none';
   openModal('modal-add-node');
@@ -358,27 +384,31 @@ export async function openAddNodeModal() {
     const openedViaDomain = host !== 'localhost' && !/^[\d.]+$/.test(host) && !host.includes(':');
     if (coreUrlEl) {
       coreUrlEl.value = openedViaDomain ? window.location.origin : (info.suggestedPanelUrl || window.location.origin);
+      syncIpInputBlur(coreUrlEl);
     }
     if (sugEl) {
       sugEl.innerHTML = '';
-      const addChip = (labelText, url) => {
+      const addChip = (labelHtml, url) => {
         if (!url) return;
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'btn btn-secondary btn-sm';
-        btn.style.cssText = 'padding: 2px 8px; font-size: 10.5px;';
-        btn.textContent = labelText;
+        btn.style.cssText = 'padding: 2px 8px; font-size: 10.5px; display: inline-flex; align-items: center; gap: 4px;';
+        btn.innerHTML = labelHtml;
         btn.addEventListener('click', () => {
-          if (coreUrlEl) coreUrlEl.value = url;
+          if (coreUrlEl) {
+            coreUrlEl.value = url;
+            syncIpInputBlur(coreUrlEl);
+          }
         });
         sugEl.appendChild(btn);
       };
 
       const portSuffix = info.port ? `:${info.port}` : '';
       const proto = info.requestUrl && info.requestUrl.startsWith('https://') ? 'https' : 'http';
-      if (info.publicIp) addChip(`Public IP (${info.publicIp})`, `${proto}://${info.publicIp}${portSuffix}`);
-      if (info.lanIp && info.lanIp !== info.publicIp) addChip(`LAN IP (${info.lanIp})`, `${proto}://${info.lanIp}${portSuffix}`);
-      if (info.requestUrl) addChip(`Current Browser (${info.requestUrl})`, info.requestUrl);
+      if (info.publicIp) addChip(`Public IP (${renderBlurredPublicIpText(info.publicIp)})`, `${proto}://${info.publicIp}${portSuffix}`);
+      if (info.lanIp && info.lanIp !== info.publicIp) addChip(`LAN IP (${escapeHtml(info.lanIp)})`, `${proto}://${info.lanIp}${portSuffix}`);
+      if (info.requestUrl) addChip(`Current Browser (${renderBlurredPublicIpText(info.requestUrl)})`, info.requestUrl);
     }
   } catch (_) {
     if (sugEl) sugEl.innerHTML = '';
@@ -417,15 +447,25 @@ export async function generateNodeEnrollToken() {
     const cmdEl = document.getElementById('add-node-join-cmd');
     const psEl = document.getElementById('add-node-ps-cmd');
     const tokEl = document.getElementById('add-node-raw-token');
-    if (freshEl) freshEl.value = res.freshVpsCommand || '';
-    if (svcEl) svcEl.value = res.serviceCommand || '';
-    if (cmdEl) cmdEl.value = res.joinCommand || '';
+    if (freshEl) {
+      freshEl.value = res.freshVpsCommand || '';
+      syncIpInputBlur(freshEl);
+    }
+    if (svcEl) {
+      svcEl.value = res.serviceCommand || '';
+      syncIpInputBlur(svcEl);
+    }
+    if (cmdEl) {
+      cmdEl.value = res.joinCommand || '';
+      syncIpInputBlur(cmdEl);
+    }
     if (psEl) {
       const idx = Math.max(2, (state.nodes || []).length + 1);
       const safeDir = `C:\\tmp\\webdep-node${idx}`;
       const port = 4690 + idx;
       const flags = (res.joinCommand || '').replace(/^webdep\s+/, '');
       psEl.value = `mkdir ${safeDir} -Force | Out-Null; cd ${safeDir}; Set-Content .env @("DATA_DIR=${safeDir}\\data", "PORT=${port}"); $env:WEBDEP_NODE_P2P_BIND="127.0.0.1"; $env:WEBDEP_NODE_P2P_PORT="0"; webdep.exe ${flags}`;
+      syncIpInputBlur(psEl);
     }
     if (tokEl) tokEl.textContent = res.token || '';
     if (outEl) outEl.style.display = 'block';
@@ -520,8 +560,11 @@ function renderShiftModalState(mig, historyList = []) {
       dnsCard.style.display = mig.status === 'awaiting_dns' ? 'block' : 'none';
     }
     if (dnsRecEl && mig.status === 'awaiting_dns') {
+      const fmtMigIp = (ip, label) => (isSensitivePublicIp(ip)
+        ? renderBlurPublicIpPill(ip, { label })
+        : `<code>${escapeHtml(ip || '--')}</code>`);
       const domRows = (mig.domains || []).map((d) =>
-        `<div><code>A</code> &bull; <strong>${escapeHtml(d)}</strong> &bull; <code>${escapeHtml(mig.fromIp || '--')}</code> &rarr; <code>${escapeHtml(mig.toIp || '--')}</code></div>`
+        `<div style="display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-bottom:4px;"><code>A</code> &bull; <strong>${escapeHtml(d)}</strong> &bull; ${fmtMigIp(mig.fromIp, 'From')} &rarr; ${fmtMigIp(mig.toIp, 'To')}</div>`
       ).join('');
       dnsRecEl.innerHTML = `
         ${domRows || '<div>Update DNS A record to point to target IP.</div>'}
@@ -567,7 +610,7 @@ export async function openMoveToNodeModal(projectId) {
   const candidates = (state.nodes || []).filter((n) => n.status === 'online' && Number(n.id) !== Number(proj.node_id));
   if (sel) {
     sel.innerHTML = candidates.length
-      ? candidates.map((n) => `<option value="${n.id}">${escapeHtml(n.name)} (${escapeHtml(n.region || 'default')} &bull; ${escapeHtml(n.meshIp || n.publicIp || '')})</option>`).join('')
+      ? candidates.map((n) => `<option value="${n.id}">${escapeHtml(n.name)} (${escapeHtml(n.region || 'default')} &bull; ${escapeHtml(n.meshIp || 'Worker')})</option>`).join('')
       : '<option value="">No other healthy online nodes available</option>';
   }
 

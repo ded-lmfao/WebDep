@@ -4,7 +4,17 @@
  */
 
 import { icon } from './icons.js';
-import { state, escapeHtml, DB_PIPELINE_STAGES, syncOverviewResourceStatus, formatRelativeTime, setHtmlIfChanged, matchesNodeFilter } from './state.js';
+import {
+  state,
+  escapeHtml,
+  DB_PIPELINE_STAGES,
+  syncOverviewResourceStatus,
+  formatRelativeTime,
+  setHtmlIfChanged,
+  matchesNodeFilter,
+  hasSensitivePublicIpv4,
+  renderBlurredPublicIpText,
+} from './state.js';
 import { api, toast } from './api.js';
 import { renderPipelineStages } from './deployments.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
@@ -244,8 +254,8 @@ export function renderDatabasesList() {
 
         <!-- Command / Endpoint Line -->
         <div style="background: var(--bg-alt); padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); font-size: 11.5px; font-family: var(--font-mono); margin: 2px 0 0 0; display: flex; justify-content: space-between; align-items: center; overflow: hidden; height: 34px; box-sizing: border-box;">
-          <span style="color: var(--text-dim); text-overflow: ellipsis; white-space: nowrap; overflow: hidden; max-width: 78%;" title="${escapeHtml(psqlCmd)}">
-            $ ${escapeHtml(psqlCmd)}
+          <span style="color: var(--text-dim); text-overflow: ellipsis; white-space: nowrap; overflow: hidden; max-width: 78%;"${hasSensitivePublicIpv4(psqlCmd) ? '' : ` title="${escapeHtml(psqlCmd)}"`}>
+            $ ${renderBlurredPublicIpText(psqlCmd)}
           </span>
           ${pidVal ? `<span class="badge badge-neutral" style="font-size: 9.5px; padding: 1px 6px; flex-shrink: 0;">PID ${pidVal}</span>` : ''}
         </div>

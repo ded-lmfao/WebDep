@@ -4,7 +4,16 @@
  */
 
 import { icon } from './icons.js';
-import { state, setHtmlIfChanged, escapeHtml, matchesNodeFilter, getNodeDisplayName } from './state.js';
+import {
+  state,
+  setHtmlIfChanged,
+  escapeHtml,
+  matchesNodeFilter,
+  getNodeDisplayName,
+  getNodeEffectivePublicIp,
+  copyBlurIpButton,
+  renderBlurPublicIpPill,
+} from './state.js';
 import { api } from './api.js';
 import {
   consumePendingViewStagger,
@@ -345,7 +354,7 @@ function normalizeAndMergeNetState(netState, net, opts = {}) {
     netState.lastLiveServerTs = Math.max(netState.lastLiveServerTs, effectiveLatestTs);
   }
 
-  const cutoff = effectiveLatestTs - (OV_NET_WINDOW_MS + 12000);
+  const cutoff = effectiveLatestTs - (OV_NET_WINDOW_MS + 25000);
   const existing = netState.samples;
   const out = netState._mergeBuf;
   out.length = 0;
@@ -383,9 +392,12 @@ function updateOverviewNetwork(net, opts = {}) {
     }
 
     const ifaces = Number(net.interfaceCount ?? net.interface_count ?? 0);
-    const scopeLabel = state.overview?.nodeLabel || (state.selectedNodeFilter && state.selectedNodeFilter !== 'all'
-      ? getNodeDisplayName(state.selectedNodeFilter) || 'Selected VPS'
-      : 'Whole VPS');
+    const activeNodeId = getEffectiveOverviewNodeId();
+    const scopeLabel = state.overview?.nodeLabel || (activeNodeId
+      ? getNodeDisplayName(activeNodeId) || `VPS ${activeNodeId}`
+      : (state.selectedNodeFilter && state.selectedNodeFilter !== 'all'
+        ? getNodeDisplayName(state.selectedNodeFilter) || 'Selected VPS'
+        : 'Whole VPS'));
     setElText(
       ifaceEl,
       ifaces > 0 ? `${scopeLabel} • ${ifaces} NIC${ifaces === 1 ? '' : 's'}` : `${scopeLabel} NIC`
@@ -410,7 +422,12 @@ async function fetchOverviewNetwork() {
   _ovNetState.pollInFlight = true;
   _ovNetState.lastFetchAt = Date.now();
   try {
-    const nodeParam = encodeURIComponent(String(state.selectedNodeFilter || 'all'));
+    const scopeParam = getEffectiveOverviewNodeParam();
+    if (_ovNetState.lastScopeParam !== scopeParam) {
+      _ovNetState.lastScopeParam = scopeParam;
+      resetOverviewNetGraph();
+    }
+    const nodeParam = encodeURIComponent(scopeParam);
     const net = await api(`/api/overview/network?nodeId=${nodeParam}`, { noCache: true });
     if (net && typeof net === 'object') {
       updateOverviewNetwork(net, { fromSnapshot: false });
@@ -620,17 +637,100 @@ function updateNodeStripNetwork(nodeId, net, opts = {}) {
   }
 }
 
+function getEffectiveOverviewNodeId() {
+  const inspectId = Number(state.overviewInspectNodeId);
+  return Number.isInteger(inspectId) && inspectId > 0 ? inspectId : null;
+}
+
+function getEffectiveOverviewNodeParam() {
+  const inspectId = getEffectiveOverviewNodeId();
+  return inspectId ? String(inspectId) : 'all';
+}
+
+function renderBlurIpPillHtml(node) {
+  const pubIp = getNodeEffectivePublicIp(node);
+  return pubIp ? renderBlurPublicIpPill(pubIp, { label: 'IP' }) : '';
+}
+
+function renderHostedPillsInnerHtml(node) {
+  const websites = Number(node?.websiteCount ?? node?.projectCount ?? 0);
+  const services = Number(node?.serviceCount ?? 0);
+  const dbs = Number(node?.databaseCount ?? 0);
+  return `
+    <span class="overview-hosted-pill ${websites > 0 ? 'has-items' : ''}"><span class="overview-hosted-pill-dot web"></span>${websites} Website${websites === 1 ? '' : 's'}</span>
+    <span class="overview-hosted-pill ${services > 0 ? 'has-items' : ''}"><span class="overview-hosted-pill-dot svc"></span>${services} Service${services === 1 ? '' : 's'}</span>
+    <span class="overview-hosted-pill ${dbs > 0 ? 'has-items' : ''}"><span class="overview-hosted-pill-dot db"></span>${dbs} Database${dbs === 1 ? '' : 's'}</span>
+  `;
+}
+
+function inspectOverviewNode(nodeId) {
+  const id = Number(nodeId);
+  if (!Number.isInteger(id) || id <= 0) return;
+  if (typeof window.navigateTo === 'function') {
+    window.navigateTo('overview', `vps${id}`);
+  }
+}
+
+function renderInspectNodeTopbar(nodes) {
+  const topbar = document.getElementById('overview-inspect-topbar');
+  const resCard = document.querySelector('#view-overview .resource-breakdown-card');
+  const singleGrid = document.getElementById('overview-single-stats-grid');
+  const inspectId = getEffectiveOverviewNodeId();
+
+  if (!inspectId) {
+    if (topbar) {
+      topbar.style.display = 'none';
+      setHtmlIfChanged(topbar, '');
+    }
+    if (resCard) resCard.style.display = 'none';
+    return;
+  }
+
+  if (singleGrid) singleGrid.style.display = '';
+  if (resCard) resCard.style.display = '';
+  if (!topbar) return;
+
+  const list = Array.isArray(nodes) ? nodes : [];
+  const n = list.find((item) => Number(item.id) === inspectId);
+  const isUp = n ? (n.isLocal || n.status === 'online') : true;
+  const isDraining = n && n.status === 'draining';
+  const statusDot = isUp ? 'online' : isDraining ? 'maintenance' : 'offline';
+  const isCore = n ? Boolean(n.isLocal) : false;
+  const roleBadge = n
+    ? `<span class="overview-role-pill ${isCore ? 'is-core' : 'is-worker'}">${isCore ? 'Core' : 'Worker'}</span>`
+    : '';
+  const nameLabel = n ? n.name : `VPS ${inspectId}`;
+  const blurIpHtml = n ? renderBlurIpPillHtml(n) : '';
+  const hostedHtml = n ? renderHostedPillsInnerHtml(n) : '';
+
+  const html = `
+    <div class="overview-inspect-topbar-left">
+      <button type="button" class="overview-back-btn" onclick="window.navigateTo('overview')">&larr; Back to All VPS</button>
+      <span class="status-dot ${statusDot}"></span>
+      <span class="overview-node-name">${escapeHtml(nameLabel)}</span>
+      ${roleBadge}
+      ${blurIpHtml}
+    </div>
+    <div class="overview-hosted-pills">
+      ${hostedHtml}
+    </div>
+  `;
+  topbar.style.display = 'flex';
+  setHtmlIfChanged(topbar, html);
+}
+
 function renderOverviewNodesStrip(nodes) {
   const strip = document.getElementById('overview-nodes-strip');
   const singleGrid = document.getElementById('overview-single-stats-grid');
   if (!strip) return;
   const list = Array.isArray(nodes) ? nodes : [];
-  const selectedId = String(state.selectedNodeFilter || 'all');
-  const showSeparateStrips = list.length > 1 && selectedId === 'all';
+  const inspectId = getEffectiveOverviewNodeId();
+  const showSeparateStrips = !inspectId && list.length > 0;
 
   if (!showSeparateStrips) {
     if (singleGrid) singleGrid.style.display = '';
     strip.style.display = 'none';
+    strip._structSig = '';
     setHtmlIfChanged(strip, '');
     return;
   }
@@ -640,20 +740,20 @@ function renderOverviewNodesStrip(nodes) {
 
   let bestNodeId = null;
   let maxFreeRam = -1;
-  for (const n of list) {
-    const isUp = n.isLocal || n.status === 'online';
-    if (isUp && Number(n.memFree || 0) > maxFreeRam) {
-      maxFreeRam = Number(n.memFree || 0);
-      bestNodeId = n.id;
+  if (list.length > 1) {
+    for (const n of list) {
+      const isUp = n.isLocal || n.status === 'online';
+      if (isUp && Number(n.memFree || 0) > maxFreeRam) {
+        maxFreeRam = Number(n.memFree || 0);
+        bestNodeId = n.id;
+      }
     }
   }
-
-  const canCreate = typeof hasPower === 'function' ? hasPower('projects_manage') : false;
 
   // Build structural HTML without mutating SVG path `d` attributes or live KPI values
   // so `setHtmlIfChanged` keeps the 60fps SVG DOM intact across periodic refreshes.
   const structSig = list
-    .map((n) => `${n.id}:${n.status}:${n.name}:${n.id === bestNodeId}:${canCreate}`)
+    .map((n) => `${n.id}:${n.status}:${n.name}:${Boolean(n.isLocal)}:${getNodeEffectivePublicIp(n)}:${n.id === bestNodeId}`)
     .join('|');
 
   if (strip._structSig !== structSig) {
@@ -663,6 +763,8 @@ function renderOverviewNodesStrip(nodes) {
       const isDraining = n.status === 'draining';
       const isBestHeadroom = bestNodeId != null && Number(n.id) === Number(bestNodeId);
       const statusDot = isUp ? 'online' : isDraining ? 'maintenance' : 'offline';
+      const isCore = Boolean(n.isLocal);
+      const blurIpHtml = renderBlurIpPillHtml(n);
       const gradInId = `ovNodeGradIn-${n.id}`;
       const gradOutId = `ovNodeGradOut-${n.id}`;
       const clipId = `ovNodeClip-${n.id}`;
@@ -670,15 +772,16 @@ function renderOverviewNodesStrip(nodes) {
       return `
         <div class="overview-node-block">
           <div class="overview-node-block-head">
-            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <div class="overview-node-header-left">
               <span class="status-dot ${statusDot}"></span>
-              <strong style="font-size:13px; color:var(--text-main);">${escapeHtml(n.name)}</strong>
-              <span id="ov-node-${n.id}-meta-sub" style="font-size:11px; color:var(--text-dim); font-family:var(--font-mono);"></span>
+              <span class="overview-node-name">${escapeHtml(n.name)}</span>
+              <span class="overview-role-pill ${isCore ? 'is-core' : 'is-worker'}">${isCore ? 'Core' : 'Worker'}</span>
+              ${blurIpHtml}
+              <div class="overview-hosted-pills" id="ov-node-${n.id}-hosted"></div>
               ${isBestHeadroom ? '<span class="badge badge-success" style="font-size:10px;">Most free RAM</span>' : ''}
             </div>
             <div style="display:flex; gap:6px; align-items:center;">
-              <button type="button" class="btn btn-secondary btn-sm" style="padding:3px 9px; font-size:11px;" onclick="window.setGlobalNodeFilter('${n.id}')">Inspect</button>
-              ${canCreate && isUp ? `<button type="button" class="btn btn-primary btn-sm" style="padding:3px 9px; font-size:11px;" onclick="window.deployOnOverviewNode(${n.id})">+ Create</button>` : ''}
+              <button type="button" class="btn btn-secondary btn-sm" style="padding:4px 11px; font-size:11px; font-weight:600;" onclick="window.inspectOverviewNode(${n.id})">Inspect</button>
             </div>
           </div>
           <div class="stats-grid overview-stats-grid">
@@ -784,13 +887,10 @@ function renderOverviewNodesStrip(nodes) {
     const diskPct = Math.min(100, Math.max(0, Number(n.diskPct || 0)));
     const freeGb = (Number(n.diskFree || 0) / 1073741824).toFixed(1);
     const totalGb = (Number(n.diskTotal || 0) / 1073741824).toFixed(1);
-    const appsCount = Number(n.projectCount || 0);
-    const dbsCount = Number(n.databaseCount || 0);
-
-    setText(
-      `ov-node-${n.id}-meta-sub`,
-      `${n.isLocal ? 'Primary' : 'Worker'}${n.meshIp ? ` • ${n.meshIp}` : ''} • ${appsCount} app${appsCount === 1 ? '' : 's'} • ${dbsCount} DB${dbsCount === 1 ? '' : 's'}`,
-    );
+    const hostedEl = document.getElementById(`ov-node-${n.id}-hosted`);
+    if (hostedEl) {
+      setHtmlIfChanged(hostedEl, renderHostedPillsInnerHtml(n));
+    }
     setText(`ov-node-${n.id}-cpu-pct`, `${cpuPct}%`);
     const cpuBar = document.getElementById(`ov-node-${n.id}-cpu-bar`);
     if (cpuBar) {
@@ -833,23 +933,15 @@ function renderOverviewNodesStrip(nodes) {
   }
 }
 
-function deployOnOverviewNode(nodeId) {
-  if (typeof window.setGlobalNodeFilter === 'function') {
-    window.setGlobalNodeFilter(String(nodeId));
-  } else {
-    state.selectedNodeFilter = String(nodeId);
-  }
-  if (typeof window.openAddWebsiteModal === 'function') {
-    window.openAddWebsiteModal(nodeId);
-  }
-}
-
 function renderResourceBreakdown(resources) {
   const tbody = getOverviewDomEls().resTable || document.getElementById('resource-breakdown-table');
   if (!tbody) return;
   const list = resources || state.overview?.resources || [];
   const filter = state.resourceFilter || 'all';
-  const nodeScoped = list.filter((r) => matchesNodeFilter(r));
+  const inspectId = getEffectiveOverviewNodeId();
+  const nodeScoped = inspectId
+    ? list.filter((r) => Number(r?.nodeId ?? r?.node_id ?? 0) === inspectId)
+    : list.filter((r) => matchesNodeFilter(r));
   const filtered = filter === 'all' ? nodeScoped.filter((r) => r.kind !== 'panel') : nodeScoped.filter((r) => r.kind === filter);
 
   if (!filtered.length) {
@@ -1016,7 +1108,12 @@ function filterResourceBreakdown(filter) {
 
 async function loadOverview() {
   try {
-    const nodeParam = encodeURIComponent(String(state.selectedNodeFilter || 'all'));
+    const scopeParam = getEffectiveOverviewNodeParam();
+    if (_ovNetState.lastScopeParam && _ovNetState.lastScopeParam !== scopeParam) {
+      resetOverviewNetGraph();
+    }
+    _ovNetState.lastScopeParam = scopeParam;
+    const nodeParam = encodeURIComponent(scopeParam);
     const data = await api(`/api/overview?nodeId=${nodeParam}`);
     state.overview = data;
     if (Array.isArray(data.projects)) {
@@ -1112,9 +1209,13 @@ async function loadOverview() {
     }
     setElText(els.resCountBadge, `${sum.runningWorkloadsCount || 0} / ${sum.totalWorkloadsCount || 0} Running`);
 
-    // Render per-VPS separate capacity comparison cards + active workloads table
+    // Render per-VPS separate capacity comparison cards or single-VPS inspect view
+    renderInspectNodeTopbar(data.nodes);
     renderOverviewNodesStrip(data.nodes);
     renderResourceBreakdown(data.resources);
+    if (typeof window.updateBreadcrumbs === 'function') {
+      window.updateBreadcrumbs();
+    }
 
     // Keep service pipelines synchronized with live telemetry & deployments
     if (state.currentView === 'services') {
@@ -1164,7 +1265,8 @@ window.renderResourceBreakdown = renderResourceBreakdown;
 window.filterResourceBreakdown = filterResourceBreakdown;
 window.stopOverviewNetPoller = stopOverviewNetPoller;
 window.resetOverviewNetGraph = resetOverviewNetGraph;
-window.deployOnOverviewNode = deployOnOverviewNode;
+window.inspectOverviewNode = inspectOverviewNode;
+window.copyOverviewNodeIp = copyBlurIpButton;
 
 export {
   loadOverview,
@@ -1173,5 +1275,5 @@ export {
   updateOverviewNetwork,
   stopOverviewNetPoller,
   resetOverviewNetGraph,
-  deployOnOverviewNode,
+  inspectOverviewNode,
 };
