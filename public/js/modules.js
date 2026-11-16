@@ -9,6 +9,7 @@ import {
   state,
   setHtmlIfChanged,
   escapeHtml,
+  showConfirmDialog,
 } from './state.js';
 import { api, toast } from './api.js';
 
@@ -178,6 +179,46 @@ export async function installNodeModules(nodeId, moduleIds = [], label = '') {
   }
 }
 
+export async function uninstallNodeModules(nodeId, moduleId, moduleName = '', nodeName = '', isRequired = false) {
+  const key = `node:${nodeId}:${moduleId}`;
+  if (activeInstalls.has(key)) return;
+  const targetLabel = moduleName || moduleId;
+  const hostLabel = nodeName || `Node #${nodeId}`;
+  const ok = await showConfirmDialog({
+    title: `Uninstall ${targetLabel}?`,
+    message: isRequired
+      ? `${targetLabel} is marked as REQUIRED on ${hostLabel}. Uninstalling it may break deployments or archive extraction on this VPS.`
+      : `Remove ${targetLabel} from ${hostLabel} using the system package manager?`,
+    confirmText: 'Uninstall',
+    danger: true,
+  });
+  if (!ok) return;
+
+  setInstallBusy(key, true);
+  renderModulesView();
+  try {
+    const res = await api(`/api/cluster/nodes/${nodeId}/modules/uninstall`, {
+      method: 'POST',
+      body: { moduleIds: [moduleId] },
+      timeoutMs: 600000,
+    });
+    appendInstallLog(`Uninstall ${targetLabel} on ${hostLabel}`, res);
+    await loadModulesView(true);
+    if (window.loadNodes) await window.loadNodes(true);
+    if (res?.ok) {
+      toast(`${targetLabel} uninstalled from ${res.nodeName || hostLabel}`, 'success');
+    } else {
+      toast(`Could not uninstall ${targetLabel} on ${res?.nodeName || hostLabel} — check output log`, 'warning');
+    }
+  } catch (err) {
+    appendInstallLog(`Uninstall error on ${hostLabel}`, { nodes: [{ nodeId, error: err.message }] });
+    toast(`Uninstall failed: ${err.message}`, 'error');
+  } finally {
+    setInstallBusy(key, false);
+    renderModulesView();
+  }
+}
+
 export async function installFleetModules(moduleIds = [], title = '') {
   const key = `fleet:${moduleIds.join(',') || 'required'}`;
   if (activeInstalls.has(key)) return;
@@ -264,22 +305,11 @@ export function renderModulesView() {
     return true;
   });
 
-  // 1. VPS × Module Readiness Matrix Table
+  // 1. VPS × Module Readiness Matrix (responsive wrapping grid per node)
   if (!nodes.length) {
     setHtmlIfChanged(matrixWrap, '<div style="padding:24px; text-align:center; color:var(--text-dim);">No VPS nodes registered yet.</div>');
   } else {
-    const headerCols = filteredCatalog
-      .map((entry) => `
-        <th style="min-width: 112px; white-space: nowrap;">
-          <div style="display:flex; align-items:center; gap:5px;">
-            <span>${escapeHtml(entry.name.split(' ')[0])}</span>
-            ${entry.required ? '<span class="badge badge-info" style="font-size:9.5px; padding:1px 5px;">REQ</span>' : ''}
-          </div>
-        </th>
-      `)
-      .join('');
-
-    const rowsHtml = nodes
+    const nodeCardsHtml = nodes
       .map((n) => {
         const isReachable = Boolean(n.isLocal || n.status === 'online' || n.status === 'draining');
         const statusBadge = isReachable
@@ -289,74 +319,96 @@ export function renderModulesView() {
         const rowBusyReq = activeInstalls.has(`node:${n.nodeId}:required`);
         const rowBusyRef = activeInstalls.has(`refresh:${n.nodeId}`);
 
-        const modCells = filteredCatalog
-          .map((entry) => {
-            const st = (n.modules || []).find((m) => m.id === entry.id) || {
-              id: entry.id,
-              installed: false,
-              version: '',
-              details: 'Not scanned',
-            };
-            const cellBusy = activeInstalls.has(`node:${n.nodeId}:${entry.id}`);
-            if (st.installed) {
-              return `
-                <td>
-                  <span class="badge badge-success module-version" title="${escapeHtml(`${st.version}${st.details ? ` — ${st.details}` : ''}`)}">
-                    ✓ ${escapeHtml(shortVersion(st.version))}
-                  </span>
-                </td>
-              `;
-            }
-            if (isMainAdmin && isReachable) {
-              const toneClass = entry.required ? 'btn-primary' : 'btn-secondary';
-              return `
-                <td>
-                  <button
-                    type="button"
-                    class="btn ${toneClass} btn-sm"
-                    style="padding: 2px 8px; font-size: 11px;"
-                    title="${escapeHtml(st.details || `Install ${entry.name} on ${n.name}`)}"
-                    ${cellBusy ? 'disabled' : ''}
-                    onclick="window.installNodeModules(${n.nodeId}, ['${entry.id}'], 'Install ${escapeHtml(entry.name)} on ${escapeHtml(n.name)}')"
-                  >
-                    ${cellBusy ? 'Installing…' : 'Install'}
-                  </button>
-                </td>
-              `;
-            }
-            return `
-              <td>
-                <span class="badge ${entry.required ? 'badge-warning' : 'badge-neutral'}" style="font-size:10.5px;" title="${escapeHtml(st.details || 'Missing')}">
-                  Missing
-                </span>
-              </td>
-            `;
-          })
-          .join('');
+        const modTiles = filteredCatalog.length
+          ? filteredCatalog
+              .map((entry) => {
+                const st = (n.modules || []).find((m) => m.id === entry.id) || {
+                  id: entry.id,
+                  installed: false,
+                  version: '',
+                  details: 'Not scanned',
+                };
+                const cellBusy = activeInstalls.has(`node:${n.nodeId}:${entry.id}`);
+                const tileState = st.installed
+                  ? 'is-installed'
+                  : (entry.required ? 'is-missing-req' : 'is-missing-opt');
+
+                let statusHtml = '';
+                if (st.installed) {
+                  const uninstallBtn = isMainAdmin && isReachable
+                    ? `
+                      <button
+                        type="button"
+                        class="btn btn-secondary btn-sm modules-uninstall-btn"
+                        title="Uninstall ${escapeHtml(entry.name)} from ${escapeHtml(n.name)}"
+                        ${cellBusy ? 'disabled' : ''}
+                        onclick="window.uninstallNodeModules(${n.nodeId}, '${entry.id}', '${escapeHtml(entry.name)}', '${escapeHtml(n.name)}', ${Boolean(entry.required)})"
+                      >
+                        ${cellBusy ? 'Removing…' : 'Uninstall'}
+                      </button>
+                    `
+                    : '';
+                  statusHtml = `
+                    <span class="badge badge-success module-version" title="${escapeHtml(`${st.version}${st.details ? ` — ${st.details}` : ''}`)}">
+                      ✓ ${escapeHtml(shortVersion(st.version))}
+                    </span>
+                    ${uninstallBtn}
+                  `;
+                } else if (isMainAdmin && isReachable) {
+                  const toneClass = entry.required ? 'btn-primary' : 'btn-secondary';
+                  statusHtml = `
+                    <button
+                      type="button"
+                      class="btn ${toneClass} btn-sm"
+                      title="${escapeHtml(st.details || `Install ${entry.name} on ${n.name}`)}"
+                      ${cellBusy ? 'disabled' : ''}
+                      onclick="window.installNodeModules(${n.nodeId}, ['${entry.id}'], 'Install ${escapeHtml(entry.name)} on ${escapeHtml(n.name)}')"
+                    >
+                      ${cellBusy ? 'Installing…' : 'Install'}
+                    </button>
+                  `;
+                } else {
+                  statusHtml = `
+                    <span class="badge ${entry.required ? 'badge-warning' : 'badge-neutral'}" style="font-size:10.5px;" title="${escapeHtml(st.details || 'Missing')}">
+                      Missing
+                    </span>
+                  `;
+                }
+
+                return `
+                  <div class="modules-tile ${tileState}">
+                    <div class="modules-tile-top">
+                      <span class="modules-tile-name" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name.split(' ')[0])}</span>
+                      ${entry.required ? '<span class="badge badge-info" style="font-size:9.5px; padding:1px 5px; flex-shrink:0;">REQ</span>' : ''}
+                    </div>
+                    <div class="modules-tile-status">${statusHtml}</div>
+                  </div>
+                `;
+              })
+              .join('')
+          : '<div style="grid-column:1 / -1; padding:14px; text-align:center; color:var(--text-dim); font-size:12px;">No modules match this filter.</div>';
 
         return `
-          <tr>
-            <td class="modules-node-cell">
-              <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-                <strong style="color:var(--text-main);">${escapeHtml(n.name)}</strong>
-                ${n.isLocal ? '<span class="badge badge-info" style="font-size:9.5px;">Core</span>' : ''}
-                ${statusBadge}
+          <div class="modules-node-card">
+            <div class="modules-node-header">
+              <div>
+                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                  <strong style="color:var(--text-main); font-size:14px;">${escapeHtml(n.name)}</strong>
+                  ${n.isLocal ? '<span class="badge badge-info" style="font-size:9.5px;">Core</span>' : ''}
+                  ${statusBadge}
+                </div>
+                <div class="modules-node-meta">
+                  <span style="font-family:var(--font-mono);">${escapeHtml(n.os || '?')}/${escapeHtml(n.arch || '?')} &bull; pkg: ${escapeHtml(n.packageManager || 'none')}</span>
+                  <span style="color:${reqMissing > 0 ? 'var(--warning-light, #fbbf24)' : 'var(--success-light, #34d399)'}; font-weight:500;">
+                    ${reqMissing > 0 ? `${reqMissing} required missing` : 'All required ready'} (${n.installedCount}/${n.totalCount})
+                  </span>
+                </div>
               </div>
-              <div style="font-size:11px; color:var(--text-dim); margin-top:3px; font-family:var(--font-mono);">
-                ${escapeHtml(n.os || '?')}/${escapeHtml(n.arch || '?')} &bull; pkg: ${escapeHtml(n.packageManager || 'none')}
-              </div>
-              <div style="font-size:11px; margin-top:2px; color:${reqMissing > 0 ? 'var(--warning-light, #fbbf24)' : 'var(--success-light, #34d399)'};">
-                ${reqMissing > 0 ? `${reqMissing} required missing` : 'All required ready'} (${n.installedCount}/${n.totalCount})
-              </div>
-            </td>
-            ${modCells}
-            <td style="white-space: nowrap; text-align: right;">
-              <div style="display:inline-flex; gap:6px; align-items:center;">
+              <div class="modules-node-actions">
                 ${isMainAdmin && isReachable && reqMissing > 0 ? `
                   <button
                     type="button"
                     class="btn btn-primary btn-sm"
-                    style="font-size:11px; padding:4px 9px;"
                     ${rowBusyReq ? 'disabled' : ''}
                     onclick="window.installNodeModules(${n.nodeId}, [], 'Install missing required on ${escapeHtml(n.name)}')"
                   >
@@ -367,7 +419,6 @@ export function renderModulesView() {
                   <button
                     type="button"
                     class="btn btn-secondary btn-sm"
-                    style="font-size:11px; padding:4px 9px;"
                     ${rowBusyRef ? 'disabled' : ''}
                     onclick="window.refreshNodeModules(${n.nodeId}, '${escapeHtml(n.name)}')"
                   >
@@ -375,29 +426,14 @@ export function renderModulesView() {
                   </button>
                 ` : ''}
               </div>
-            </td>
-          </tr>
+            </div>
+            <div class="modules-node-grid">${modTiles}</div>
+          </div>
         `;
       })
       .join('');
 
-    setHtmlIfChanged(
-      matrixWrap,
-      `
-        <div class="table-responsive">
-          <table class="table modules-matrix">
-            <thead>
-              <tr>
-                <th class="modules-node-cell">VPS Node</th>
-                ${headerCols}
-                <th style="text-align: right;">Actions</th>
-              </tr>
-            </thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-        </div>
-      `,
-    );
+    setHtmlIfChanged(matrixWrap, `<div class="modules-fleet-list">${nodeCardsHtml}</div>`);
   }
 
   // 2. Module & Language Cards Grid
@@ -505,4 +541,5 @@ window.setModulesFilter = setModulesFilter;
 window.onModulesSearchInput = onModulesSearchInput;
 window.refreshNodeModules = refreshNodeModules;
 window.installNodeModules = installNodeModules;
+window.uninstallNodeModules = uninstallNodeModules;
 window.installFleetModules = installFleetModules;

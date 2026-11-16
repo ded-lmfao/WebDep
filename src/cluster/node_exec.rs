@@ -2114,6 +2114,49 @@ pub async fn execute_rpc(
                 Err(e) => err_resp(req_id, 500, format!("Module install worker panicked: {e}")),
             }
         }
+        "modules.uninstall" => {
+            let module_ids: Vec<String> = params["moduleIds"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let p2p_port = exec.p2p_port.load(Ordering::Relaxed);
+            let port_opt = if p2p_port > 0 { Some(p2p_port) } else { None };
+            let ids_log = module_ids.join(", ");
+            send_log(
+                &ws_tx,
+                None,
+                None,
+                "system",
+                "info",
+                &format!("Uninstalling VPS modules [{ids_log}]..."),
+            );
+            let res = tokio::task::spawn_blocking(move || {
+                let (results, _snap) = crate::cluster::modules::uninstall_node_modules_sync(&module_ids);
+                let caps = detect_capabilities_with_p2p(port_opt);
+                (results, caps)
+            })
+            .await;
+            match res {
+                Ok((results, caps)) => {
+                    let all_ok = results.iter().all(|r| r.success);
+                    ok_resp(
+                        req_id,
+                        json!({
+                            "ok": all_ok,
+                            "results": results,
+                            "packageManager": caps.package_manager,
+                            "modules": caps.modules,
+                            "capabilities": caps,
+                        }),
+                    )
+                }
+                Err(e) => err_resp(req_id, 500, format!("Module uninstall worker panicked: {e}")),
+            }
+        }
         other => err_resp(req_id, 404, format!("Unknown remote RPC op '{other}'")),
     }
 }

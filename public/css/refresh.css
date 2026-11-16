@@ -123,17 +123,134 @@ select.form-control {
 }
 
 /* ---------- VPS Modules matrix ---------- */
-.modules-matrix td { vertical-align: middle; }
-.modules-matrix .module-version { font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
-.modules-matrix .modules-node-cell {
-  position: sticky;
-  left: 0;
-  z-index: 1;
-  min-width: 200px;
-  background: var(--bg-card);
-  box-shadow: 1px 0 0 var(--border-subtle);
+.modules-fleet-list {
+  display: flex;
+  flex-direction: column;
 }
-.modules-matrix thead .modules-node-cell { z-index: 2; }
+
+.modules-node-card {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modules-node-card + .modules-node-card {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.modules-node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.modules-node-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.modules-node-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.modules-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 10px;
+}
+
+.modules-tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  transition: border-color var(--transition-fast), background-color var(--transition-fast);
+  min-width: 0;
+}
+
+.modules-tile:hover {
+  border-color: var(--border-medium);
+}
+
+.modules-tile.is-missing-req {
+  border-color: var(--warning-border, rgba(245, 158, 11, 0.32));
+}
+
+.modules-tile-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.modules-tile-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modules-tile-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.modules-tile-status .module-version {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.modules-tile-status .btn-sm {
+  width: 100%;
+  justify-content: center;
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+
+.modules-tile-status .modules-uninstall-btn {
+  width: auto;
+  flex-shrink: 0;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border-color: var(--border-subtle);
+}
+
+.modules-tile-status .modules-uninstall-btn:hover:not(:disabled) {
+  color: var(--danger-light, #fca5a5);
+  border-color: var(--danger-border, rgba(239, 68, 68, 0.4));
+  background: var(--danger-bg, rgba(239, 68, 68, 0.12));
+}
+
+@media (max-width: 640px) {
+  .modules-node-card { padding: 12px 14px; }
+  .modules-node-grid { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 8px; }
+}
 
 button.preset-chip { font-family: inherit; line-height: 1.5; }
 .preset-chip.active { border-color: var(--accent-border); color: var(--accent-light); background: var(--accent-glow); }

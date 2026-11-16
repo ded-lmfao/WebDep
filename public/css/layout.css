@@ -150,6 +150,8 @@
 .mobile-menu-btn:hover { color: var(--text-main); background: rgba(238, 241, 247, 0.05); }
 
 .breadcrumbs { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); }
+.breadcrumbs span[onclick] { transition: color var(--transition-fast); }
+.breadcrumbs span[onclick]:hover { color: var(--text-main) !important; }
 .crumb-section { color: var(--text-main); font-weight: 500; }
 
 .server-pill {

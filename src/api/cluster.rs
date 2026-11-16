@@ -1074,6 +1074,120 @@ pub(crate) async fn install_node_modules_handler(
     Ok(Json(res))
 }
 
+async fn run_uninstall_on_single_node(
+    state: &AppState,
+    actor_username: &str,
+    node: &ClusterNode,
+    catalog: &[crate::cluster::modules::ModuleCatalogEntry],
+    requested_ids: &[String],
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let target_ids: Vec<String> = requested_ids
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if target_ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "No moduleIds specified for uninstall".to_string()));
+    }
+
+    let (results, updated_caps) = if node.is_local {
+        let ids_c = target_ids.clone();
+        let p2p_port = node.capabilities.p2p_port;
+        tokio::task::spawn_blocking(move || {
+            let (results, _) = crate::cluster::modules::uninstall_node_modules_sync(&ids_c);
+            let caps = crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port);
+            (results, caps)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        let rpc_res = state
+            .cluster
+            .call_node(
+                node.id,
+                "modules.uninstall",
+                serde_json::json!({ "moduleIds": target_ids }),
+                std::time::Duration::from_secs(600),
+            )
+            .await?;
+        let results: Vec<crate::cluster::modules::ModuleInstallResult> =
+            serde_json::from_value(rpc_res["results"].clone()).unwrap_or_default();
+        let caps = serde_json::from_value::<crate::cluster::models::NodeCapabilities>(
+            rpc_res["capabilities"].clone(),
+        )
+        .unwrap_or_else(|_| {
+            let mut c = node.capabilities.clone();
+            if let Some(pm) = rpc_res["packageManager"].as_str() {
+                c.package_manager = pm.to_string();
+            }
+            if let Ok(mods) = serde_json::from_value(rpc_res["modules"].clone()) {
+                c.modules = mods;
+            }
+            c
+        });
+        (results, caps)
+    };
+
+    state
+        .cluster
+        .update_node_capabilities(node.id, &updated_caps)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut refreshed_node = node.clone();
+    refreshed_node.capabilities = updated_caps;
+
+    let all_ok = results.iter().all(|r| r.success);
+    state.logs.add(
+        None,
+        None,
+        "system",
+        if all_ok { "info" } else { "warn" },
+        &format!(
+            "VPS module uninstall on '{}' [{}] by {}: {}",
+            node.name,
+            target_ids.join(", "),
+            actor_username,
+            if all_ok { "completed" } else { "partial/failed" }
+        ),
+    );
+
+    Ok(serde_json::json!({
+        "ok": all_ok,
+        "nodeId": node.id,
+        "nodeName": node.name,
+        "skipped": false,
+        "results": results,
+        "node": build_node_modules_view(&refreshed_node, catalog),
+    }))
+}
+
+pub(crate) async fn uninstall_node_modules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(node_id): AxPath<i64>,
+    Json(input): Json<InstallModulesInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_main_admin(&state, &headers).await?;
+    let node = state
+        .cluster
+        .get_node(node_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Node #{node_id} not found")))?;
+    if !node.is_local && !matches!(node.status.as_str(), "online" | "draining") {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Node '{}' is currently '{}'", node.name, node.status),
+        ));
+    }
+    let catalog = crate::cluster::modules::module_catalog();
+    let res =
+        run_uninstall_on_single_node(&state, &actor.username, &node, &catalog, &input.module_ids)
+            .await?;
+    Ok(Json(res))
+}
+
 pub(crate) async fn install_fleet_modules_handler(
     State(state): State<AppState>,
     headers: HeaderMap,

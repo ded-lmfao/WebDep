@@ -780,8 +780,8 @@ function renderOverviewNodesStrip(nodes) {
               <div class="overview-hosted-pills" id="ov-node-${n.id}-hosted"></div>
               ${isBestHeadroom ? '<span class="badge badge-success" style="font-size:10px;">Most free RAM</span>' : ''}
             </div>
-            <div style="display:flex; gap:6px; align-items:center;">
-              <button type="button" class="btn btn-secondary btn-sm" style="padding:4px 11px; font-size:11px; font-weight:600;" onclick="window.inspectOverviewNode(${n.id})">Inspect</button>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button type="button" class="btn btn-secondary btn-sm" onclick="window.inspectOverviewNode(${n.id})">Inspect &rarr;</button>
             </div>
           </div>
           <div class="stats-grid overview-stats-grid">

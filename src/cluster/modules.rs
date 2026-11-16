@@ -875,6 +875,183 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
     }
 }
 
+pub fn uninstall_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallResult>, NodeModulesSnapshot) {
+    let catalog = module_catalog();
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let pm = detect_package_manager();
+    let mut results = Vec::new();
+
+    #[cfg(not(unix))]
+    {
+        for raw_id in module_ids {
+            let id = raw_id.trim().to_ascii_lowercase();
+            if !catalog.iter().any(|c| c.id == id) {
+                results.push(ModuleInstallResult {
+                    module_id: id,
+                    success: false,
+                    already_installed: false,
+                    message: "Unknown module id".to_string(),
+                    output: String::new(),
+                });
+                continue;
+            }
+            let st = check_single_module(&id);
+            if !st.installed {
+                results.push(ModuleInstallResult {
+                    module_id: id,
+                    success: true,
+                    already_installed: false,
+                    message: "Not installed".to_string(),
+                    output: String::new(),
+                });
+            } else {
+                results.push(ModuleInstallResult {
+                    module_id: id,
+                    success: false,
+                    already_installed: true,
+                    message: "Automatic package uninstallation is supported on Linux VPS nodes (apt/dnf/yum/apk/pacman); uninstall manually on Windows dev hosts."
+                        .to_string(),
+                    output: String::new(),
+                });
+            }
+        }
+        return (results, detect_node_modules_sync());
+    }
+
+    #[cfg(unix)]
+    {
+        let use_sudo = !is_effective_root();
+
+        for raw_id in module_ids {
+            let id = raw_id.trim().to_ascii_lowercase();
+            if !catalog.iter().any(|c| c.id == id) {
+                results.push(ModuleInstallResult {
+                    module_id: id,
+                    success: false,
+                    already_installed: false,
+                    message: "Unknown module id".to_string(),
+                    output: String::new(),
+                });
+                continue;
+            }
+
+            let current = check_single_module(&id);
+            if !current.installed {
+                results.push(ModuleInstallResult {
+                    module_id: id,
+                    success: true,
+                    already_installed: false,
+                    message: "Already not installed".to_string(),
+                    output: String::new(),
+                });
+                continue;
+            }
+
+            if pm == "none" {
+                results.push(ModuleInstallResult {
+                    module_id: id,
+                    success: false,
+                    already_installed: true,
+                    message: "No supported Linux package manager found (apt-get/dnf/yum/apk/pacman)."
+                        .to_string(),
+                    output: String::new(),
+                });
+                continue;
+            }
+
+            let candidates = package_candidates(&pm, &id);
+            if candidates.is_empty() {
+                results.push(ModuleInstallResult {
+                    module_id: id.clone(),
+                    success: false,
+                    already_installed: true,
+                    message: format!("No package mapping for '{id}' on '{pm}'"),
+                    output: String::new(),
+                });
+                continue;
+            }
+
+            let mut outputs = Vec::new();
+            let mut cmd_ok = false;
+            for pkgs in candidates {
+                let res = match pm.as_str() {
+                    "apt-get" => {
+                        let mut args = vec![
+                            "-o",
+                            "DPkg::Lock::Timeout=120",
+                            "remove",
+                            "-y",
+                        ];
+                        args.extend_from_slice(&pkgs);
+                        run_pkg_cmd(
+                            use_sudo,
+                            "apt-get",
+                            &args,
+                            &[("DEBIAN_FRONTEND", "noninteractive")],
+                        )
+                    }
+                    "dnf" => {
+                        let mut args = vec!["remove", "-y"];
+                        args.extend_from_slice(&pkgs);
+                        run_pkg_cmd(use_sudo, "dnf", &args, &[])
+                    }
+                    "yum" => {
+                        let mut args = vec!["remove", "-y"];
+                        args.extend_from_slice(&pkgs);
+                        run_pkg_cmd(use_sudo, "yum", &args, &[])
+                    }
+                    "apk" => {
+                        let mut args = vec!["del"];
+                        args.extend_from_slice(&pkgs);
+                        run_pkg_cmd(use_sudo, "apk", &args, &[])
+                    }
+                    "pacman" => {
+                        let mut args = vec!["-R", "--noconfirm"];
+                        args.extend_from_slice(&pkgs);
+                        run_pkg_cmd(use_sudo, "pacman", &args, &[])
+                    }
+                    _ => Err("Unsupported package manager".to_string()),
+                };
+                match res {
+                    Ok(out) => {
+                        outputs.push(out);
+                        cmd_ok = true;
+                        if !check_single_module(&id).installed {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        outputs.push(err);
+                    }
+                }
+            }
+
+            let verified = check_single_module(&id);
+            let success = !verified.installed;
+            let msg = if success {
+                "Uninstalled successfully".to_string()
+            } else if cmd_ok {
+                format!(
+                    "Package removal ran, but module is still detected ({}). It may have been installed outside {pm}.",
+                    verified.version
+                )
+            } else {
+                format!("Uninstallation failed via {pm}")
+            };
+
+            results.push(ModuleInstallResult {
+                module_id: id,
+                success,
+                already_installed: verified.installed,
+                message: msg,
+                output: outputs.join("\n"),
+            });
+        }
+
+        (results, detect_node_modules_sync())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,6 +1083,14 @@ mod tests {
     #[test]
     fn install_rejects_unknown_module_ids() {
         let (res, _) = install_node_modules_sync(&["unknown;rm -rf /".to_string()]);
+        assert_eq!(res.len(), 1);
+        assert!(!res[0].success);
+        assert!(res[0].message.contains("Unknown"));
+    }
+
+    #[test]
+    fn uninstall_rejects_unknown_module_ids() {
+        let (res, _) = uninstall_node_modules_sync(&["unknown;rm -rf /".to_string()]);
         assert_eq!(res.len(), 1);
         assert!(!res[0].success);
         assert!(res[0].message.contains("Unknown"));
