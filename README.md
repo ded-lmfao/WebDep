@@ -32,7 +32,56 @@ Every WebDep server runs one of two roles using the **same binary**:
 
 ## Setup Guides
 
-### 1. Single-VPS Setup (Linux)
+### Quick Install — One Line (Linux VPS)
+
+SSH into your server and paste **one** line. No coding needed: it installs git/curl, downloads WebDep into `/opt/webdep`, sets up the 24/7 system service, and opens the firewall ports.
+
+**Both — dashboard + host websites on this VPS** *(recommended for a single VPS)*
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- both
+```
+
+**Core — dashboard only**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- core
+```
+
+**Node — extra VPS joining your dashboard** *(copy the ready-made line from the panel: **Nodes → + Add Node**)*
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- node --join http://<VPS1_IP>:4600 --token <WDJOIN_TOKEN>
+```
+
+Not sure which one? Run it without a role and pick from a menu (1 Both · 2 Core · 3 Node · 4 Update · 5 Status · 6 Uninstall). It asks for the install folder and, for a Node, the dashboard URL and token:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash
+```
+
+**Windows (PowerShell, no admin needed):** same menu, installs to `%LOCALAPPDATA%\WebDep`, starts automatically at logon:
+
+```powershell
+irm https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.ps1 | iex
+```
+
+Direct, without the menu: `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.ps1))) both` (or `core`, or `node -Join http://<VPS1_IP>:4600 -Token <TOKEN>`). Until a release includes the Windows download, it installs Rust + Visual C++ Build Tools and compiles (10–20 min, first time only). `both`/`core` also need PostgreSQL, which it installs via `winget` if missing.
+
+Then open `http://YOUR_SERVER_IP:4600`. Your first login (`ADMIN_USERNAME` / `ADMIN_PASSWORD`) is in `/opt/webdep/.env` and is logged once on first start (`sudo journalctl -u webdep-core | grep -i password`).
+
+| Option | Meaning |
+|--------|---------|
+| `--dir /path` | Install somewhere other than `/opt/webdep` (e.g. `--dir /root/webdep`) |
+| `--branch <name>` | Install a different Git branch (default `main`) |
+| `--name`, `--region`, `--public-ip` | Node display name, region label, public IP |
+| `--uninstall` | Stop and remove the WebDep services (your files stay in the install folder) |
+
+**Update later:** run the same line again. Your `data/` and `.env` are kept.
+
+---
+
+### 1. Single-VPS Setup (Linux) — Manual
 
 ```bash
 git clone https://github.com/ded-lmfao/WebDep.git webdep
@@ -51,9 +100,7 @@ Open `http://YOUR_SERVER_IP:4600` in your browser. Your initial `ADMIN_USERNAME`
 #### Step 1 — Install on **VPS 1** (Control Plane + Node 1)
 
 ```bash
-git clone https://github.com/ded-lmfao/WebDep.git webdep
-cd webdep
-sudo ./start.sh --service
+curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- both
 ```
 
 This installs `webdep-core.service` + `webdep-node.service`, configures UFW and WireGuard (`wireguard-tools`), and opens ports `80`, `443`, `4600` TCP, and `51820` UDP.
@@ -71,16 +118,12 @@ This installs `webdep-core.service` + `webdep-node.service`, configures UFW and 
 
 #### Step 3 — Join **VPS 2** (One Copy & Paste)
 
-Paste the generated command directly on VPS 2 (it clones, sets up the service, enrolls, and connects automatically):
+Paste the generated command directly on VPS 2 (it installs WebDep, sets up the service, enrolls, and connects automatically):
 
 ```bash
-git clone https://github.com/ded-lmfao/WebDep.git webdep && cd webdep && \
-sudo ./start.sh --service --node \
-  --join http://<VPS1_IP>:4600 \
-  --token <WDJOIN_TOKEN> \
-  --name "VPS-2" \
-  --region "mumbai-IND" \
-  --public-ip "<VPS2_IP>"
+curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- \
+  --node --join http://<VPS1_IP>:4600 --token <WDJOIN_TOKEN> \
+  --name "VPS-2" --region "mumbai-IND" --public-ip "<VPS2_IP>"
 ```
 
 What this does automatically:
@@ -99,9 +142,9 @@ Refresh **Nodes** in your browser — both **VPS 1** and **VPS 2** appear **Onli
 If you want VPS 1 to run **only Web-Core** without hosting apps on VPS 1:
 
 ```bash
-sudo ./start.sh --core --daemon
-# or directly:
-./target/release/webdep --core
+curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- core
+# or, inside an existing checkout:
+sudo ./start.sh --service --core
 ```
 
 #### Upgrading Your Fleet Later

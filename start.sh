@@ -274,6 +274,45 @@ fix_service_permissions() {
     fi
 }
 
+# write_unit <name> <description> <exec flag> <After=> [Wants=]
+write_unit() {
+    local name="$1" desc="$2" flag="$3" after="$4" wants="${5:-}"
+    local user_home wants_line=""
+    user_home=$(eval echo "~${SERVICE_USER}")
+    [[ -n "$wants" ]] && wants_line="Wants=${wants}"
+    $SUDO tee "/etc/systemd/system/${name}.service" >/dev/null <<EOF
+[Unit]
+Description=${desc}
+After=${after}
+${wants_line}
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+WorkingDirectory=${APP_DIR}
+ExecStart=${APP_DIR}/target/release/webdep ${flag}
+Restart=always
+RestartSec=3
+KillMode=process
+Environment=RUST_LOG=webdep=info
+Environment="PATH=${user_home}/.cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="MALLOC_ARENA_MAX=2"
+Environment="MALLOC_TRIM_THRESHOLD_=65536"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+print_panel_info() {
+    echo "    - Panel Address:       ${PUBLIC_IP}:${PORT}"
+    echo "    - Localhost:           127.0.0.1:${PORT}"
+    if [[ "${PUBLIC_IP}" != "127.0.0.1" ]]; then
+        echo "    - Secure SSH Tunnel:   ssh -N -L ${PORT}:127.0.0.1:${PORT} ${SERVICE_USER}@${PUBLIC_IP}"
+        echo "                           (Recommended: enables encrypted transit & browser Passkey authentication)"
+    fi
+}
+
 if [[ "$HAS_PRIVS" == "1" ]]; then
     echo "[*] Configuring automatic firewall rules (UFW & iptables)..."
     if ! command -v ufw >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
@@ -321,31 +360,8 @@ if [[ "$ROLE_MODE" == "node" ]]; then
             exit 1
         fi
         echo "[*] Installing systemd service (/etc/systemd/system/webdep-node.service)..."
-        SERVICE_USER="${SUDO_USER:-$(whoami)}"
-        USER_HOME=$(eval echo "~${SERVICE_USER}")
         fix_service_permissions
-        $SUDO tee /etc/systemd/system/webdep-node.service >/dev/null <<EOF
-[Unit]
-Description=WebDep Web-Node Execution & Mesh Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-WorkingDirectory=${APP_DIR}
-ExecStart=${APP_DIR}/target/release/webdep --node
-Restart=always
-RestartSec=3
-KillMode=process
-Environment=RUST_LOG=webdep=info
-Environment="PATH=${USER_HOME}/.cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Environment="MALLOC_ARENA_MAX=2"
-Environment="MALLOC_TRIM_THRESHOLD_=65536"
-
-[Install]
-WantedBy=multi-user.target
-EOF
+        write_unit webdep-node "WebDep Web-Node Execution & Mesh Agent" --node network-online.target network-online.target
         $SUDO systemctl daemon-reload
         $SUDO systemctl enable webdep-node
         $SUDO systemctl restart webdep-node
@@ -360,9 +376,6 @@ if [[ "$INSTALL_SERVICE" == "1" ]]; then
         echo "[!] Installing systemd services requires root privileges or 'sudo'."
         exit 1
     fi
-    echo "[*] Installing Web-Core + paired local Web-Node systemd services..."
-    SERVICE_USER="${SUDO_USER:-$(whoami)}"
-    USER_HOME=$(eval echo "~${SERVICE_USER}")
 
     # Disable legacy single-unit webdep.service if upgrading
     if systemctl is-active --quiet webdep 2>/dev/null || systemctl is-enabled --quiet webdep 2>/dev/null; then
@@ -370,53 +383,27 @@ if [[ "$INSTALL_SERVICE" == "1" ]]; then
         $SUDO systemctl disable webdep 2>/dev/null || true
     fi
 
+    if [[ "$ROLE_MODE" == "core" ]]; then
+        echo "[*] Installing dashboard-only Web-Core systemd service..."
+        # A dashboard-only host must not keep a local Web-Node from an earlier Core+Node install.
+        $SUDO systemctl disable --now webdep-node 2>/dev/null || true
+        fix_service_permissions
+        write_unit webdep-core "WebDep Web-Core Control Plane" --core network.target
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable webdep-core
+        $SUDO systemctl restart webdep-core
+        echo ""
+        echo "[+] Web-Core (dashboard only) is now running 24/7 via systemd!"
+        print_panel_info
+        echo "    - Core Status / Logs:  sudo systemctl status webdep-core  |  sudo journalctl -u webdep-core -f"
+        exit 0
+    fi
+
+    echo "[*] Installing Web-Core + paired local Web-Node systemd services..."
     ./target/release/webdep --pair-local
     fix_service_permissions
-
-    $SUDO tee /etc/systemd/system/webdep-core.service >/dev/null <<EOF
-[Unit]
-Description=WebDep Web-Core Control Plane
-After=network.target
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-WorkingDirectory=${APP_DIR}
-ExecStart=${APP_DIR}/target/release/webdep --core
-Restart=always
-RestartSec=3
-KillMode=process
-Environment=RUST_LOG=webdep=info
-Environment="PATH=${USER_HOME}/.cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Environment="MALLOC_ARENA_MAX=2"
-Environment="MALLOC_TRIM_THRESHOLD_=65536"
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    $SUDO tee /etc/systemd/system/webdep-node.service >/dev/null <<EOF
-[Unit]
-Description=WebDep Local Web-Node Execution & Mesh Agent
-After=network.target webdep-core.service
-Wants=webdep-core.service
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-WorkingDirectory=${APP_DIR}
-ExecStart=${APP_DIR}/target/release/webdep --node
-Restart=always
-RestartSec=3
-KillMode=process
-Environment=RUST_LOG=webdep=info
-Environment="PATH=${USER_HOME}/.cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Environment="MALLOC_ARENA_MAX=2"
-Environment="MALLOC_TRIM_THRESHOLD_=65536"
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    write_unit webdep-core "WebDep Web-Core Control Plane" --core network.target
+    write_unit webdep-node "WebDep Local Web-Node Execution & Mesh Agent" --node "network.target webdep-core.service" webdep-core.service
 
     $SUDO systemctl daemon-reload
     $SUDO systemctl enable webdep-core webdep-node
@@ -425,12 +412,7 @@ EOF
     $SUDO systemctl restart webdep-node
     echo ""
     echo "[+] Web-Core & Web-Node are now running 24/7 via systemd!"
-    echo "    - Panel Address:       ${PUBLIC_IP}:${PORT}"
-    echo "    - Localhost:           127.0.0.1:${PORT}"
-    if [[ "${PUBLIC_IP}" != "127.0.0.1" ]]; then
-        echo "    - Secure SSH Tunnel:   ssh -N -L ${PORT}:127.0.0.1:${PORT} ${SERVICE_USER}@${PUBLIC_IP}"
-        echo "                           (Recommended: enables encrypted transit & browser Passkey authentication)"
-    fi
+    print_panel_info
     echo "    - Core Status / Logs:  sudo systemctl status webdep-core  |  sudo journalctl -u webdep-core -f"
     echo "    - Node Status / Logs:  sudo systemctl status webdep-node  |  sudo journalctl -u webdep-node -f"
     exit 0

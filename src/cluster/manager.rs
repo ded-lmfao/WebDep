@@ -185,16 +185,25 @@ impl ClusterManager {
         // Workers must run the same code line as the Core: a Core built from a feature branch
         // clones that branch (main has no Web-Node mode on older releases).
         let build_branch = env!("WEBDEP_GIT_BRANCH").trim();
-        let branch_flag = if !build_branch.is_empty()
+        let branch = if !build_branch.is_empty()
             && !matches!(build_branch, "HEAD" | "main" | "master")
             && build_branch.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
         {
-            format!("-b {build_branch} ")
+            build_branch
         } else {
-            String::new()
+            "main"
         };
+        // One-line bootstrap (install.sh): installs git/curl, clones into /opt/webdep and runs
+        // `start.sh --service --node ...` — nothing to clone or cd into by hand.
+        let mut installer_opts = String::new();
+        if branch != "main" {
+            installer_opts.push_str(&format!(" --branch {branch}"));
+        }
+        if clean_slug != "ded-lmfao/WebDep" {
+            installer_opts.push_str(&format!(" --repo {clean_slug}"));
+        }
         let fresh_vps_command = format!(
-            "git clone {branch_flag}https://github.com/{clean_slug}.git webdep && cd webdep && {service_command}"
+            "curl -fsSL https://raw.githubusercontent.com/{clean_slug}/{branch}/install.sh | sudo bash -s -- {args}{installer_opts}"
         );
 
         Ok(CreateEnrollTokenResponse {
