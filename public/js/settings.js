@@ -452,6 +452,10 @@ export async function loadSystemVersionInfo(quiet = false, forceRefresh = false)
         badgeEl.className = 'badge badge-success';
         const label = v.remote_commit || v.remote_tag || 'latest';
         badgeEl.textContent = `Update available (${label})`;
+      } else if (v.reinstall_command) {
+        badgeEl.className = 'badge badge-warning';
+        badgeEl.textContent = `Major upgrade (${v.remote_tag || 'latest'}): reinstall required`;
+        badgeEl.title = v.check_error || '';
       } else if (v.check_error) {
         badgeEl.className = 'badge badge-neutral';
         badgeEl.textContent = 'No release checked';
@@ -506,6 +510,9 @@ export async function checkPlatformUpdates(manual = false) {
     } else if (v.has_update) {
       const sizeMb = v.asset_size_bytes ? ` • ${(v.asset_size_bytes / (1024 * 1024)).toFixed(1)} MB` : '';
       toast(`Release ${v.remote_tag || v.remote_commit} is available${sizeMb}. Click Update to install.`, 'success', 5500);
+    } else if (v.reinstall_command) {
+      toast(v.check_error, 'warning', 20000);
+      try { await navigator.clipboard.writeText(v.reinstall_command); toast('Reinstall command copied to clipboard.', 'success'); } catch (_) {}
     } else if (v.check_error) {
       toast(v.check_error, 'warning', 6500);
     } else {

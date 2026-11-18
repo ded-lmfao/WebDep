@@ -60,6 +60,9 @@ pub struct GitVersionInfo {
     pub published_at: Option<String>,
     pub update_source: String,
     pub check_error: Option<String>,
+    /// Set when the latest release is the PostgreSQL-based generation, which a binary swap
+    /// cannot install (it needs PostgreSQL packages). Holds the one-time reinstall command.
+    pub reinstall_command: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -234,6 +237,36 @@ fn read_git_origin_slug() -> Option<&'static str> {
                 .and_then(|o| Git::extract_github_slug(&String::from_utf8_lossy(&o.stdout)))
         })
         .as_deref()
+}
+
+/// Release assets of the PostgreSQL-based generation are named `webdep3-linux-<arch>.tar.gz`,
+/// so binaries from this (SQLite) generation never download them by accident.
+const NEXT_GEN_ASSET_PREFIX: &str = "webdep3-";
+
+fn is_next_generation_release(rel: &GhReleaseResponse) -> bool {
+    rel.assets.iter().any(|a| a.name.starts_with(NEXT_GEN_ASSET_PREFIX))
+}
+
+/// One-time command that moves this install to the PostgreSQL-based generation in place:
+/// same folder, so `data/` (including `webdep.sqlite`, which is imported automatically) and `.env` are kept.
+fn reinstall_command(repo_slug: &str) -> String {
+    let dir = std::env::current_dir()
+        .ok()
+        .filter(|d| d.join("start.sh").is_file())
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "<your WebDep folder>".to_string());
+    format!(
+        "curl -fsSL https://raw.githubusercontent.com/{repo}/main/install.sh | sudo bash -s -- both --dir '{dir}' --repo {repo}",
+        repo = repo_slug,
+        dir = dir
+    )
+}
+
+fn reinstall_message(command: &str) -> String {
+    format!(
+        "WebDep 3 is available. It moves your data to PostgreSQL, which needs a one-time reinstall instead of an in-place update. Your data and settings are kept and imported automatically. Run on the server: {}",
+        command
+    )
 }
 
 fn resolve_repo_slug_from_db(db: Option<&DbPool>) -> String {
@@ -457,6 +490,7 @@ impl Updater {
         let repo_slug = resolve_repo_slug_from_db(self.db.as_ref());
         let remote_url = format!("https://github.com/{}", repo_slug);
         let desired_asset = display_asset_name();
+        let mut reinstall: Option<String> = None;
 
         let (
             remote_tag,
@@ -469,6 +503,22 @@ impl Updater {
             published_at,
             check_error,
         ) = match self.get_latest_release_cached(&repo_slug, force_refresh) {
+            Ok(rel) if is_next_generation_release(&rel) && !rel.assets.iter().any(|a| a.name == desired_asset) => {
+                let cmd = reinstall_command(&repo_slug);
+                let msg = reinstall_message(&cmd);
+                reinstall = Some(cmd);
+                (
+                    Some(rel.tag_name.clone()),
+                    None,
+                    Some(rel.tag_name.clone()),
+                    rel.name.or_else(|| Some(rel.tag_name)),
+                    Some(rel.html_url),
+                    None,
+                    None,
+                    rel.published_at,
+                    Some(msg),
+                )
+            }
             Ok(rel) => {
                 let sha = extract_short_sha_from_release(&rel);
                 let matched_asset = rel
@@ -495,7 +545,7 @@ impl Updater {
             Err(err) => (None, None, None, None, None, None, None, None, Some(err)),
         };
 
-        let has_update = match (&remote_tag, &remote_commit) {
+        let has_update = reinstall.is_none() && match (&remote_tag, &remote_commit) {
             (Some(r_tag), Some(r_sha))
                 if current_commit != "unknown" && !current_commit.is_empty() =>
             {
@@ -525,6 +575,7 @@ impl Updater {
             published_at,
             update_source: "github_release".to_string(),
             check_error,
+            reinstall_command: reinstall,
         }
     }
 
@@ -696,6 +747,10 @@ impl Updater {
 
         let target_asset = match release.assets.iter().find(|a| a.name == asset_name) {
             Some(a) => a.clone(),
+            None if is_next_generation_release(&release) => {
+                Self::fail_update(&status_arc, reinstall_message(&reinstall_command(&repo_slug)));
+                return;
+            }
             None => {
                 Self::fail_update(
                     &status_arc,
@@ -1030,6 +1085,25 @@ ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep-li
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_next_generation_release_is_detected_by_asset_prefix() {
+        let rel = |names: &[&str]| -> GhReleaseResponse {
+            serde_json::from_value(serde_json::json!({
+                "tag_name": "v9.0.0",
+                "html_url": "https://example.invalid",
+                "assets": names.iter().map(|n| serde_json::json!({
+                    "name": n, "browser_download_url": "", "url": "", "size": 1
+                })).collect::<Vec<_>>()
+            }))
+            .unwrap()
+        };
+        assert!(is_next_generation_release(&rel(&["webdep3-linux-x86_64.tar.gz", "checksums.txt"])));
+        assert!(!is_next_generation_release(&rel(&["webdep-linux-x86_64.tar.gz", "checksums.txt"])));
+        let cmd = reinstall_command("owner/repo");
+        assert!(cmd.contains("owner/repo/main/install.sh"));
+        assert!(cmd.contains("--dir"));
     }
 
     #[test]
