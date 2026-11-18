@@ -211,7 +211,21 @@ if [[ "$BUILD_FROM_SOURCE" != "1" ]] && command -v git >/dev/null 2>&1 && [[ -d 
         BUILD_FROM_SOURCE=1
     fi
 fi
-if [[ "$BUILD_FROM_SOURCE" == "1" || ! -f "target/release/webdep" ]]; then
+# An existing binary is reused only if it matches the checked-out code's version. Otherwise a re-run
+# of the installer after `git pull` would keep an older binary (e.g. 2.x after updating to 3.x),
+# which does not understand newer flags such as --pair-local and would just start serving in the foreground.
+NEED_BINARY=0
+if [[ ! -f "target/release/webdep" ]]; then
+    NEED_BINARY=1
+elif [[ "$BUILD_FROM_SOURCE" != "1" ]]; then
+    WANT_VER=$(tr -d '\r' < Cargo.toml | awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{gsub(/"/,"",$3); print $3; exit}')
+    HAVE_VER=$(timeout 10 ./target/release/webdep --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+    if [[ -n "$WANT_VER" && "$HAVE_VER" != "$WANT_VER" ]]; then
+        echo "[*] Installed binary is ${HAVE_VER:-unknown}, code is ${WANT_VER}: fetching the matching release binary..."
+        NEED_BINARY=1
+    fi
+fi
+if [[ "$BUILD_FROM_SOURCE" == "1" || "$NEED_BINARY" == "1" ]]; then
     if [[ "$BUILD_FROM_SOURCE" == "1" ]] || ! install_release_binary; then
         if [[ "$BUILD_FROM_SOURCE" == "1" ]]; then
             echo "[*] --source requested: building release binary from local source code..."
