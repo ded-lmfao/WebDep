@@ -3379,7 +3379,7 @@
             1. Fresh Linux VPS 2 — paste this one line into SSH as any sudo user (installs everything &amp; joins):
           </div>
           <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-            <input type="text" class="form-control" id="add-node-fresh-cmd" readonly style="font-family: var(--font-mono); font-size: 11.5px;">
+            <input type="text" class="form-control" id="add-node-fresh-cmd" aria-label="Fresh VPS install and join command" readonly style="font-family: var(--font-mono); font-size: 11.5px;">
             <button type="button" class="btn btn-primary btn-sm" onclick="copyNodeJoinCommand('add-node-fresh-cmd')">Copy</button>
           </div>
 
@@ -3387,7 +3387,7 @@
             2. Already Cloned on Linux VPS 2 (Bash <code>./start.sh --service</code>):
           </div>
           <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-            <input type="text" class="form-control" id="add-node-service-cmd" readonly style="font-family: var(--font-mono); font-size: 11px;">
+            <input type="text" class="form-control" id="add-node-service-cmd" aria-label="start.sh join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
             <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-service-cmd')">Copy</button>
           </div>
 
@@ -3395,7 +3395,7 @@
             3. Direct Binary Flags (<code>webdep --node</code>):
           </div>
           <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-            <input type="text" class="form-control" id="add-node-join-cmd" readonly style="font-family: var(--font-mono); font-size: 11px;">
+            <input type="text" class="form-control" id="add-node-join-cmd" aria-label="webdep --node join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
             <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-join-cmd')">Copy</button>
           </div>
 
@@ -3403,7 +3403,7 @@
             4. Windows PowerShell (Same-PC Local Test):
           </div>
           <div style="display: flex; gap: 8px; align-items: center;">
-            <input type="text" class="form-control" id="add-node-ps-cmd" readonly style="font-family: var(--font-mono); font-size: 11px;">
+            <input type="text" class="form-control" id="add-node-ps-cmd" aria-label="Windows PowerShell join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
             <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-ps-cmd')">Copy</button>
           </div>
 

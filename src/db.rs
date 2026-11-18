@@ -28,7 +28,7 @@ pub fn now() -> i64 {
 pub async fn open_db(
     data_dir: &Path,
 ) -> Result<(DbPool, Option<ControlPgHandle>), Box<dyn std::error::Error + Send + Sync>> {
-    std::fs::create_dir_all(data_dir)?;
+    tokio::fs::create_dir_all(data_dir).await?;
     if let Ok(mut guard) = ACTIVE_DATA_DIR.write() {
         *guard = Some(data_dir.to_path_buf());
     }
@@ -68,7 +68,7 @@ async fn seed_github_token(pool: &DbPool) {
     if existing_token.trim().is_empty() {
         let mut detected_tok = std::env::var("GITHUB_TOKEN").unwrap_or_default();
         if detected_tok.trim().is_empty() {
-            if let Ok(out) = std::process::Command::new("gh").args(["auth", "token"]).output() {
+            if let Ok(out) = tokio::process::Command::new("gh").args(["auth", "token"]).output().await {
                 if out.status.success() {
                     detected_tok = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 }
@@ -94,7 +94,7 @@ async fn ensure_project_deploy_dirs(pool: &DbPool) {
     {
         for dir in dirs {
             if !dir.trim().is_empty() {
-                let _ = std::fs::create_dir_all(&dir);
+                let _ = tokio::fs::create_dir_all(&dir).await;
             }
         }
     }

@@ -536,7 +536,9 @@ impl WsWriter {
 }
 
 pub fn compute_ws_accept(key: &str) -> String {
-    let mut hasher = Sha1::new();
+    // SHA-1 is mandated by the WebSocket handshake (RFC 6455 section 4.2.2) and only proves the
+    // server speaks WebSocket; it protects nothing, so a stronger hash would break clients.
+    let mut hasher = Sha1::new(); // NOSONAR
     hasher.update(key.trim().as_bytes());
     hasher.update(WS_GUID.as_bytes());
     BASE64.encode(hasher.finalize())

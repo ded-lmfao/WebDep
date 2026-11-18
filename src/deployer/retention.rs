@@ -315,8 +315,8 @@ pub async fn prune_project_deployments(db: &DbPool, project_id: i64, keep: usize
 
     // Also sweep leftover numeric `rel-<id>` directories whose deployment was previously
     // deleted (e.g., if `rel-1` was live when pruned, and can now be cleaned after replacement).
-    if let Ok(entries) = fs::read_dir(&releases_root) {
-        for entry in entries.flatten() {
+    if let Ok(mut entries) = tokio::fs::read_dir(&releases_root).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if let Some(id_str) = name.strip_prefix("rel-") {

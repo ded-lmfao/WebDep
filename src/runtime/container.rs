@@ -114,6 +114,13 @@ fn clear_readonly_recursive(path: &Path) {
         }
         let mut perms = meta.permissions();
         if perms.readonly() {
+            // On Unix `set_readonly(false)` grants write to group and others too; only restore the owner's.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                perms.set_mode(perms.mode() | 0o200);
+            }
+            #[cfg(not(unix))]
             perms.set_readonly(false);
             let _ = std::fs::set_permissions(path, perms);
         }

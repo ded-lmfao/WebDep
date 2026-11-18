@@ -409,19 +409,20 @@ fn command_exists(bin: &str) -> bool {
 
 pub async fn reconcile_mesh_network(manifest: &NodeStateManifest, data_dir: &Path) {
     let mesh_dir = data_dir.join("mesh");
-    let _ = std::fs::create_dir_all(&mesh_dir);
+    let _ = tokio::fs::create_dir_all(&mesh_dir).await;
     let local_conf_path = mesh_dir.join("webdep0.conf");
     let rendered = render_wg_conf(manifest);
 
-    let changed = std::fs::read_to_string(&local_conf_path)
+    let changed = tokio::fs::read_to_string(&local_conf_path)
+        .await
         .map(|existing| existing != rendered)
         .unwrap_or(true);
     if changed {
-        let _ = std::fs::write(&local_conf_path, &rendered);
+        let _ = tokio::fs::write(&local_conf_path, &rendered).await;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&local_conf_path, std::fs::Permissions::from_mode(0o600));
+            let _ = tokio::fs::set_permissions(&local_conf_path, std::fs::Permissions::from_mode(0o600)).await;
         }
     }
 
