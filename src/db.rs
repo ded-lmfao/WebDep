@@ -36,8 +36,18 @@ pub async fn open_db(
     let (pool, handle) = pg_control::ensure_control_pg_pool(data_dir).await?;
 
     let sqlite_path = data_dir.join("webdep.sqlite");
+    // Booting with an empty control DB after a failed import would look like data loss and
+    // invite a fresh admin signup, which then blocks the auto-import forever. Stop instead.
+    // The SQLite file is opened read-only and the import is one transaction, so retrying is safe.
     if let Err(e) = crate::sqlite_import::import_sqlite_if_needed(&pool, &sqlite_path).await {
-        tracing::warn!("SQLite auto-import skipped or failed ({}): {}", sqlite_path.display(), e);
+        return Err(format!(
+            "Importing the previous WebDep database ({}) into PostgreSQL failed: {}. \
+             Nothing was changed; the SQLite file is untouched. Fix the cause and restart, \
+             or retry manually with `webdep --import-sqlite`.",
+            sqlite_path.display(),
+            e
+        )
+        .into());
     }
 
     seed_github_token(&pool).await;

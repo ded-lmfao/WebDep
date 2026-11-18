@@ -124,8 +124,8 @@ fn now_time_str() -> String {
 fn current_arch_asset_name() -> Option<&'static str> {
     if cfg!(target_os = "linux") {
         match std::env::consts::ARCH {
-            "x86_64" => Some("webdep-linux-x86_64.tar.gz"),
-            "aarch64" => Some("webdep-linux-aarch64.tar.gz"),
+            "x86_64" => Some("webdep3-linux-x86_64.tar.gz"),
+            "aarch64" => Some("webdep3-linux-aarch64.tar.gz"),
             _ => None,
         }
     } else {
@@ -135,7 +135,7 @@ fn current_arch_asset_name() -> Option<&'static str> {
 
 /// Asset name to display during version checks even on non-Linux dev machines.
 fn display_asset_name() -> &'static str {
-    current_arch_asset_name().unwrap_or("webdep-linux-x86_64.tar.gz")
+    current_arch_asset_name().unwrap_or("webdep3-linux-x86_64.tar.gz")
 }
 
 /// Resolves the live executable path safely, stripping Linux `(deleted)` suffix if unlinked.
@@ -1165,14 +1165,14 @@ mod tests {
     #[test]
     fn test_parse_checksum_for_asset_and_sha256_hash() {
         let checksums = "\
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  webdep-linux-x86_64.tar.gz\n\
-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep-linux-aarch64.tar.gz\n";
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  webdep3-linux-x86_64.tar.gz\n\
+ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep3-linux-aarch64.tar.gz\n";
         assert_eq!(
-            parse_checksum_for_asset(checksums, "webdep-linux-x86_64.tar.gz").as_deref(),
+            parse_checksum_for_asset(checksums, "webdep3-linux-x86_64.tar.gz").as_deref(),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         );
         assert_eq!(
-            parse_checksum_for_asset(checksums, "webdep-linux-aarch64.tar.gz").as_deref(),
+            parse_checksum_for_asset(checksums, "webdep3-linux-aarch64.tar.gz").as_deref(),
             Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
         );
         assert_eq!(parse_checksum_for_asset(checksums, "missing.tar.gz"), None);

@@ -83,8 +83,8 @@ install_release_binary() {
     local arch asset repo tmp_dir expected actual
     arch=$(uname -m)
     case "$arch" in
-        x86_64|amd64) asset="webdep-linux-x86_64.tar.gz" ;;
-        aarch64|arm64) asset="webdep-linux-aarch64.tar.gz" ;;
+        x86_64|amd64) asset="webdep3-linux-x86_64.tar.gz" ;;
+        aarch64|arm64) asset="webdep3-linux-aarch64.tar.gz" ;;
         *)
             echo "[!] Unsupported architecture '${arch}' for prebuilt release."
             return 1

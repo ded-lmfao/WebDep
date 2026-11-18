@@ -5,4 +5,4 @@
 - Roles (src/main.rs CliOptions): default = Core+local Node; `--core` dashboard only; `--node [--join URL --token T]` worker; `--pair-local`, `--enroll-only`, `--version`, `--import-sqlite`.
 - Install/run: start.sh (Linux; downloads release binary from GitHub Releases, falls back to cargo build; non-main branch => builds from source), start.ps1/start.bat (Windows).
 - systemd units written by start.sh: webdep-core (`--core`), webdep-node (`--node`); legacy webdep.service migrated.
-- CI: .github/workflows/release.yml builds musl x86_64/aarch64 `webdep-linux-<arch>.tar.gz` + checksums.txt on push to main.
+- CI: .github/workflows/release.yml builds musl x86_64/aarch64 `webdep3-linux-<arch>.tar.gz` + checksums.txt on push to main. Name differs from SQLite-era `webdep-linux-*` on purpose: old updaters skip it; bridge release (branch release/sqlite-bridge) tells them to reinstall.

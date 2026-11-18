@@ -148,7 +148,17 @@ pub async fn ensure_local_pg_with_port(
     data_dir: &Path,
     forced_port: Option<u16>,
 ) -> Result<(PgPool, Option<ControlPgHandle>), Box<dyn std::error::Error + Send + Sync>> {
-    let bins = PgBinaries::detect().map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
+    let bins = PgBinaries::detect().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "{}. WebDep now stores its data in PostgreSQL. Install it by re-running the installer \
+                 (curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- --dir <your WebDep folder>), \
+                 or set DATABASE_URL to an existing PostgreSQL server.",
+                e
+            ),
+        )
+    })?;
 
     let control_dir = data_dir.join("control-pg");
     let pgdata_dir = control_dir.join("pgdata");
