@@ -26,8 +26,8 @@ pub(crate) async fn project_commits_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Response, (StatusCode, String)> {
-    let _actor = verify_project_access(&state, &headers, id)?;
-    let p = fetch_project(&state.projects, id)?;
+    let _actor = verify_project_access(&state, &headers, id).await?;
+    let p = fetch_project(&state.projects, id).await?;
 
     let cache_key = format!(
         "commits:p{}:{}:{}",
@@ -39,20 +39,39 @@ pub(crate) async fn project_commits_handler(
         return Ok(res);
     }
 
-    let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
-    let branch = p.branch.clone();
-    let repo_dir_clone = repo_dir.clone();
+    let releases = state.deployer.list_releases(id).await;
 
-    let raw_commits = tokio::task::spawn_blocking(move || {
-        if !repo_dir_clone.exists() {
-            return Vec::new();
-        }
-        crate::git::Git::list_commits(&repo_dir_clone, &branch, 200)
-    })
-    .await
-    .unwrap_or_default();
+    let raw_commits = if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "git.commits",
+                serde_json::json!({ "project": &p, "pull": false, "limit": 200, "context": ctx }),
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        serde_json::from_value::<Vec<crate::git::CommitInfo>>(res["commits"].clone()).unwrap_or_default()
+    } else {
+        let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
+        let branch = p.branch.clone();
+        let repo_dir_clone = repo_dir.clone();
 
-    let releases = state.deployer.list_releases(id);
+        tokio::task::spawn_blocking(move || {
+            if !repo_dir_clone.exists() {
+                return Vec::new();
+            }
+            crate::git::Git::list_commits(&repo_dir_clone, &branch, 200)
+        })
+        .await
+        .unwrap_or_default()
+    };
 
     let views: Vec<CommitView> = raw_commits
         .into_iter()
@@ -91,8 +110,35 @@ pub(crate) async fn project_check_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<CheckGitResponse>, (StatusCode, String)> {
-    let _actor = verify_project_access(&state, &headers, id)?;
-    let p = fetch_project(&state.projects, id)?;
+    let _actor = verify_project_access(&state, &headers, id).await?;
+    let p = fetch_project(&state.projects, id).await?;
+
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "git.check",
+                serde_json::json!({ "project": &p, "context": ctx }),
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        let head = res["head"].as_str().unwrap_or("").to_string();
+        let needs_deploy = !head.is_empty() && p.deployed_sha.as_deref() != Some(&head);
+        return Ok(Json(CheckGitResponse {
+            needs_fetch: false,
+            needs_deploy,
+            remote_sha: head.clone(),
+            local_sha: head,
+            deployed_sha: p.deployed_sha,
+        }));
+    }
 
     let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
     let repo_url = p.repo_url.clone();
@@ -132,35 +178,53 @@ pub(crate) async fn project_fetch_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<FetchGitResponse>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "deploy", Some(id))?.username;
-    let p = fetch_project(&state.projects, id)?;
+    let actor = verify_power(&state, &headers, "deploy", Some(id)).await?.username;
+    let p = fetch_project(&state.projects, id).await?;
 
-    let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
-    let repo_url = p.repo_url.clone();
-    let branch = p.branch.clone();
-    let repo_dir_clone = repo_dir.clone();
+    let (sha, has_new_commits) = if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "git.fetch",
+                serde_json::json!({ "project": &p, "context": ctx }),
+                std::time::Duration::from_secs(90),
+            )
+            .await?;
+        let head = res["head"].as_str().unwrap_or("").to_string();
+        let has_new = !head.is_empty() && p.deployed_sha.as_deref() != Some(&head);
+        (head, has_new)
+    } else {
+        let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
+        let repo_url = p.repo_url.clone();
+        let branch = p.branch.clone();
+        let repo_dir_clone = repo_dir.clone();
 
-    let (sha, has_new_commits) = tokio::task::spawn_blocking(move || -> Result<(String, bool), String> {
-        let before_sha = crate::git::Git::resolve_head(&repo_dir_clone).unwrap_or_default();
-        crate::git::Git::clone_or_fetch(&repo_url, &repo_dir_clone, &branch)?;
-        let after_sha = crate::git::Git::resolve_head(&repo_dir_clone).unwrap_or_default();
-        let has_new = !after_sha.is_empty() && (before_sha.is_empty() || before_sha != after_sha);
-        Ok((after_sha, has_new))
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        tokio::task::spawn_blocking(move || -> Result<(String, bool), String> {
+            let before_sha = crate::git::Git::resolve_head(&repo_dir_clone).unwrap_or_default();
+            crate::git::Git::clone_or_fetch(&repo_url, &repo_dir_clone, &branch)?;
+            let after_sha = crate::git::Git::resolve_head(&repo_dir_clone).unwrap_or_default();
+            let has_new = !after_sha.is_empty() && (before_sha.is_empty() || before_sha != after_sha);
+            Ok((after_sha, has_new))
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?
+    };
 
     let needs_deploy = !sha.is_empty() && p.deployed_sha.as_deref() != Some(&sha);
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "UPDATE projects SET last_poll_at = ? WHERE id = ?",
-            rusqlite::params![now(), p.id],
-        )
-        .ok();
-    }
+    let _ = sqlx::query("UPDATE projects SET last_poll_at = $1 WHERE id = $2")
+        .bind(now())
+        .bind(p.id)
+        .execute(&state.db)
+        .await;
     state.cache.invalidate_project(p.id);
     state.cache.invalidate_all();
 
@@ -171,7 +235,8 @@ pub(crate) async fn project_fetch_handler(
         "git.fetch",
         Some(&p.name),
         Some(&format!("Fetched latest commits on branch '{}' -> {}", p.branch, &sha[..7.min(sha.len())])),
-    );
+    )
+    .await;
 
     state.logs.add(
         Some(p.id),
@@ -208,8 +273,33 @@ pub(crate) async fn detect_project_handler(
         &headers,
         &["deploy", "projects_manage", "services_manage"],
         Some(id),
-    )?;
-    let p = fetch_project(&state.projects, id)?;
+    )
+    .await?;
+    let p = fetch_project(&state.projects, id).await?;
+
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "git.detect",
+                serde_json::json!({ "project": &p, "context": ctx }),
+                std::time::Duration::from_secs(90),
+            )
+            .await?;
+        return Ok(Json(DetectProjectResponse {
+            project_type: res["type"].as_str().unwrap_or(&p.project_type).to_string(),
+            install: res["install"].as_str().unwrap_or(&p.install_cmd).to_string(),
+            build: res["build"].as_str().unwrap_or(&p.build_cmd).to_string(),
+            start: res["start"].as_str().unwrap_or(&p.start_cmd).to_string(),
+        }));
+    }
 
     let repo_dir = std::path::Path::new(&p.deploy_dir).join("repo");
     if !repo_dir.exists() {
@@ -257,20 +347,21 @@ pub(crate) async fn project_deploy_key_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<DeployKeyResponse>, (StatusCode, String)> {
-    let _actor = verify_power(&state, &headers, "deploy", Some(id))?;
-    // Check SQLite project_keys table first
+    let _actor = verify_power(&state, &headers, "deploy", Some(id)).await?;
+    if let Ok(Some(pub_key)) = sqlx::query_scalar::<_, String>(
+        "SELECT public_key FROM project_keys WHERE project_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
     {
-        let conn = state.db.lock().unwrap();
-        if let Ok(pub_key) = conn.query_row(
-            "SELECT public_key FROM project_keys WHERE project_id = ?",
-            rusqlite::params![id],
-            |r| r.get::<_, String>(0),
-        ) {
-            if !pub_key.trim().is_empty() {
-                return Ok(Json(DeployKeyResponse {
-                    public_key: pub_key.trim().to_string(),
-                }));
+        if !pub_key.trim().is_empty() {
+            if let Ok(Some(p)) = state.projects.get(id).await {
+                state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
             }
+            return Ok(Json(DeployKeyResponse {
+                public_key: pub_key.trim().to_string(),
+            }));
         }
     }
 
@@ -300,13 +391,19 @@ pub(crate) async fn project_deploy_key_handler(
         .unwrap_or_else(|_| format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIWebDepGeneratedKeyProject{} webdep", id));
     let private_key = tokio::fs::read_to_string(&key_path).await.unwrap_or_default();
 
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO project_keys(project_id, public_key, private_key, created_at) VALUES(?, ?, ?, ?)",
-            rusqlite::params![id, public_key.trim(), private_key, now()],
-        )
-        .ok();
+    let _ = sqlx::query(
+        "INSERT INTO project_keys(project_id, public_key, private_key, created_at) VALUES($1, $2, $3, $4) \
+         ON CONFLICT(project_id) DO UPDATE SET public_key = excluded.public_key, private_key = excluded.private_key, created_at = excluded.created_at",
+    )
+    .bind(id)
+    .bind(public_key.trim())
+    .bind(private_key)
+    .bind(now())
+    .execute(&state.db)
+    .await;
+
+    if let Ok(Some(p)) = state.projects.get(id).await {
+        state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
     }
 
     Ok(Json(DeployKeyResponse {
@@ -325,19 +422,18 @@ pub(crate) async fn rotate_webhook_secret_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "deploy", Some(id))?;
+    let actor = verify_power(&state, &headers, "deploy", Some(id)).await?;
     use rand::RngCore;
     let mut bytes = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut bytes);
     let new_secret = hex::encode(bytes);
 
-    let conn = state.db.lock().unwrap();
-    conn.execute(
-        "UPDATE projects SET webhook_secret = ? WHERE id = ?",
-        rusqlite::params![new_secret, id],
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    drop(conn);
+    sqlx::query("UPDATE projects SET webhook_secret = $1 WHERE id = $2")
+        .bind(&new_secret)
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     log_audit_project(
         &state,
@@ -346,7 +442,8 @@ pub(crate) async fn rotate_webhook_secret_handler(
         "git.webhook_rotate",
         None,
         Some("Rotated GitHub webhook HMAC secret"),
-    );
+    )
+    .await;
 
     Ok(Json(RotateSecretResponse {
         webhook_secret: new_secret,

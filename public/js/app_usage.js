@@ -519,10 +519,22 @@ function renderSmoothNetFrame(cfg, netState, nowPerf) {
   visible.length = 0;
   const winLeft = viewStart - 3000;
   const winRight = viewEnd + 3000;
+  let leftAnchor = null;
   for (let i = 0; i < samples.length; i++) {
     const s = samples[i];
-    if (s.ts < winLeft) continue;
-    if (s.ts > winRight) break;
+    if (s.ts < winLeft) {
+      leftAnchor = s;
+      continue;
+    }
+    if (s.ts > winRight) {
+      // Keep one right-side bracket sample so cubic spline tangents stay continuous at the right edge
+      visible.push(s);
+      break;
+    }
+    if (leftAnchor && visible.length === 0 && s.ts > viewStart) {
+      visible.push(leftAnchor);
+      leftAnchor = null;
+    }
     visible.push(s);
     const maxSample = s.inboundBps > s.outboundBps ? s.inboundBps : s.outboundBps;
     if (maxSample > visPeak) visPeak = maxSample;
@@ -531,9 +543,12 @@ function renderSmoothNetFrame(cfg, netState, nowPerf) {
       if (maxSample > inWinPeak) inWinPeak = maxSample;
     }
   }
+  if (visible.length === 0 && leftAnchor) {
+    visible.push(leftAnchor);
+  }
   const rawPeak = hasInWin ? inWinPeak : visPeak;
-  const targetPeak = Math.max(1024, rawPeak * 1.15);
-  const scaleAlpha = 1 - Math.exp(-dt * 3.5);
+  const targetPeak = Math.max(1024, rawPeak * 1.18);
+  const scaleAlpha = 1 - Math.exp(-dt * 1.4);
   netState.displayMaxRate += (targetPeak - netState.displayMaxRate) * scaleAlpha;
   const maxRate = Math.max(1024, netState.displayMaxRate);
 
@@ -546,15 +561,15 @@ function renderSmoothNetFrame(cfg, netState, nowPerf) {
     const yInLast = yZeroIn - Math.min(1, (latest?.inboundBps || 0) / maxRate) * inUsableH;
     const yOutLast = yZeroOut - Math.min(1, (latest?.outboundBps || 0) / maxRate) * outUsableH;
     buf.xs[0] = 0;
-    buf.ysIn[0] = yZeroIn;
-    buf.ysOut[0] = yZeroOut;
+    buf.ysIn[0] = yInLast;
+    buf.ysOut[0] = yOutLast;
     buf.xs[1] = svgW;
     buf.ysIn[1] = yInLast;
     buf.ysOut[1] = yOutLast;
     count = 2;
   } else {
     const firstX = ((visible[0].ts - viewStart) / windowMs) * svgW;
-    const lead = firstX > 0.5 ? (firstX > 6 ? 2 : 1) : 0;
+    const lead = firstX > 0.5 ? 1 : 0;
     const lastVisX = ((visible[visLen - 1].ts - viewStart) / windowMs) * svgW;
     const tail = lastVisX < svgW - 0.5 ? 1 : 0;
     count = lead + visLen + tail;
@@ -562,16 +577,6 @@ function renderSmoothNetFrame(cfg, netState, nowPerf) {
       ensureSplineScratch(netState, count);
     }
     const { xs, ysIn, ysOut } = buf;
-    if (lead >= 1) {
-      xs[0] = 0;
-      ysIn[0] = yZeroIn;
-      ysOut[0] = yZeroOut;
-      if (lead === 2) {
-        xs[1] = firstX - 3;
-        ysIn[1] = yZeroIn;
-        ysOut[1] = yZeroOut;
-      }
-    }
     for (let i = 0; i < visLen; i++) {
       const s = visible[i];
       const idx = lead + i;
@@ -580,6 +585,11 @@ function renderSmoothNetFrame(cfg, netState, nowPerf) {
       const outRatio = s.outboundBps / maxRate;
       ysIn[idx] = yZeroIn - (inRatio < 1 ? inRatio : 1) * inUsableH;
       ysOut[idx] = yZeroOut - (outRatio < 1 ? outRatio : 1) * outUsableH;
+    }
+    if (lead === 1) {
+      xs[0] = 0;
+      ysIn[0] = ysIn[1];
+      ysOut[0] = ysOut[1];
     }
     if (tail === 1) {
       const lastIdx = lead + visLen - 1;

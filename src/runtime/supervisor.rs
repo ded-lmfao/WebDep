@@ -8,10 +8,17 @@ impl Runtime {
 
     /// Background task to continuously supervise long-running processes (services, bots, servers)
     /// and immediately mark them stopped in SQLite and log warnings when they exit or crash.
-    pub fn start_background_monitor(self: &Arc<Self>) {
+    /// When `projects` is given, apps that exit on their own
+    /// (crash, OOM kill, `kill -9`) are restarted with backoff: up to `CRASH_RESTART_LIMIT` times per
+    /// `CRASH_RESTART_WINDOW`, then left stopped. User stops remove the process from the map first,
+    /// so they never trigger a restart.
+    pub fn start_background_monitor_with_restarts(self: &Arc<Self>, projects: Option<Arc<crate::projects::Projects>>) {
+        const CRASH_RESTART_LIMIT: usize = 5;
+        const CRASH_RESTART_WINDOW: Duration = Duration::from_secs(600);
         let rt = self.clone();
         tokio::spawn(async move {
             let mut tick = 0u64;
+            let mut crash_history: std::collections::HashMap<i64, Vec<std::time::Instant>> = std::collections::HashMap::new();
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 tick = tick.wrapping_add(1);
@@ -35,54 +42,99 @@ impl Runtime {
                     }
                 }
                 for (proj_id, status) in exited {
-                    rt.mark_project_stopped(proj_id);
+                    rt.mark_project_stopped(proj_id).await;
                     let msg = match status {
                         Some(s) => format!("Process exited ({})", s),
                         None => "Process terminated unexpectedly".to_string(),
                     };
                     rt.logs.add(Some(proj_id), None, "system", "warn", &msg);
+
+                    let Some(projects) = projects.clone() else { continue };
+                    let history = crash_history.entry(proj_id).or_default();
+                    history.retain(|t| t.elapsed() < CRASH_RESTART_WINDOW);
+                    if history.len() >= CRASH_RESTART_LIMIT {
+                        rt.logs.add(
+                            Some(proj_id),
+                            None,
+                            "system",
+                            "error",
+                            &format!(
+                                "Not restarting: the app exited {CRASH_RESTART_LIMIT} times in {} minutes. Fix the cause, then start it again.",
+                                CRASH_RESTART_WINDOW.as_secs() / 60
+                            ),
+                        );
+                        continue;
+                    }
+                    history.push(std::time::Instant::now());
+                    let attempt = history.len();
+                    let delay = Duration::from_secs(2u64.pow(attempt as u32).min(60));
+                    let seq = rt.get_stop_seq(proj_id);
+                    let rt2 = rt.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        // The user stopped/redeployed it meanwhile, or something already started it.
+                        if rt2.get_stop_seq(proj_id) != seq
+                            || rt2.processes.lock().map(|m| m.contains_key(&proj_id)).unwrap_or(true)
+                        {
+                            return;
+                        }
+                        let Ok(Some(p)) = projects.get(proj_id).await else { return };
+                        if p.app_status == "maintenance" {
+                            return;
+                        }
+                        let env = projects.get_env_map(proj_id).await;
+                        match rt2.start_project(&p, env, None).await {
+                            Ok(pid) => rt2.logs.add(
+                                Some(proj_id),
+                                None,
+                                "system",
+                                "info",
+                                &format!("Restarted after an unexpected exit (attempt {attempt}/{CRASH_RESTART_LIMIT}, PID {pid})"),
+                            ),
+                            Err(e) => rt2.logs.add(
+                                Some(proj_id),
+                                None,
+                                "system",
+                                "warn",
+                                &format!("Automatic restart failed (attempt {attempt}/{CRASH_RESTART_LIMIT}): {e}"),
+                            ),
+                        };
+                    });
                 }
 
-                // Every 6s (every 3rd tick), also check preserved workloads from previous panel instances
+                // Every 6s (every 3rd tick), also check preserved local workloads from previous panel instances
                 if tick % 3 == 0 {
-                    let external_running: Vec<(i64, u32)> = {
-                        if let Ok(conn) = rt.db.lock() {
-                            if let Ok(mut stmt) = conn.prepare("SELECT id, app_pid FROM projects WHERE app_status = 'running'") {
-                                let rows = stmt.query_map([], |r| {
-                                    Ok((r.get::<_, i64>(0)?, r.get::<_, Option<u32>>(1)?))
-                                });
-                                if let Ok(mapped) = rows {
-                                    mapped
-                                        .flatten()
-                                        .filter_map(|(id, opt_pid)| opt_pid.map(|p| (id, p)))
-                                        .collect()
-                                } else {
-                                    Vec::new()
-                                }
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        }
-                    };
+                    let external_running: Vec<(i64, u32)> = sqlx::query_as::<_, (i64, Option<i64>)>(
+                        "SELECT id, app_pid FROM projects
+                         WHERE app_status = 'running'
+                           AND (node_id IS NULL OR node_id IN (SELECT id FROM nodes WHERE is_local = TRUE))",
+                    )
+                    .fetch_all(&rt.db)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(id, opt_pid)| {
+                        opt_pid.and_then(|p| u32::try_from(p).ok()).map(|p| (id, p))
+                    })
+                    .collect();
 
                     for (proj_id, pid) in external_running {
                         let is_in_memory = rt.processes.lock().map(|m| m.contains_key(&proj_id)).unwrap_or(false);
                         if !is_in_memory && !is_pid_alive(pid) {
-                            let still_listening = {
-                                if let Ok(conn) = rt.db.lock() {
-                                    conn.query_row("SELECT port FROM projects WHERE id = ?", rusqlite::params![proj_id], |r| r.get::<_, Option<u16>>(0))
-                                        .ok()
-                                        .flatten()
-                                        .map(|port| !Runtime::find_pids_on_port(port).is_empty())
-                                        .unwrap_or(false)
-                                } else {
-                                    false
-                                }
-                            };
+                            let still_listening = sqlx::query_scalar::<_, Option<i32>>(
+                                "SELECT port FROM projects WHERE id = $1",
+                            )
+                            .bind(proj_id)
+                            .fetch_optional(&rt.db)
+                            .await
+                            .ok()
+                            .flatten()
+                            .flatten()
+                            .and_then(|p| u16::try_from(p).ok())
+                            .map(|port| !Runtime::find_pids_on_port(port).is_empty())
+                            .unwrap_or(false);
                             if !still_listening {
-                                rt.mark_project_stopped(proj_id);
+                                rt.mark_project_stopped(proj_id).await;
                                 rt.logs.add(Some(proj_id), None, "system", "warn", "Process terminated");
                             }
                         }
@@ -93,32 +145,36 @@ impl Runtime {
     }
 
     pub async fn health_check(&self, url: &str, timeout_s: u64) -> Result<(), String> {
-        if url.trim().is_empty() {
-            return Ok(());
-        }
-
-        let start = std::time::Instant::now();
-        let max_duration = Duration::from_secs(timeout_s.max(5));
-        let mut last_err = String::from("Service starting up...");
-
-        while start.elapsed() < max_duration {
-            match reqwest_or_hyper(url, Duration::from_secs(2)).await {
-                Ok(true) => return Ok(()),
-                Ok(false) => {
-                    last_err = "Health check responded with non-2xx status".to_string();
-                }
-                Err(e) => {
-                    last_err = e;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-
-        Err(format!(
-            "Health check timed out after {}s (endpoint: {}): {}",
-            timeout_s, url, last_err
-        ))
+        health_check_url(url, timeout_s).await
     }
+}
+
+pub async fn health_check_url(url: &str, timeout_s: u64) -> Result<(), String> {
+    if url.trim().is_empty() {
+        return Ok(());
+    }
+
+    let start = std::time::Instant::now();
+    let max_duration = Duration::from_secs(timeout_s.max(5));
+    let mut last_err = String::from("Service starting up...");
+
+    while start.elapsed() < max_duration {
+        match reqwest_or_hyper(url, Duration::from_secs(2)).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                last_err = "Health check responded with non-2xx status".to_string();
+            }
+            Err(e) => {
+                last_err = e;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Err(format!(
+        "Health check timed out after {}s (endpoint: {}): {}",
+        timeout_s, url, last_err
+    ))
 }
 
 async fn reqwest_or_hyper(url_str: &str, timeout: Duration) -> Result<bool, String> {

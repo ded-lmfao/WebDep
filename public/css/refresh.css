@@ -1,0 +1,264 @@
+/**
+ * WebDep UI refresh: calmer hierarchy, consistent controls, action menus,
+ * and a working mobile navigation drawer. Loaded last so it can settle
+ * conflicts from earlier layers. Uses theme tokens only, so every palette
+ * in themes.css keeps working.
+ */
+
+/* ---------- Base ---------- */
+[hidden] { display: none !important; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:focus-visible, .form-control:focus-visible { outline-offset: 1px; }
+
+/* ---------- Native selects: one consistent chevron across themes ---------- */
+select.form-control {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a93a6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px;
+  padding-right: 32px !important;
+  cursor: pointer;
+}
+
+/* ---------- Header ---------- */
+.header-node-select {
+  width: auto;
+  min-width: 140px;
+  max-width: 220px;
+  height: 30px;
+  padding-left: 10px;
+  font-size: 12px;
+}
+
+/* ---------- Buttons ---------- */
+.btn { white-space: nowrap; }
+.btn-icon { width: 28px; padding: 0 !important; justify-content: center; }
+.btn-icon svg { margin: 0; }
+.btn:disabled[title] { pointer-events: auto; cursor: not-allowed; }
+
+/* ---------- Action menu ---------- */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: none;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--bg-card-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+}
+.menu-wrap.open .menu { display: block; }
+.menu.menu-left { right: auto; left: 0; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-item svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--text-dim); }
+.menu-item:hover, .menu-item:focus-visible { background: var(--ink-3); outline: none; }
+.menu-item-danger, .menu-item-danger svg { color: var(--danger-light); }
+.menu-item-danger:hover, .menu-item-danger:focus-visible { background: var(--danger-bg); }
+.menu-sep { height: 1px; margin: 4px 2px; background: var(--border-subtle); }
+
+/* ---------- Workspace header ---------- */
+.ws-banner { overflow: visible; }
+.ws-banner-header { align-items: center; }
+.ws-actions-toolbar { gap: 8px; }
+.ws-actions-toolbar .badge { display: inline-flex; align-items: center; gap: 5px; height: 28px; }
+.ws-actions-toolbar .badge svg { width: 12px; height: 12px; }
+.ws-btn-stop:hover { color: var(--danger-light) !important; }
+
+/* Pipeline stage labels were 10px: hard to read. */
+.water-pipeline-wrapper.compact .water-node-name { font-size: 12px !important; font-weight: 500 !important; }
+.water-pipeline-wrapper.compact .water-node-sub { font-size: 11px !important; }
+
+/* ---------- Settings ---------- */
+.project-card.settings-card .project-info-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.project-card.settings-card .project-card-actions { margin-top: auto; flex-wrap: wrap; gap: 8px; }
+
+/* ---------- Mobile: restore the navigation drawer behind "More" ---------- */
+@media (max-width: 900px) {
+  .sidebar {
+    display: flex !important;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    max-width: 84vw;
+    z-index: 60;
+    /* `translate` (not `transform`): the intro animation leaves an inline transform on the sidebar,
+       and the drawer slide animates transform, so the resting position lives on its own property. */
+    translate: -105% 0;
+    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.35);
+  }
+  .sidebar.mobile-open { translate: 0 0; }
+  .sidebar-backdrop { display: none !important; }
+  .sidebar-backdrop.active { display: block !important; z-index: 59; }
+
+  .top-header .breadcrumbs { min-width: 0; overflow: hidden; }
+  .top-header .breadcrumbs * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .header-node-select { max-width: 150px; min-width: 0; }
+  .server-pill #server-status-text { display: none; }
+
+  .ws-banner-header { align-items: flex-start; }
+  .ws-actions-toolbar { justify-content: space-between; }
+}
+
+/* ---------- VPS Modules matrix ---------- */
+.modules-fleet-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.modules-node-card {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modules-node-card + .modules-node-card {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.modules-node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.modules-node-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.modules-node-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.modules-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 10px;
+}
+
+.modules-tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  transition: border-color var(--transition-fast), background-color var(--transition-fast);
+  min-width: 0;
+}
+
+.modules-tile:hover {
+  border-color: var(--border-medium);
+}
+
+.modules-tile.is-missing-req {
+  border-color: var(--warning-border, rgba(245, 158, 11, 0.32));
+}
+
+.modules-tile-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.modules-tile-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modules-tile-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.modules-tile-status .module-version {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.modules-tile-status .btn-sm {
+  width: 100%;
+  justify-content: center;
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+
+.modules-tile-status .modules-uninstall-btn {
+  width: auto;
+  flex-shrink: 0;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border-color: var(--border-subtle);
+}
+
+.modules-tile-status .modules-uninstall-btn:hover:not(:disabled) {
+  color: var(--danger-light, #fca5a5);
+  border-color: var(--danger-border, rgba(239, 68, 68, 0.4));
+  background: var(--danger-bg, rgba(239, 68, 68, 0.12));
+}
+
+@media (max-width: 640px) {
+  .modules-node-card { padding: 12px 14px; }
+  .modules-node-grid { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 8px; }
+}
+
+button.preset-chip { font-family: inherit; line-height: 1.5; }
+.preset-chip.active { border-color: var(--accent-border); color: var(--accent-light); background: var(--accent-glow); }
+
+/* Toggle buttons (e.g. service source: Manual upload / GitHub) need a visible selected state. */
+.btn-secondary.active,
+.btn-secondary[aria-pressed="true"] {
+  background: var(--accent-glow);
+  border-color: var(--accent-border);
+  color: var(--accent-light);
+}

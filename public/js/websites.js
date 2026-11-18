@@ -8,6 +8,7 @@ import {
   state,
   getSelectedProject,
   setHtmlIfChanged,
+  matchesNodeFilter,
   escapeHtml,
   formatRelativeTime,
   openModal,
@@ -108,6 +109,7 @@ function renderProjectsList() {
 
   const search = (document.getElementById('projects-search-input')?.value || '').toLowerCase();
   const filtered = websites.filter((p) => {
+    if (!matchesNodeFilter(p)) return false;
     const resItem = resByProjId.get(p.id);
     const isOnline = isProjectOnline(p, resItem);
     if (state.projectStatusFilter === 'running' && !isOnline) return false;
@@ -133,7 +135,7 @@ function renderProjectsList() {
     const isOnline = isProjectOnline(p, resItem);
     const isMaintenance = isProjectMaintenance(p, resItem);
 
-    const shaText = p.deployed_sha ? p.deployed_sha.slice(0, 7) : (p.deployedSha ? p.deployedSha.slice(0, 7) : '');
+    const shaText = p.deployed_sha ? shortSha(p.deployed_sha) : (p.deployedSha ? shortSha(p.deployedSha) : '');
     const branchText = p.branch || 'main';
 
     const diskStr = p.diskFormatted || p.disk_formatted || resItem?.diskFormatted || resItem?.disk_formatted;
@@ -149,40 +151,35 @@ function renderProjectsList() {
 
     const pt = (p.project_type || '').toLowerCase();
     const sc = (p.start_cmd || '').toLowerCase();
-    let typeIconName = 'globe';
-    let typeName = 'Website Application';
     const iconColor = 'var(--text-main)';
-
-    if (pt.includes('node') || pt.includes('express') || sc.includes('node') || sc.includes('npm') || sc.includes('yarn') || sc.includes('pnpm') || sc.includes('bun')) {
-      typeIconName = 'nodejs';
-      typeName = 'Node.js App';
-    } else if (pt.includes('next')) {
-      typeIconName = 'typescript';
-      typeName = 'Next.js App';
-    } else if (pt.includes('react') || pt.includes('typescript')) {
-      typeIconName = 'typescript';
-      typeName = 'React / TS App';
-    } else if (pt.includes('python') || sc.includes('python') || sc.includes('.py')) {
-      typeIconName = 'python';
-      typeName = 'Python Web';
-    } else if (pt.includes('go') || sc.includes('go run') || sc.includes('.go')) {
-      typeIconName = 'go';
-      typeName = 'Go Web App';
-    } else if (pt.includes('rust') || sc.includes('cargo') || sc.includes('.rs')) {
-      typeIconName = 'rust';
-      typeName = 'Rust Web App';
-    } else if (pt.includes('php') || sc.includes('php')) {
-      typeIconName = 'php';
-      typeName = 'PHP Site';
-    } else if (pt.includes('ruby') || sc.includes('ruby') || sc.includes('rails')) {
-      typeIconName = 'ruby';
-      typeName = 'Ruby Web App';
-    } else if (pt.includes('docker') || sc.includes('docker')) {
-      typeIconName = 'docker';
-      typeName = 'Docker Container';
-    } else if (p.project_type) {
-      typeName = p.project_type;
-    }
+    // Prefer the template the site was created with; fall back to sniffing the start command.
+    const TYPE_LABELS = {
+      node: ['nodejs', 'Node.js App'],
+      express: ['nodejs', 'Express App'],
+      nextjs: ['typescript', 'Next.js App'],
+      vite: ['typescript', 'Vite / React App'],
+      python: ['python', 'Python Web'],
+      java: ['java', 'Java App'],
+      go: ['go', 'Go Web App'],
+      rust: ['rust', 'Rust Web App'],
+      php: ['php', 'PHP Site'],
+      ruby: ['ruby', 'Ruby Web App'],
+      docker: ['docker', 'Docker Container'],
+    };
+    const fromCommand = () => {
+      if (sc.includes('python') || sc.includes('.py') || sc.includes('gunicorn') || sc.includes('uvicorn')) return ['python', 'Python Web'];
+      if (sc.includes('java') || sc.includes('.jar')) return ['java', 'Java App'];
+      if (sc.includes('go run') || /(^|\s)\.\/[\w-]+$/.test(sc)) return ['go', 'Go Web App'];
+      if (sc.includes('cargo')) return ['rust', 'Rust Web App'];
+      if (sc.includes('php')) return ['php', 'PHP Site'];
+      if (sc.includes('ruby') || sc.includes('rails')) return ['ruby', 'Ruby Web App'];
+      if (sc.includes('docker')) return ['docker', 'Docker Container'];
+      if (/\b(node|npm|yarn|pnpm|bun)\b/.test(sc)) return ['nodejs', 'Node.js App'];
+      return null;
+    };
+    const detected = (pt !== 'custom' && TYPE_LABELS[pt]) || fromCommand();
+    const typeIconName = detected ? detected[0] : 'globe';
+    const typeName = pt === 'custom' ? 'Custom App' : (detected ? detected[1] : 'Website Application');
 
     const subTitle = typeName;
 
@@ -219,9 +216,11 @@ function renderProjectsList() {
 
         <!-- Badges & Telemetry Row -->
         <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px;">
-          <span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">
+          ${(!p.repo_url || p.repo_url === 'local')
+            ? `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px;" title="Files are uploaded in the Files tab">${icon('folder', { size: 10 })} Manual upload</span>`
+            : `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">
             ${icon('git-branch', { size: 10 })} ${escapeHtml(branchText)}${shaText ? ' &bull; ' + escapeHtml(shaText) : ''}
-          </span>
+          </span>`}
           ${p.port ? `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">Port ${p.port}</span>` : ''}
           ${accessBadge}
           ${diskStr ? `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);" title="On-Disk Storage">${icon('hard-drive', { size: 10 })} ${diskStr}</span>` : ''}
@@ -271,6 +270,52 @@ document.querySelectorAll('#projects-status-filters .pill').forEach((btn) => {
 // ============================================================================
 // Add Website Workflow Modal
 // ============================================================================
+async function populateTargetNodeSelect(selectId, groupId, selectedNodeId = null, isEdit = false) {
+  const select = document.getElementById(selectId);
+  const group = document.getElementById(groupId);
+  if (!select || !group) return;
+
+  let nodes = Array.isArray(state.nodes) ? state.nodes : [];
+  if (!nodes.length) {
+    try {
+      const list = await api('/api/cluster/nodes');
+      if (Array.isArray(list)) {
+        state.nodes = list;
+        nodes = list;
+      }
+    } catch {
+      nodes = [];
+    }
+  }
+
+  const eligible = nodes.filter((n) => n.isLocal || n.status !== 'offline' || String(n.id) === String(selectedNodeId));
+  if (!eligible.length) {
+    group.style.display = 'none';
+    select.innerHTML = '';
+    return;
+  }
+
+  group.style.display = 'block';
+  const localNode = eligible.find((n) => n.isLocal);
+  const defaultId = selectedNodeId != null && selectedNodeId !== ''
+    ? String(selectedNodeId)
+    : (state.selectedNodeFilter && state.selectedNodeFilter !== 'all'
+      ? String(state.selectedNodeFilter)
+      : String(localNode ? localNode.id : eligible[0].id));
+
+  select.innerHTML = eligible
+    .map((n) => {
+      const roleTag = n.isLocal ? 'Local Core' : (n.meshIp || n.region || 'Remote Node');
+      const statusTag = n.status && n.status !== 'online' ? ` · ${n.status}` : '';
+      return `<option value="${escapeHtml(String(n.id))}">${escapeHtml(n.name)} (${escapeHtml(roleTag)}${escapeHtml(statusTag)})</option>`;
+    })
+    .join('');
+
+  select.value = eligible.some((n) => String(n.id) === defaultId) ? defaultId : String(eligible[0].id);
+  select.disabled = Boolean(isEdit);
+}
+window.populateTargetNodeSelect = populateTargetNodeSelect;
+
 function openAddWebsiteModal() {
   const form = document.getElementById('website-form');
   if (form) form.reset();
@@ -309,6 +354,7 @@ function openAddWebsiteModal() {
   const portInput = document.getElementById('website-port');
   if (portInput) portInput.value = getNextAvailablePort(3000);
 
+  populateTargetNodeSelect('website-node-id', 'website-node-group', null, false);
   openModal('modal-website');
 }
 window.openAddWebsiteModal = openAddWebsiteModal;
@@ -359,6 +405,7 @@ async function openEditWebsiteModal(projectId) {
     c.classList.toggle('active', c.getAttribute('data-type') === p.project_type);
   });
 
+  populateTargetNodeSelect('website-node-id', 'website-node-group', p.node_id, true);
   openModal('modal-website');
 }
 window.openEditWebsiteModal = openEditWebsiteModal;
@@ -415,7 +462,8 @@ function applyPreset(type) {
 
   const isEditing = Boolean(document.getElementById('website-form-id')?.value);
   const assignedPort = isEditing ? (conf.port || 3000) : getNextAvailablePort(conf.port || 3000);
-  const healthUrl = (conf.health_url || '').replace(`:${conf.port}`, `:${assignedPort}`);
+  // {{PORT}} is resolved to the site's port at deploy time, so it stays correct if the port changes.
+  const healthUrl = conf.health_url || '';
 
   document.getElementById('website-port').value = assignedPort || '';
   document.getElementById('website-deploy-method').value = conf.deploy_method || 'managed';
@@ -523,10 +571,13 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
   const domains = cleanDomainList(domainsStr);
   const accessMode = document.getElementById('website-access-mode')?.value || 'local';
   const allowedIps = document.getElementById('website-allowed-ips')?.value.trim() || '';
+  const selectedNodeVal = document.getElementById('website-node-id')?.value;
+  const projectType = document.querySelector('#preset-buttons .preset-chip.active')?.getAttribute('data-type') || 'node';
 
   const payload = {
     name,
     slug,
+    project_type: projectType,
     repo_url: repoUrl,
     branch: document.getElementById('website-branch')?.value.trim() || 'main',
     domains,
@@ -535,13 +586,19 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
     allowed_ips: allowedIps,
     deploy_dir: deployDir,
     deploy_method: document.getElementById('website-deploy-method')?.value || 'managed',
-    health_url: document.getElementById('website-health-url')?.value.trim() || '',
+    // A loopback health URL always targets this site's own port: store it as {{PORT}} so a changed
+    // port (or one picked from a preset) can never leave the check probing a stale port.
+    health_url: (document.getElementById('website-health-url')?.value.trim() || '')
+      .replace(/^(https?:\/\/(?:127\.0\.0\.1|localhost)):\d+/i, '$1:{{PORT}}'),
     install_cmd: document.getElementById('website-install-cmd')?.value.trim() || '',
     build_cmd: document.getElementById('website-build-cmd')?.value.trim() || '',
     start_cmd: startCmd,
     auto_deploy: Boolean(document.getElementById('website-auto-deploy')?.checked),
     auto_backup: Boolean(document.getElementById('website-auto-backup')?.checked),
   };
+  if (!id && selectedNodeVal) {
+    payload.node_id = Number(selectedNodeVal);
+  }
 
   const submitBtn = document.getElementById('save-website-submit-btn');
   const oldText = submitBtn ? submitBtn.textContent : '';

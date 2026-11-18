@@ -19,6 +19,9 @@ const state = {
   selectedDatabaseId: null,
   projects: [],
   databases: [],
+  nodes: [],
+  selectedNodeFilter: 'all',
+  overviewInspectNodeId: null,
   overview: null,
   activeDeployment: null,
   activeDepPollTimer: null,
@@ -136,7 +139,7 @@ const PRESETS = {
     install_cmd: 'npm ci',
     build_cmd: '',
     start_cmd: 'node server.js',
-    health_url: 'http://127.0.0.1:3000/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   express: {
     port: 3000,
@@ -144,7 +147,7 @@ const PRESETS = {
     install_cmd: 'npm ci',
     build_cmd: '',
     start_cmd: 'node app.js',
-    health_url: 'http://127.0.0.1:3000/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   nextjs: {
     port: 3000,
@@ -152,7 +155,7 @@ const PRESETS = {
     install_cmd: 'npm ci',
     build_cmd: 'npm run build',
     start_cmd: 'npm run start -- -p {{PORT}}',
-    health_url: 'http://127.0.0.1:3000/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   vite: {
     port: 4173,
@@ -160,7 +163,7 @@ const PRESETS = {
     install_cmd: 'npm ci',
     build_cmd: 'npm run build',
     start_cmd: 'npx vite preview --port {{PORT}} --host 127.0.0.1',
-    health_url: 'http://127.0.0.1:4173/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   python: {
     port: 8000,
@@ -168,7 +171,7 @@ const PRESETS = {
     install_cmd: 'pip install -r requirements.txt --break-system-packages --ignore-installed',
     build_cmd: '',
     start_cmd: 'python3 -m uvicorn main:app --host 127.0.0.1 --port {{PORT}}',
-    health_url: 'http://127.0.0.1:8000/health',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   java: {
     port: 8080,
@@ -176,7 +179,7 @@ const PRESETS = {
     install_cmd: 'mvn clean package -DskipTests',
     build_cmd: '',
     start_cmd: 'java -jar target/*.jar --server.port={{PORT}}',
-    health_url: 'http://127.0.0.1:8080/',
+    health_url: 'http://127.0.0.1:{{PORT}}/',
   },
   custom: {
     port: 5000,
@@ -381,6 +384,8 @@ const AUDIT_ACTION_META = {
   'deploy.auto_initial': { label: 'Initial Deploy', cls: 'badge-info' },
   'deploy.success': { label: 'Deploy Succeeded', cls: 'badge-success' },
   'deploy.failed': { label: 'Deploy Failed', cls: 'badge-danger' },
+  'deploy.fail': { label: 'Deploy Failed', cls: 'badge-danger' },
+  'rollback.fail': { label: 'Rollback Failed', cls: 'badge-danger' },
   'rollback.trigger': { label: 'Rollback Started', cls: 'badge-warning' },
   'rollback.start': { label: 'Rollback Started', cls: 'badge-warning' },
   'rollback.success': { label: 'Rollback Succeeded', cls: 'badge-success' },
@@ -434,6 +439,14 @@ const AUDIT_ACTION_META = {
   'user.delete': { label: 'User Removed', cls: 'badge-danger' },
   'auth.login': { label: 'User Signed In', cls: 'badge-neutral' },
 };
+
+// Short label for a deployed revision: 7-char commit SHA, or "files" for manual-upload snapshots.
+function shortSha(sha) {
+  const s = String(sha || '');
+  if (s.startsWith('local-')) return 'files';
+  return s.slice(0, 7);
+}
+window.shortSha = shortSha;
 
 function openModal(modalId) {
   animateModalOpen(modalId);
@@ -563,15 +576,39 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+function normalizeTimestampMs(ts) {
+  if (ts === null || ts === undefined || ts === '') return NaN;
+  if (typeof ts === 'number') {
+    if (!Number.isFinite(ts) || ts <= 0) return NaN;
+    return ts < 1e12 ? ts * 1000 : ts;
+  }
+  const raw = String(ts).trim();
+  if (/^\d+(\.\d+)?$/.test(raw)) {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return NaN;
+    return n < 1e12 ? n * 1000 : n;
+  }
+  return new Date(raw).getTime();
+}
+
 function formatDate(ts) {
-  if (!ts) return '--';
-  const d = new Date(ts);
+  const ms = normalizeTimestampMs(ts);
+  if (!Number.isFinite(ms)) return '--';
+  const d = new Date(ms);
   return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function formatRelativeTime(ts) {
-  if (!ts) return '--';
-  const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  const ms = normalizeTimestampMs(ts);
+  if (!Number.isFinite(ms)) return '--';
+  const diff = Math.floor((Date.now() - ms) / 1000);
+  if (diff < 0) {
+    const rem = Math.abs(diff);
+    if (rem < 60) return `in ${rem}s`;
+    if (rem < 3600) return `in ${Math.floor(rem / 60)}m`;
+    if (rem < 86400) return `in ${Math.floor(rem / 3600)}h`;
+    return `in ${Math.floor(rem / 86400)}d`;
+  }
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
@@ -661,10 +698,121 @@ window.getSelectedProject = getSelectedProject;
 window.getSelectedDatabase = getSelectedDatabase;
 window.getFilesEntityContext = getFilesEntityContext;
 
+function matchesNodeFilter(item) {
+  const filter = String(state.selectedNodeFilter || 'all');
+  if (filter === 'all') return true;
+  if (!item) return false;
+  const itemNodeId = item.nodeId ?? item.node_id;
+  if (itemNodeId === null || itemNodeId === undefined) return false;
+  return String(itemNodeId) === filter;
+}
+
+function getNodeDisplayName(nodeId) {
+  if (nodeId === null || nodeId === undefined) return '';
+  const found = (state.nodes || []).find((n) => String(n.id) === String(nodeId));
+  return found ? found.name : `Node #${nodeId}`;
+}
+
+function isPrivateOrLocalIp(ip) {
+  const s = String(ip || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+  if (!s || s === 'localhost' || s === '::1') return true;
+  if (s.startsWith('fe80:') || s.startsWith('fc') || s.startsWith('fd')) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 127 || a === 10 || a === 0) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
+function isSensitivePublicIp(val) {
+  const s = String(val || '').trim().replace(/^\[|\]$/g, '');
+  if (!s) return false;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(s)) {
+    return !isPrivateOrLocalIp(s);
+  }
+  if (s.includes(':') && /^[0-9a-fA-F:]+$/.test(s)) {
+    return !isPrivateOrLocalIp(s);
+  }
+  return false;
+}
+
+function hasSensitivePublicIpv4(text) {
+  const raw = String(text || '');
+  const re = /\b(\d{1,3}(?:\.\d{1,3}){3})\b/g;
+  let match;
+  while ((match = re.exec(raw)) !== null) {
+    if (!isPrivateOrLocalIp(match[1])) return true;
+  }
+  return false;
+}
+
+function getNodeEffectivePublicIp(node) {
+  const raw = String(node?.publicIp || '').trim();
+  if (isSensitivePublicIp(raw)) return raw;
+  if (node?.isLocal) {
+    const host = String(window.location.hostname || '').trim();
+    if (isSensitivePublicIp(host)) return host;
+  }
+  return '';
+}
+
+async function copyBlurIpButton(btnEl) {
+  const ip = btnEl?.getAttribute('data-copy-ip') || '';
+  if (!ip) return;
+  await copyTextToClipboard(ip, 'Public IP copied to clipboard');
+  if (btnEl) {
+    btnEl.classList.add('copied');
+    const actionEl = btnEl.querySelector('.ip-blur-action');
+    if (actionEl) actionEl.textContent = 'Copied';
+    clearTimeout(btnEl._copyResetTimer);
+    btnEl._copyResetTimer = setTimeout(() => {
+      btnEl.classList.remove('copied');
+      if (actionEl) actionEl.textContent = 'Copy';
+    }, 1500);
+  }
+}
+
+function renderBlurPublicIpPill(ip, opts = {}) {
+  const clean = String(ip || '').trim();
+  if (!clean) return '';
+  const label = opts.label || 'IP';
+  return `<button type="button" class="ip-blur-copy" data-copy-ip="${escapeHtml(clean)}" onclick="window.copyBlurIpButton(this)" aria-label="Copy VPS public IP"><span class="ip-blur-label">${escapeHtml(label)}</span><span class="ip-blur-text">${escapeHtml(clean)}</span><span class="ip-blur-action">Copy</span></button>`;
+}
+
+function renderBlurredPublicIpText(text) {
+  const raw = String(text || '');
+  if (!raw) return '';
+  const re = /(\b\d{1,3}(?:\.\d{1,3}){3}\b)/g;
+  return raw
+    .split(re)
+    .map((part) => {
+      if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(part) && !isPrivateOrLocalIp(part)) {
+        return `<span class="ip-blur-inline">${escapeHtml(part)}</span>`;
+      }
+      return escapeHtml(part);
+    })
+    .join('');
+}
+
+window.copyBlurIpButton = copyBlurIpButton;
+
 export {
   PAGE_SIZE,
   state,
   setHtmlIfChanged,
+  matchesNodeFilter,
+  getNodeDisplayName,
+  isPrivateOrLocalIp,
+  isSensitivePublicIp,
+  hasSensitivePublicIpv4,
+  getNodeEffectivePublicIp,
+  copyBlurIpButton,
+  renderBlurPublicIpPill,
+  renderBlurredPublicIpText,
   paginateAndRender,
   goToTablePage,
   PIPELINE_STAGES,

@@ -80,7 +80,7 @@ export async function loadMonitorView() {
             <span style="font-size:12px; font-weight:600; margin-left:6px; color:${isOnline ? 'var(--success)' : isMaint ? 'var(--warning)' : 'var(--text-muted)'};">${isOnline ? 'Online' : isMaint ? 'Maintenance' : 'Stopped'}</span>
           </td>
           <td>${p.status?.uptimeMs ? formatDuration(p.status.uptimeMs / 1000) : '--'}</td>
-          <td>${p.deployedSha ? `<span class="sha-pill">${p.deployedSha.slice(0, 7)}</span>` : '--'}</td>
+          <td>${p.deployedSha ? `<span class="sha-pill">${shortSha(p.deployedSha)}</span>` : '--'}</td>
           <td>${p.disk ? `${(p.disk.used / 1048576).toFixed(1)} MB` : '--'}</td>
           <td><span class="badge ${p.deployStatus?.status === 'success' ? 'badge-success' : 'badge-neutral'}">${p.deployStatus?.status ? escapeHtml(p.deployStatus.status.charAt(0).toUpperCase() + p.deployStatus.status.slice(1)) : 'Idle'}</span></td>
         </tr>
@@ -251,7 +251,7 @@ document.getElementById('settings-form')?.addEventListener('submit', async (e) =
 
   try {
     await api('/api/settings', { method: 'PUT', body: payload });
-    toast(`Global settings and ${cleanTokens.length} GitHub token(s) saved in SQLite.`, 'success');
+    toast(`Global settings and ${cleanTokens.length} GitHub token(s) saved.`, 'success');
     await loadSettingsView();
   } catch (err) {
     toast(`Save failed: ${err.message}`, 'error');
@@ -452,10 +452,10 @@ export async function loadSystemVersionInfo(quiet = false, forceRefresh = false)
         badgeEl.className = 'badge badge-success';
         const label = v.remote_commit || v.remote_tag || 'latest';
         badgeEl.textContent = `Update available (${label})`;
-      } else if (v.reinstall_command) {
-        badgeEl.className = 'badge badge-warning';
-        badgeEl.textContent = `Major upgrade (${v.remote_tag || 'latest'}): reinstall required`;
-        badgeEl.title = v.check_error || '';
+      } else if (v.check_error && /built from the '/.test(v.check_error)) {
+        badgeEl.className = 'badge badge-info';
+        badgeEl.textContent = 'Branch build';
+        badgeEl.title = v.check_error;
       } else if (v.check_error) {
         badgeEl.className = 'badge badge-neutral';
         badgeEl.textContent = 'No release checked';
@@ -510,9 +510,6 @@ export async function checkPlatformUpdates(manual = false) {
     } else if (v.has_update) {
       const sizeMb = v.asset_size_bytes ? ` • ${(v.asset_size_bytes / (1024 * 1024)).toFixed(1)} MB` : '';
       toast(`Release ${v.remote_tag || v.remote_commit} is available${sizeMb}. Click Update to install.`, 'success', 5500);
-    } else if (v.reinstall_command) {
-      toast(v.check_error, 'warning', 20000);
-      try { await navigator.clipboard.writeText(v.reinstall_command); toast('Reinstall command copied to clipboard.', 'success'); } catch (_) {}
     } else if (v.check_error) {
       toast(v.check_error, 'warning', 6500);
     } else {
@@ -531,7 +528,7 @@ export async function startPlatformUpdate() {
   const ok = await showConfirmDialog({
     title: 'Update WebDep from GitHub Release',
     message: `Download and install release <strong>${escapeHtml(targetLabel)}</strong> (${assetMeta})?<br><br>
-    &bull; <strong style="color:var(--success);">Preserves data:</strong> Your <code>data/</code> folder (SQLite databases, hosted websites, services, logs) and <code>.env</code> secrets stay untouched.<br>
+    &bull; <strong style="color:var(--success);">Preserves data:</strong> Your <code>data/</code> folder (databases, hosted websites, services, logs) and <code>.env</code> secrets stay untouched.<br>
     &bull; <strong style="color:var(--accent-light);">Instant binary update:</strong> Downloads prebuilt CI binary, verifies its SHA-256 checksum, and runs a smoke test before swapping (no on-server Rust compilation).<br>
     &bull; <strong style="color:var(--text-main);">Automatic restart:</strong> Swaps atomically with rollback protection and restarts the panel cleanly.`,
     confirmText: 'Download & Apply Release',

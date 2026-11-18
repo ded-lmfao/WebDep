@@ -4,7 +4,6 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -60,9 +59,6 @@ pub struct GitVersionInfo {
     pub published_at: Option<String>,
     pub update_source: String,
     pub check_error: Option<String>,
-    /// Set when the latest release is the PostgreSQL-based generation, which a binary swap
-    /// cannot install (it needs PostgreSQL packages). Holds the one-time reinstall command.
-    pub reinstall_command: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -128,8 +124,8 @@ fn now_time_str() -> String {
 fn current_arch_asset_name() -> Option<&'static str> {
     if cfg!(target_os = "linux") {
         match std::env::consts::ARCH {
-            "x86_64" => Some("webdep-linux-x86_64.tar.gz"),
-            "aarch64" => Some("webdep-linux-aarch64.tar.gz"),
+            "x86_64" => Some("webdep3-linux-x86_64.tar.gz"),
+            "aarch64" => Some("webdep3-linux-aarch64.tar.gz"),
             _ => None,
         }
     } else {
@@ -139,7 +135,7 @@ fn current_arch_asset_name() -> Option<&'static str> {
 
 /// Asset name to display during version checks even on non-Linux dev machines.
 fn display_asset_name() -> &'static str {
-    current_arch_asset_name().unwrap_or("webdep-linux-x86_64.tar.gz")
+    current_arch_asset_name().unwrap_or("webdep3-linux-x86_64.tar.gz")
 }
 
 /// Resolves the live executable path safely, stripping Linux `(deleted)` suffix if unlinked.
@@ -239,47 +235,16 @@ fn read_git_origin_slug() -> Option<&'static str> {
         .as_deref()
 }
 
-/// Release assets of the PostgreSQL-based generation are named `webdep3-linux-<arch>.tar.gz`,
-/// so binaries from this (SQLite) generation never download them by accident.
-const NEXT_GEN_ASSET_PREFIX: &str = "webdep3-";
-
-fn is_next_generation_release(rel: &GhReleaseResponse) -> bool {
-    rel.assets.iter().any(|a| a.name.starts_with(NEXT_GEN_ASSET_PREFIX))
-}
-
-/// One-time command that moves this install to the PostgreSQL-based generation in place:
-/// same folder, so `data/` (including `webdep.sqlite`, which is imported automatically) and `.env` are kept.
-fn reinstall_command(repo_slug: &str) -> String {
-    let dir = std::env::current_dir()
-        .ok()
-        .filter(|d| d.join("start.sh").is_file())
-        .map(|d| d.display().to_string())
-        .unwrap_or_else(|| "<your WebDep folder>".to_string());
-    format!(
-        "curl -fsSL https://raw.githubusercontent.com/{repo}/main/install.sh | sudo bash -s -- both --dir '{dir}' --repo {repo}",
-        repo = repo_slug,
-        dir = dir
-    )
-}
-
-fn reinstall_message(command: &str) -> String {
-    format!(
-        "WebDep 3 is available. It moves your data to PostgreSQL, which needs a one-time reinstall instead of an in-place update. Your data and settings are kept and imported automatically. Run on the server: {}",
-        command
-    )
-}
-
-fn resolve_repo_slug_from_db(db: Option<&DbPool>) -> String {
+async fn resolve_repo_slug_from_db(db: Option<&DbPool>) -> String {
     if let Some(pool) = db {
-        if let Ok(conn) = pool.lock() {
-            if let Ok(val) = conn.query_row(
-                "SELECT value FROM settings WHERE key = 'update_repo'",
-                [],
-                |r| r.get::<_, String>(0),
-            ) {
-                if let Some(slug) = Git::extract_github_slug(&val) {
-                    return slug;
-                }
+        if let Ok(Some(val)) = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM settings WHERE key = 'update_repo'",
+        )
+        .fetch_optional(pool)
+        .await
+        {
+            if let Some(slug) = Git::extract_github_slug(&val) {
+                return slug;
             }
         }
     }
@@ -289,16 +254,17 @@ fn resolve_repo_slug_from_db(db: Option<&DbPool>) -> String {
     env!("WEBDEP_DEFAULT_REPO").to_string()
 }
 
-fn resolve_github_token_from_db(db: Option<&DbPool>) -> Option<String> {
+async fn resolve_github_token_from_db(db: Option<&DbPool>) -> Option<String> {
     if let Some(pool) = db {
-        if let Ok(conn) = pool.lock() {
-            if let Some(first) = Git::read_github_tokens_from_conn(&conn).into_iter().next() {
-                return Some(first.token);
-            }
-            return None;
+        if let Some(first) = Git::read_github_tokens(pool).await.into_iter().next() {
+            return Some(first.token);
         }
+        return None;
     }
-    Git::get_sqlite_github_tokens().into_iter().next().map(|t| t.token)
+    Git::get_stored_github_tokens()
+        .into_iter()
+        .next()
+        .map(|t| t.token)
 }
 
 fn curl_get_text(url: &str, token: Option<&str>, accept: &str, timeout_secs: u64) -> Result<(u16, String), String> {
@@ -453,7 +419,7 @@ impl Updater {
         self.status.lock().unwrap().clone()
     }
 
-    fn get_latest_release_cached(&self, repo_slug: &str, force_refresh: bool) -> Result<GhReleaseResponse, String> {
+    async fn get_latest_release_cached(&self, repo_slug: &str, force_refresh: bool) -> Result<GhReleaseResponse, String> {
         if !force_refresh {
             if let Ok(guard) = self.release_cache.lock() {
                 if let Some(cached) = guard.as_ref() {
@@ -464,8 +430,14 @@ impl Updater {
             }
         }
 
-        let token = resolve_github_token_from_db(self.db.as_ref());
-        let result = fetch_github_release(repo_slug, None, token.as_deref());
+        let token = resolve_github_token_from_db(self.db.as_ref()).await;
+        let slug_owned = repo_slug.to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            fetch_github_release(&slug_owned, None, token.as_deref())
+        })
+        .await
+        .map_err(|e| format!("Failed to check releases: {}", e))?;
+
         if let Ok(mut guard) = self.release_cache.lock() {
             *guard = Some(CachedReleaseCheck {
                 fetched_at: Instant::now(),
@@ -476,7 +448,7 @@ impl Updater {
         result
     }
 
-    pub fn get_version_info(&self, force_refresh: bool) -> GitVersionInfo {
+    pub async fn get_version_info(&self, force_refresh: bool) -> GitVersionInfo {
         let (is_updating, ready_to_restart) = {
             let st = self.status.lock().unwrap();
             (st.status == "in_progress", st.status == "ready_to_restart")
@@ -487,10 +459,9 @@ impl Updater {
         let current_release_tag = env!("WEBDEP_RELEASE_TAG").to_string();
         let commit_message = env!("WEBDEP_COMMIT_MSG").to_string();
 
-        let repo_slug = resolve_repo_slug_from_db(self.db.as_ref());
+        let repo_slug = resolve_repo_slug_from_db(self.db.as_ref()).await;
         let remote_url = format!("https://github.com/{}", repo_slug);
         let desired_asset = display_asset_name();
-        let mut reinstall: Option<String> = None;
 
         let (
             remote_tag,
@@ -502,23 +473,7 @@ impl Updater {
             asset_size_bytes,
             published_at,
             check_error,
-        ) = match self.get_latest_release_cached(&repo_slug, force_refresh) {
-            Ok(rel) if is_next_generation_release(&rel) && !rel.assets.iter().any(|a| a.name == desired_asset) => {
-                let cmd = reinstall_command(&repo_slug);
-                let msg = reinstall_message(&cmd);
-                reinstall = Some(cmd);
-                (
-                    Some(rel.tag_name.clone()),
-                    None,
-                    Some(rel.tag_name.clone()),
-                    rel.name.or_else(|| Some(rel.tag_name)),
-                    Some(rel.html_url),
-                    None,
-                    None,
-                    rel.published_at,
-                    Some(msg),
-                )
-            }
+        ) = match self.get_latest_release_cached(&repo_slug, force_refresh).await {
             Ok(rel) => {
                 let sha = extract_short_sha_from_release(&rel);
                 let matched_asset = rel
@@ -545,7 +500,12 @@ impl Updater {
             Err(err) => (None, None, None, None, None, None, None, None, Some(err)),
         };
 
-        let has_update = reinstall.is_none() && match (&remote_tag, &remote_commit) {
+        let branch_build = feature_branch_build();
+        let check_error = match &branch_build {
+            Some(b) => Some(feature_branch_update_message(b)),
+            None => check_error,
+        };
+        let has_update = branch_build.is_none() && match (&remote_tag, &remote_commit) {
             (Some(r_tag), Some(r_sha))
                 if current_commit != "unknown" && !current_commit.is_empty() =>
             {
@@ -575,11 +535,10 @@ impl Updater {
             published_at,
             update_source: "github_release".to_string(),
             check_error,
-            reinstall_command: reinstall,
         }
     }
 
-    pub fn set_remote_repo(&self, repo_input: &str) -> Result<String, String> {
+    pub async fn set_remote_repo(&self, repo_input: &str) -> Result<String, String> {
         let trimmed = repo_input.trim();
         if trimmed.is_empty() {
             return Err("Repository name or URL cannot be empty".to_string());
@@ -592,13 +551,14 @@ impl Updater {
             .ok_or_else(|| "Enter a valid GitHub repo (e.g. owner/repo or https://github.com/owner/repo)".to_string())?;
 
         if let Some(pool) = &self.db {
-            if let Ok(conn) = pool.lock() {
-                conn.execute(
-                    "INSERT INTO settings(key, value) VALUES('update_repo', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![&slug],
-                )
-                .map_err(|e| format!("Failed to save update repository setting: {}", e))?;
-            }
+            sqlx::query(
+                "INSERT INTO settings(key, value) VALUES('update_repo', $1) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(&slug)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to save update repository setting: {}", e))?;
         }
 
         // Keep local git origin synchronized on best-effort basis in live binaries (never mutate repo remote during tests)
@@ -624,30 +584,100 @@ impl Updater {
         Ok(format!("https://github.com/{}", slug))
     }
 
-    pub fn start_update(&self, tag_override: Option<String>) -> Result<(), String> {
+    pub async fn get_repo_and_token(&self) -> (String, Option<String>) {
+        let repo = resolve_repo_slug_from_db(self.db.as_ref()).await;
+        let tok = resolve_github_token_from_db(self.db.as_ref()).await;
+        (repo, tok)
+    }
+
+    pub fn begin_fleet_update_status(&self, remote_nodes: usize) -> Result<(), String> {
         let mut st = self.status.lock().unwrap();
         if st.status == "in_progress" {
             return Err("An update is already running in background".to_string());
         }
-
         *st = UpdateStatus {
             status: "in_progress".to_string(),
-            step: "Initializing release update...".to_string(),
+            step: if remote_nodes > 0 {
+                format!("Upgrading {remote_nodes} connected Web-Node worker(s) first...")
+            } else {
+                "Initializing release update...".to_string()
+            },
             progress: 5,
             logs: vec![format!(
-                "[{}] Starting WebDep prebuilt GitHub Release update...",
-                now_time_str()
+                "[{}] Starting coordinated cluster update (remote nodes first: {})...",
+                now_time_str(),
+                remote_nodes
             )],
             error: None,
             started_at: Some(now_secs()),
             finished_at: None,
         };
+        Ok(())
+    }
+
+    pub fn log_fleet_step(&self, step: &str, progress: u8, msg: &str) {
+        Self::set_step(&self.status, step, progress);
+        Self::append_log(&self.status, msg);
+    }
+
+    pub fn fail_fleet_step(&self, err: String) {
+        Self::fail_update(&self.status, err);
+    }
+
+    pub async fn start_update(&self, tag_override: Option<String>) -> Result<(), String> {
+        if let Some(branch) = feature_branch_build() {
+            return Err(feature_branch_update_message(&branch));
+        }
+        self.start_update_internal(tag_override, false).await
+    }
+
+    pub async fn start_update_after_fleet(&self, tag_override: Option<String>) -> Result<(), String> {
+        if let Some(branch) = feature_branch_build() {
+            return Err(feature_branch_update_message(&branch));
+        }
+        self.start_update_internal(tag_override, true).await
+    }
+
+    async fn start_update_internal(
+        &self,
+        tag_override: Option<String>,
+        preserve_logs: bool,
+    ) -> Result<(), String> {
+        {
+            let mut st = self.status.lock().unwrap();
+            if !preserve_logs && st.status == "in_progress" {
+                return Err("An update is already running in background".to_string());
+            }
+
+            if !preserve_logs {
+                *st = UpdateStatus {
+                    status: "in_progress".to_string(),
+                    step: "Initializing release update...".to_string(),
+                    progress: 5,
+                    logs: vec![format!(
+                        "[{}] Starting WebDep prebuilt GitHub Release update...",
+                        now_time_str()
+                    )],
+                    error: None,
+                    started_at: Some(now_secs()),
+                    finished_at: None,
+                };
+            } else {
+                st.step = "Upgrading Web-Core binary...".to_string();
+                st.progress = 35;
+                st.logs.push(format!(
+                    "[{}] [Core] Starting Web-Core release binary update...",
+                    now_time_str()
+                ));
+            }
+        }
 
         let status_arc = self.status.clone();
         let cache_arc = self.release_cache.clone();
-        let db = self.db.clone();
+        let repo_slug = resolve_repo_slug_from_db(self.db.as_ref()).await;
+        let token = resolve_github_token_from_db(self.db.as_ref()).await;
         tokio::task::spawn_blocking(move || {
-            Self::run_update_pipeline(status_arc, cache_arc, db, tag_override);
+            Self::run_update_pipeline(status_arc, cache_arc, repo_slug, token, tag_override);
         });
 
         Ok(())
@@ -683,302 +713,24 @@ impl Updater {
     fn run_update_pipeline(
         status_arc: Arc<Mutex<UpdateStatus>>,
         cache_arc: Arc<Mutex<Option<CachedReleaseCheck>>>,
-        db: Option<DbPool>,
+        repo_slug: String,
+        token: Option<String>,
         tag_override: Option<String>,
     ) {
-        // STEP 1: Verify platform support, target binary path, and preserve .env/data
-        Self::set_step(&status_arc, "Verifying environment & binary path...", 10);
-
-        let asset_name = match current_arch_asset_name() {
-            Some(name) => name,
-            None => {
-                Self::fail_update(
-                    &status_arc,
-                    format!(
-                        "Prebuilt GitHub Release updates target Linux (x86_64 / aarch64); automatic binary update is unsupported on {}/{}.",
-                        std::env::consts::OS,
-                        std::env::consts::ARCH
-                    ),
-                );
-                return;
-            }
-        };
-
-        let active_exe = resolve_active_exe_path();
-        let exe_dir = active_exe
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let exe_name = active_exe
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("webdep")
-            .to_string();
-
-        Self::append_log(
-            &status_arc,
-            &format!("[Target] Active binary path: {} (asset: {})", active_exe.display(), asset_name),
+        let tag_opt = perform_binary_swap_sync(
+            &repo_slug,
+            tag_override.as_deref(),
+            token.as_deref(),
+            true,
+            Some(&status_arc),
         );
-
-        let env_path = Path::new(".env");
-        let env_bak = Path::new(".env.updater-backup");
-        if env_path.exists() {
-            if let Err(e) = std::fs::copy(env_path, env_bak) {
-                warn!("Could not back up .env: {}", e);
-            } else {
-                Self::append_log(&status_arc, "[Safety] Backed up .env configuration before binary swap");
-            }
-        }
-        Self::append_log(&status_arc, "[Safety] data/ directory and SQLite databases remain untouched");
-
-        // STEP 2: Query GitHub Releases API
-        Self::set_step(&status_arc, "Fetching latest GitHub Release metadata...", 25);
-        let repo_slug = resolve_repo_slug_from_db(db.as_ref());
-        let token = resolve_github_token_from_db(db.as_ref());
-        Self::append_log(&status_arc, &format!("[GitHub] Checking releases on {}...", repo_slug));
-
-        let release = match fetch_github_release(&repo_slug, tag_override.as_deref(), token.as_deref()) {
-            Ok(r) => r,
+        let tag_name = match tag_opt {
+            Ok(t) => t,
             Err(e) => {
                 Self::fail_update(&status_arc, e);
                 return;
             }
         };
-
-        let target_asset = match release.assets.iter().find(|a| a.name == asset_name) {
-            Some(a) => a.clone(),
-            None if is_next_generation_release(&release) => {
-                Self::fail_update(&status_arc, reinstall_message(&reinstall_command(&repo_slug)));
-                return;
-            }
-            None => {
-                Self::fail_update(
-                    &status_arc,
-                    format!(
-                        "Release '{}' does not contain asset '{}'. Check GitHub Actions release build.",
-                        release.tag_name, asset_name
-                    ),
-                );
-                return;
-            }
-        };
-        let checksum_asset = match release.assets.iter().find(|a| a.name == "checksums.txt") {
-            Some(a) => a.clone(),
-            None => {
-                Self::fail_update(
-                    &status_arc,
-                    format!(
-                        "Release '{}' is missing checksums.txt required for SHA-256 verification.",
-                        release.tag_name
-                    ),
-                );
-                return;
-            }
-        };
-
-        Self::append_log(
-            &status_arc,
-            &format!(
-                "[GitHub] Found release '{}' ({} bytes for {})",
-                release.tag_name, target_asset.size, target_asset.name
-            ),
-        );
-
-        // STEP 3: Download archive & checksums into isolated staging folder
-        Self::set_step(&status_arc, &format!("Downloading {}...", target_asset.name), 50);
-
-        let stage_dir = PathBuf::from(format!("data/tmp/updater-{}", now_secs()));
-        if let Err(e) = std::fs::create_dir_all(&stage_dir) {
-            Self::fail_update(
-                &status_arc,
-                format!("Failed to create staging directory {}: {}", stage_dir.display(), e),
-            );
-            return;
-        }
-
-        let archive_path = stage_dir.join(&target_asset.name);
-        let checksums_path = stage_dir.join("checksums.txt");
-        let extract_dir = stage_dir.join("extract");
-
-        if let Err(e) = curl_download_file(&checksum_asset, token.as_deref(), &checksums_path, 15) {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(&status_arc, e);
-            return;
-        }
-        if let Err(e) = curl_download_file(&target_asset, token.as_deref(), &archive_path, 180) {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(&status_arc, e);
-            return;
-        }
-        Self::append_log(&status_arc, "[Download] Downloaded release archive and checksums.txt");
-
-        // STEP 4: Verify SHA-256 checksum strictly before extracting
-        Self::set_step(&status_arc, "Verifying SHA-256 checksum & extracting binary...", 70);
-        let checksums_text = match std::fs::read_to_string(&checksums_path) {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(&status_arc, format!("Failed to read checksums.txt: {}", e));
-                return;
-            }
-        };
-        let expected_sha = match parse_checksum_for_asset(&checksums_text, &target_asset.name) {
-            Some(h) => h,
-            None => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(
-                    &status_arc,
-                    format!("No SHA-256 entry for '{}' found in checksums.txt", target_asset.name),
-                );
-                return;
-            }
-        };
-        let actual_sha = match compute_file_sha256_hex(&archive_path) {
-            Ok(h) => h,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(&status_arc, e);
-                return;
-            }
-        };
-        if actual_sha != expected_sha {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(
-                &status_arc,
-                format!(
-                    "SHA-256 verification FAILED for {}: expected {}, got {}",
-                    target_asset.name, expected_sha, actual_sha
-                ),
-            );
-            return;
-        }
-        Self::append_log(&status_arc, &format!("[Verify] SHA-256 verified: {}", actual_sha));
-
-        if let Err(e) = std::fs::create_dir_all(&extract_dir) {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(&status_arc, format!("Failed to create extract dir: {}", e));
-            return;
-        }
-        let tar_out = Command::new("tar")
-            .args([
-                "-xzf",
-                archive_path.to_str().unwrap_or_default(),
-                "-C",
-                extract_dir.to_str().unwrap_or_default(),
-            ])
-            .output();
-        match tar_out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                Self::fail_update(&status_arc, format!("Failed to extract tarball: {}", err));
-                return;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(&status_arc, format!("Failed to execute tar: {}", e));
-                return;
-            }
-        }
-
-        let extracted_bin = match find_extracted_binary(&extract_dir, &exe_name) {
-            Some(p) => p,
-            None => {
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(
-                    &status_arc,
-                    format!("Archive '{}' did not contain '{}'", target_asset.name, exe_name),
-                );
-                return;
-            }
-        };
-
-        // Stage next to active_exe so the final rename swap is atomic on the same filesystem
-        let staged_new = exe_dir.join(format!("{}.new", exe_name));
-        let old_exe = exe_dir.join(format!("{}.old", exe_name));
-        if let Err(e) = std::fs::copy(&extracted_bin, &staged_new) {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            let _ = std::fs::remove_file(&staged_new);
-            Self::fail_update(
-                &status_arc,
-                format!("Failed to stage binary at {}: {}", staged_new.display(), e),
-            );
-            return;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&staged_new, std::fs::Permissions::from_mode(0o700));
-        }
-
-        // Smoke-check executable runs cleanly before touching live binary
-        match Command::new(&staged_new).arg("--version").output() {
-            Ok(o) if o.status.success() => {
-                let ver_line = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                Self::append_log(&status_arc, &format!("[Verify] New binary smoke test OK: {}", ver_line));
-            }
-            Ok(o) => {
-                let _ = std::fs::remove_file(&staged_new);
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                Self::fail_update(
-                    &status_arc,
-                    format!("New binary failed `--version` smoke check: {}", err),
-                );
-                return;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&staged_new);
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(
-                    &status_arc,
-                    format!("Failed to execute new binary smoke check: {}", e),
-                );
-                return;
-            }
-        }
-
-        // STEP 5: Atomic binary hot-swap with automatic rollback
-        Self::set_step(&status_arc, "Swapping WebDep binary...", 90);
-        if active_exe.exists() {
-            if old_exe.exists() {
-                let _ = std::fs::remove_file(&old_exe);
-            }
-            if let Err(e) = std::fs::rename(&active_exe, &old_exe) {
-                let _ = std::fs::remove_file(&staged_new);
-                let _ = std::fs::remove_dir_all(&stage_dir);
-                Self::fail_update(
-                    &status_arc,
-                    format!("Could not move active binary aside for hot-swap: {}", e),
-                );
-                return;
-            }
-        }
-
-        if let Err(e) = std::fs::rename(&staged_new, &active_exe) {
-            if old_exe.exists() && !active_exe.exists() {
-                let _ = std::fs::rename(&old_exe, &active_exe);
-                Self::append_log(&status_arc, "[Recovery] Restored previous binary intact after swap failure.");
-            }
-            let _ = std::fs::remove_file(&staged_new);
-            let _ = std::fs::remove_dir_all(&stage_dir);
-            Self::fail_update(&status_arc, format!("Failed to activate new binary: {}", e));
-            return;
-        }
-
-        if old_exe.exists() {
-            let _ = std::fs::remove_file(&old_exe);
-        }
-        let _ = std::fs::remove_dir_all(&stage_dir);
-
-        if env_bak.exists() && !env_path.exists() {
-            let _ = std::fs::copy(env_bak, env_path);
-        }
-        if env_bak.exists() {
-            let _ = std::fs::remove_file(env_bak);
-        }
 
         if let Ok(mut guard) = cache_arc.lock() {
             *guard = None;
@@ -986,7 +738,7 @@ impl Updater {
 
         Self::append_log(
             &status_arc,
-            &format!("[Success] Upgraded WebDep binary to release {}", release.tag_name),
+            &format!("[Success] Upgraded WebDep binary to release {}", tag_name),
         );
         Self::append_log(&status_arc, "[Restart] Automatically restarting WebDep panel now...");
         Self::set_step(&status_arc, "Update complete! Restarting WebDep panel...", 100);
@@ -1002,12 +754,359 @@ impl Updater {
     }
 }
 
+/// PG-free shared binary self-update routine used by both Web-Core (`Updater`)
+/// and remote `Web-Node` workers (`node.self_update` RPC).
+/// When this binary was compiled from a feature branch (not main/master or a release tag), the
+/// one-click updater must not swap in the latest release: it is built from a different codebase
+/// and may not understand this branch's data. Returns the branch name in that case.
+/// `WEBDEP_ALLOW_RELEASE_UPDATE=true` opts back in.
+pub fn feature_branch_build() -> Option<String> {
+    let allow = std::env::var("WEBDEP_ALLOW_RELEASE_UPDATE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if allow {
+        return None;
+    }
+    let branch = env!("WEBDEP_GIT_BRANCH").trim();
+    if branch.is_empty() || matches!(branch, "HEAD" | "main" | "master") || branch.starts_with('v') {
+        None
+    } else {
+        Some(branch.to_string())
+    }
+}
+
+pub fn feature_branch_update_message(branch: &str) -> String {
+    format!(
+        "This panel was built from the '{branch}' branch. One-click updates install the latest release from main, which would replace this build. Update it by pulling '{branch}' and rebuilding (or set WEBDEP_ALLOW_RELEASE_UPDATE=true)."
+    )
+}
+
+pub fn perform_binary_swap_sync(
+    repo_slug: &str,
+    tag_override: Option<&str>,
+    token: Option<&str>,
+    backup_dotenv: bool,
+    status_arc: Option<&Arc<Mutex<UpdateStatus>>>,
+) -> Result<String, String> {
+    let set_step = |step: &str, pct: u8| {
+        if let Some(arc) = status_arc {
+            Updater::set_step(arc, step, pct);
+        }
+    };
+    let append_log = |msg: &str| {
+        if let Some(arc) = status_arc {
+            Updater::append_log(arc, msg);
+        }
+    };
+
+    set_step("Verifying environment & binary path...", 10);
+
+    let asset_name = current_arch_asset_name().ok_or_else(|| {
+        format!(
+            "Prebuilt GitHub Release updates target Linux (x86_64 / aarch64); automatic binary update is unsupported on {}/{}.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+
+    let active_exe = resolve_active_exe_path();
+    let exe_dir = active_exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let exe_name = active_exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("webdep")
+        .to_string();
+
+    append_log(&format!(
+        "[Target] Active binary path: {} (asset: {})",
+        active_exe.display(),
+        asset_name
+    ));
+
+    let env_path = Path::new(".env");
+    let env_bak = Path::new(".env.updater-backup");
+    if backup_dotenv && env_path.exists() {
+        if let Err(e) = std::fs::copy(env_path, env_bak) {
+            warn!("Could not back up .env: {}", e);
+        } else {
+            append_log("[Safety] Backed up .env configuration before binary swap");
+        }
+    }
+
+    set_step("Fetching latest GitHub Release metadata...", 25);
+    append_log(&format!("[GitHub] Checking releases on {}...", repo_slug));
+
+    let release = fetch_github_release(repo_slug, tag_override, token)?;
+    let target_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == asset_name)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Release '{}' does not contain asset '{}'. Check GitHub Actions release build.",
+                release.tag_name, asset_name
+            )
+        })?;
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == "checksums.txt")
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Release '{}' is missing checksums.txt required for SHA-256 verification.",
+                release.tag_name
+            )
+        })?;
+
+    append_log(&format!(
+        "[GitHub] Found release '{}' ({} bytes for {})",
+        release.tag_name, target_asset.size, target_asset.name
+    ));
+
+    set_step(&format!("Downloading {}...", target_asset.name), 50);
+    let stage_dir = std::env::temp_dir().join(format!("webdep-updater-{}", now_secs()));
+    std::fs::create_dir_all(&stage_dir).map_err(|e| {
+        format!(
+            "Failed to create staging directory {}: {}",
+            stage_dir.display(),
+            e
+        )
+    })?;
+
+    let archive_path = stage_dir.join(&target_asset.name);
+    let checksums_path = stage_dir.join("checksums.txt");
+    let extract_dir = stage_dir.join("extract");
+
+    if let Err(e) = curl_download_file(&checksum_asset, token, &checksums_path, 15) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(e);
+    }
+    if let Err(e) = curl_download_file(&target_asset, token, &archive_path, 180) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(e);
+    }
+    append_log("[Download] Downloaded release archive and checksums.txt");
+
+    set_step("Verifying SHA-256 checksum & extracting binary...", 70);
+    let checksums_text = match std::fs::read_to_string(&checksums_path) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!("Failed to read checksums.txt: {}", e));
+        }
+    };
+    let expected_sha = match parse_checksum_for_asset(&checksums_text, &target_asset.name) {
+        Some(h) => h,
+        None => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!(
+                "No SHA-256 entry for '{}' found in checksums.txt",
+                target_asset.name
+            ));
+        }
+    };
+    let actual_sha = match compute_file_sha256_hex(&archive_path) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(e);
+        }
+    };
+    if actual_sha != expected_sha {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(format!(
+            "SHA-256 verification FAILED for {}: expected {}, got {}",
+            target_asset.name, expected_sha, actual_sha
+        ));
+    }
+    append_log(&format!("[Verify] SHA-256 verified: {}", actual_sha));
+
+    if let Err(e) = std::fs::create_dir_all(&extract_dir) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(format!("Failed to create extract dir: {}", e));
+    }
+    let tar_out = Command::new("tar")
+        .args([
+            "-xzf",
+            archive_path.to_str().unwrap_or_default(),
+            "-C",
+            extract_dir.to_str().unwrap_or_default(),
+        ])
+        .output();
+    match tar_out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            return Err(format!("Failed to extract tarball: {}", err));
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!("Failed to execute tar: {}", e));
+        }
+    }
+
+    let extracted_bin = match find_extracted_binary(&extract_dir, &exe_name) {
+        Some(p) => p,
+        None => {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!(
+                "Archive '{}' did not contain '{}'",
+                target_asset.name, exe_name
+            ));
+        }
+    };
+
+    let staged_new = exe_dir.join(format!("{}.new", exe_name));
+    let old_exe = exe_dir.join(format!("{}.old", exe_name));
+    if let Err(e) = std::fs::copy(&extracted_bin, &staged_new) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        let _ = std::fs::remove_file(&staged_new);
+        return Err(format!(
+            "Failed to stage binary at {}: {}",
+            staged_new.display(),
+            e
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&staged_new, std::fs::Permissions::from_mode(0o700));
+    }
+
+    match Command::new(&staged_new).arg("--version").output() {
+        Ok(o) if o.status.success() => {
+            let ver_line = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            append_log(&format!("[Verify] New binary smoke test OK: {}", ver_line));
+        }
+        Ok(o) => {
+            let _ = std::fs::remove_file(&staged_new);
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            return Err(format!("New binary failed `--version` smoke check: {}", err));
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&staged_new);
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!("Failed to execute new binary smoke check: {}", e));
+        }
+    }
+
+    set_step("Swapping WebDep binary...", 90);
+    if active_exe.exists() {
+        if old_exe.exists() {
+            let _ = std::fs::remove_file(&old_exe);
+        }
+        if let Err(e) = std::fs::rename(&active_exe, &old_exe) {
+            let _ = std::fs::remove_file(&staged_new);
+            let _ = std::fs::remove_dir_all(&stage_dir);
+            return Err(format!(
+                "Could not move active binary aside for hot-swap: {}",
+                e
+            ));
+        }
+    }
+    if let Err(e) = std::fs::rename(&staged_new, &active_exe) {
+        if old_exe.exists() && !active_exe.exists() {
+            let _ = std::fs::rename(&old_exe, &active_exe);
+            append_log("[Recovery] Restored previous binary intact after swap failure.");
+        }
+        let _ = std::fs::remove_file(&staged_new);
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(format!("Failed to activate new binary: {}", e));
+    }
+
+    if old_exe.exists() {
+        let _ = std::fs::remove_file(&old_exe);
+    }
+    let _ = std::fs::remove_dir_all(&stage_dir);
+    if backup_dotenv && env_bak.exists() && !env_path.exists() {
+        let _ = std::fs::copy(env_bak, env_path);
+    }
+    if env_bak.exists() {
+        let _ = std::fs::remove_file(env_bak);
+    }
+
+    Ok(release.tag_name)
+}
+
+pub fn restart_node_service_delayed(delay_ms: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        #[cfg(unix)]
+        {
+            let is_node_systemd = tokio::process::Command::new("systemctl")
+                .args(["is-active", "--quiet", "webdep-node"])
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if is_node_systemd {
+                let _ = tokio::process::Command::new("sh")
+                    .args(["-c", "(sleep 0.4 && (sudo systemctl restart webdep-node || systemctl restart webdep-node)) >/dev/null 2>&1 &"])
+                    .spawn();
+                return;
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                let bin = resolve_active_exe_path();
+                if bin.exists() {
+                    let _ = tokio::process::Command::new(bin)
+                        .arg("--node")
+                        .current_dir(&cwd)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn();
+                }
+            }
+            std::process::exit(0);
+        }
+        #[cfg(windows)]
+        {
+            if let Ok(cwd) = std::env::current_dir() {
+                let bin = resolve_active_exe_path();
+                if tokio::fs::try_exists(&bin).await.unwrap_or(false) {
+                    let mut cmd = tokio::process::Command::new(bin);
+                    cmd.arg("--node")
+                        .current_dir(&cwd)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    cmd.creation_flags(0x00000008 | 0x00000200);
+                    let _ = cmd.spawn();
+                }
+            }
+            std::process::exit(0);
+        }
+    });
+}
+
 pub fn restart_service_delayed(delay_ms: u64) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
         #[cfg(unix)]
         {
+            let is_core_systemd = tokio::process::Command::new("systemctl")
+                .args(["is-active", "--quiet", "webdep-core"])
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if is_core_systemd {
+                info!("Restarting WebDep cluster services via systemd ('webdep-core' + 'webdep-node')...");
+                let _ = tokio::process::Command::new("sh")
+                    .args(["-c", "(sleep 0.5 && (sudo systemctl restart webdep-core || systemctl restart webdep-core) && (systemctl is-enabled --quiet webdep-node 2>/dev/null && (sudo systemctl restart webdep-node || systemctl restart webdep-node) || true)) >/dev/null 2>&1 &"])
+                    .spawn();
+                return;
+            }
+
             let is_systemd = tokio::process::Command::new("systemctl")
                 .args(["is-active", "--quiet", "webdep"])
                 .status()
@@ -1066,14 +1165,14 @@ mod tests {
     #[test]
     fn test_parse_checksum_for_asset_and_sha256_hash() {
         let checksums = "\
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  webdep-linux-x86_64.tar.gz\n\
-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep-linux-aarch64.tar.gz\n";
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  webdep3-linux-x86_64.tar.gz\n\
+ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep3-linux-aarch64.tar.gz\n";
         assert_eq!(
-            parse_checksum_for_asset(checksums, "webdep-linux-x86_64.tar.gz").as_deref(),
+            parse_checksum_for_asset(checksums, "webdep3-linux-x86_64.tar.gz").as_deref(),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         );
         assert_eq!(
-            parse_checksum_for_asset(checksums, "webdep-linux-aarch64.tar.gz").as_deref(),
+            parse_checksum_for_asset(checksums, "webdep3-linux-aarch64.tar.gz").as_deref(),
             Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
         );
         assert_eq!(parse_checksum_for_asset(checksums, "missing.tar.gz"), None);
@@ -1085,25 +1184,6 @@ ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep-li
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         let _ = std::fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn test_next_generation_release_is_detected_by_asset_prefix() {
-        let rel = |names: &[&str]| -> GhReleaseResponse {
-            serde_json::from_value(serde_json::json!({
-                "tag_name": "v9.0.0",
-                "html_url": "https://example.invalid",
-                "assets": names.iter().map(|n| serde_json::json!({
-                    "name": n, "browser_download_url": "", "url": "", "size": 1
-                })).collect::<Vec<_>>()
-            }))
-            .unwrap()
-        };
-        assert!(is_next_generation_release(&rel(&["webdep3-linux-x86_64.tar.gz", "checksums.txt"])));
-        assert!(!is_next_generation_release(&rel(&["webdep-linux-x86_64.tar.gz", "checksums.txt"])));
-        let cmd = reinstall_command("owner/repo");
-        assert!(cmd.contains("owner/repo/main/install.sh"));
-        assert!(cmd.contains("--dir"));
     }
 
     #[test]
@@ -1128,18 +1208,15 @@ ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep-li
         assert_eq!(extract_short_sha_from_release(&tagged).as_deref(), Some("abc1234"));
     }
 
-    #[test]
-    fn test_set_remote_repo_persists_slug_in_db() {
-        let dir = std::env::temp_dir().join(format!("webdep-updater-repo-{}", now_secs()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::db::open_db(&dir).unwrap();
+    #[tokio::test]
+    async fn test_set_remote_repo_persists_slug_in_db() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
         let updater = Updater::with_db(db);
-        let saved = updater.set_remote_repo("acme/webdep-panel.git").unwrap();
+        let saved = updater.set_remote_repo("acme/webdep-panel.git").await.unwrap();
         assert_eq!(saved, "https://github.com/acme/webdep-panel");
         assert_eq!(
-            resolve_repo_slug_from_db(updater.db.as_ref()),
+            resolve_repo_slug_from_db(updater.db.as_ref()).await,
             "acme/webdep-panel"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

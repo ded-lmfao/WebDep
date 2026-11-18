@@ -34,6 +34,7 @@ pub struct AppState {
     pub cache: Arc<AppCache>,
     pub databases: Arc<crate::databases::Databases>,
     pub updater: Arc<crate::updater::Updater>,
+    pub cluster: Arc<crate::cluster::ClusterManager>,
 }
 
 
@@ -117,14 +118,17 @@ pub(crate) async fn security_middleware(
                 || path == "/api/auth/passkeys/login/start"
                 || path == "/api/auth/passkeys/login/finish"
                 || (path == "/api/theme" && *req.method() == Method::GET)
-                || path.starts_with("/api/webhooks/github/");
+                || path.starts_with("/api/webhooks/github/")
+                || (path == "/api/cluster/enroll" && *req.method() == Method::POST)
+                || (path == "/api/cluster/node-ws" && *req.method() == Method::GET);
 
             if !is_public_auth {
                 let sid_opt = extract_session_id(req.headers());
                 let touch = should_touch_session_activity(path, req.method());
-                let session_pair = sid_opt
-                    .as_deref()
-                    .and_then(|sid| state.auth.get_session_with_touch(sid, touch));
+                let session_pair = match sid_opt.as_deref() {
+                    Some(sid) => state.auth.get_session_with_touch(sid, touch).await,
+                    None => None,
+                };
 
                 let Some((session, _user)) = session_pair else {
                     let mut res = (
@@ -242,22 +246,24 @@ pub(crate) fn extract_session_id(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-pub(crate) fn current_user(state: &AppState, headers: &HeaderMap) -> Option<User> {
+pub(crate) async fn current_user(state: &AppState, headers: &HeaderMap) -> Option<User> {
     let sid = extract_session_id(headers)?;
-    state.auth.get_session(&sid).map(|(_, u)| u)
+    state.auth.get_session(&sid).await.map(|(_, u)| u)
 }
 
-pub(crate) fn require_current_user(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
-    current_user(state, headers).ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))
+pub(crate) async fn require_current_user(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
+    current_user(state, headers)
+        .await
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()))
 }
 
-pub(crate) fn verify_project_access(
+pub(crate) async fn verify_project_access(
     state: &AppState,
     headers: &HeaderMap,
     project_id: i64,
 ) -> Result<User, (StatusCode, String)> {
-    let u = require_current_user(state, headers)?;
-    if !u.can_access_project(project_id) {
+    let u = require_current_user(state, headers).await?;
+    if !state.auth.can_access_project_for_user(&u, project_id).await {
         return Err((
             StatusCode::FORBIDDEN,
             "Access denied: You are not assigned to this website.".to_string(),
@@ -266,8 +272,8 @@ pub(crate) fn verify_project_access(
     Ok(u)
 }
 
-pub(crate) fn verify_main_admin(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
-    let u = require_current_user(state, headers)?;
+pub(crate) async fn verify_main_admin(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
+    let u = require_current_user(state, headers).await?;
     if !u.is_main_admin {
         return Err((
             StatusCode::FORBIDDEN,
@@ -277,85 +283,91 @@ pub(crate) fn verify_main_admin(state: &AppState, headers: &HeaderMap) -> Result
     Ok(u)
 }
 
-pub(crate) fn verify_power(
+pub(crate) async fn verify_power(
     state: &AppState,
     headers: &HeaderMap,
     power: &str,
     project_id: Option<i64>,
 ) -> Result<User, (StatusCode, String)> {
-    let u = current_user(state, headers)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized session".to_string()))?;
-    if let Some(pid) = project_id {
-        if !u.can_access_project(pid) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Access denied: You are not assigned to this website.".to_string(),
-            ));
-        }
-    }
-    if !u.has_power(power) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            format!("Permission denied: Missing '{}' privilege.", power),
-        ));
-    }
-    Ok(u)
+    verify_any_power_for_scope(state, headers, &[power], "project", project_id).await
 }
 
-pub(crate) fn verify_any_power(
+pub(crate) async fn verify_any_power(
     state: &AppState,
     headers: &HeaderMap,
     powers: &[&str],
     project_id: Option<i64>,
 ) -> Result<User, (StatusCode, String)> {
+    verify_any_power_for_scope(state, headers, powers, "project", project_id).await
+}
+
+pub(crate) async fn verify_any_power_for_scope(
+    state: &AppState,
+    headers: &HeaderMap,
+    powers: &[&str],
+    scope_type: &str,
+    scope_id: Option<i64>,
+) -> Result<User, (StatusCode, String)> {
     let u = current_user(state, headers)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Unauthorized session".to_string()))?;
-    if let Some(pid) = project_id {
-        if !u.can_access_project(pid) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "Access denied: You are not assigned to this website.".to_string(),
-            ));
+    if scope_type == "project" {
+        if let Some(pid) = scope_id {
+            if !state.auth.can_access_project_for_user(&u, pid).await {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Access denied: You are not assigned to this website.".to_string(),
+                ));
+            }
         }
     }
-    if !u.has_any_power(powers) {
+    if !state
+        .auth
+        .has_any_power_for_scope(&u, powers, scope_type, scope_id)
+        .await
+    {
         return Err((
             StatusCode::FORBIDDEN,
-            format!("Permission denied: Requires one of [{}].", powers.join(", ")),
+            if powers.len() == 1 {
+                format!("Permission denied: Missing '{}' privilege.", powers[0])
+            } else {
+                format!("Permission denied: Requires one of [{}].", powers.join(", "))
+            },
         ));
     }
     Ok(u)
 }
 
-pub(crate) fn get_authorized_project(
+pub(crate) async fn get_authorized_project(
     state: &AppState,
     headers: &HeaderMap,
     power: &str,
     project_id: i64,
 ) -> Result<(User, crate::projects::Project), (StatusCode, String)> {
-    get_authorized_project_any(state, headers, &[power], project_id)
+    get_authorized_project_any(state, headers, &[power], project_id).await
 }
 
-pub(crate) fn get_authorized_project_any(
+pub(crate) async fn get_authorized_project_any(
     state: &AppState,
     headers: &HeaderMap,
     powers: &[&str],
     project_id: i64,
 ) -> Result<(User, crate::projects::Project), (StatusCode, String)> {
-    let actor = verify_any_power(state, headers, powers, Some(project_id))?;
+    let actor = verify_any_power(state, headers, powers, Some(project_id)).await?;
     let p = state
         .projects
         .get(project_id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
     Ok((actor, p))
 }
 
-pub(crate) fn log_audit(state: &AppState, actor: &str, action: &str, target: Option<&str>, detail: Option<&str>) {
-    log_audit_project(state, None, actor, action, target, detail);
+pub(crate) async fn log_audit(state: &AppState, actor: &str, action: &str, target: Option<&str>, detail: Option<&str>) {
+    log_audit_project(state, None, actor, action, target, detail).await;
 }
 
-pub(crate) fn create_authenticated_response(
+pub(crate) async fn create_authenticated_response(
     state: &AppState,
     headers: &HeaderMap,
     user: User,
@@ -363,10 +375,11 @@ pub(crate) fn create_authenticated_response(
     let session = state
         .auth
         .create_session(user.id)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create session".to_string()))?;
 
-    let active_sessions = state.auth.count_active_sessions(user.id);
-    let passkey_count = state.auth.count_user_passkeys(user.id);
+    let active_sessions = state.auth.count_active_sessions(user.id).await;
+    let passkey_count = state.auth.count_user_passkeys(user.id).await;
     let secure_attr = if is_https_request(headers, state.auth.force_secure_cookies) {
         "; Secure"
     } else {
@@ -501,17 +514,18 @@ where
     json_bytes_response(bytes, false, "MISS")
 }
 
-pub(crate) fn fetch_project(
+pub(crate) async fn fetch_project(
     projects: &crate::projects::Projects,
     id: i64,
 ) -> Result<crate::projects::Project, (StatusCode, String)> {
     projects
         .get(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Project not found".to_string()))
 }
 
-pub(crate) fn verify_current_user_password(
+pub(crate) async fn verify_current_user_password(
     state: &AppState,
     user: &User,
     password: &str,
@@ -519,6 +533,7 @@ pub(crate) fn verify_current_user_password(
     let (_, current_hash) = state
         .auth
         .get_user_by_username(&user.username)
+        .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found".to_string()))?;
 
     if !verify_password(password, &current_hash) {
@@ -527,7 +542,7 @@ pub(crate) fn verify_current_user_password(
     Ok(())
 }
 
-pub(crate) fn apply_2fa_state_change(
+pub(crate) async fn apply_2fa_state_change(
     state: &AppState,
     username: &str,
     audit_desc: &str,
@@ -540,11 +555,12 @@ pub(crate) fn apply_2fa_state_change(
         "user.update",
         Some(username),
         Some(audit_desc),
-    );
+    )
+    .await;
 }
 
-pub(crate) fn insert_success_release(
-    conn: &rusqlite::Connection,
+pub(crate) async fn insert_success_release(
+    db: &crate::db::DbPool,
     project_id: i64,
     sha: &str,
     short_sha: &str,
@@ -552,13 +568,22 @@ pub(crate) fn insert_success_release(
     author: &str,
     dir: &str,
     ts: i64,
-) -> rusqlite::Result<i64> {
-    conn.execute(
-        "INSERT INTO releases(project_id, sha, short_sha, message, author, committed_at, dir, status, build_status, health_status, created_at, deployed_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, 'succeeded', 'success', 'ok', ?, ?)",
-        rusqlite::params![project_id, sha, short_sha, message, author, ts, dir, ts, ts],
-    )?;
-    Ok(conn.last_insert_rowid())
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO releases(project_id, sha, short_sha, message, author, committed_at, dir, status, build_status, health_status, created_at, deployed_at) \
+         VALUES($1, $2, $3, $4, $5, $6, $7, 'succeeded', 'success', 'ok', $8, $9) RETURNING id",
+    )
+    .bind(project_id)
+    .bind(sha)
+    .bind(short_sha)
+    .bind(message)
+    .bind(author)
+    .bind(ts)
+    .bind(dir)
+    .bind(ts)
+    .bind(ts)
+    .fetch_one(db)
+    .await
 }
 
 pub(crate) fn trigger_background_deploy(deployer: Arc<crate::deployer::Deployer>, project_id: i64, dep_id: i64) {
@@ -567,7 +592,7 @@ pub(crate) fn trigger_background_deploy(deployer: Arc<crate::deployer::Deployer>
     });
 }
 
-pub(crate) fn log_audit_project(
+pub(crate) async fn log_audit_project(
     state: &AppState,
     project_id: Option<i64>,
     actor: &str,
@@ -575,12 +600,17 @@ pub(crate) fn log_audit_project(
     target: Option<&str>,
     detail: Option<&str>,
 ) {
-    let conn = state.db.lock().unwrap();
-    conn.execute(
-        "INSERT INTO audit(project_id, ts, actor, action, target, detail, ip) VALUES(?, ?, ?, ?, ?, ?, '127.0.0.1')",
-        rusqlite::params![project_id, now(), actor, action, target, detail],
+    let _ = sqlx::query(
+        "INSERT INTO audit(project_id, ts, actor, action, target, detail, ip) VALUES($1, $2, $3, $4, $5, $6, '127.0.0.1')",
     )
-    .ok();
+    .bind(project_id)
+    .bind(now())
+    .bind(actor)
+    .bind(action)
+    .bind(target)
+    .bind(detail)
+    .execute(&state.db)
+    .await;
 }
 
 
@@ -652,5 +682,62 @@ mod security_tests {
         assert!(!should_touch_session_activity("/api/auth/presence", &Method::POST));
         assert!(should_touch_session_activity("/api/projects", &Method::GET));
         assert!(should_touch_session_activity("/api/projects/1/deploy", &Method::POST));
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn tests_state_helper() -> AppState {
+    use std::sync::Arc;
+
+    let base = std::env::temp_dir().join(format!(
+        "webdep_test_state_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let db = crate::pg_control::test_db::isolated_pool().await;
+    let vault = Arc::new(crate::vault::Vault::new(&base).unwrap());
+    let auth = Arc::new(crate::auth::Auth::new(db.clone(), 3600));
+    auth.ensure_admin().await;
+    let projects = Arc::new(crate::projects::Projects::new(db.clone(), vault.clone()));
+    let logs = Arc::new(crate::logs::Logs::new(db.clone()));
+    let monitor = Arc::new(crate::monitor::Monitor::new());
+    let cache = Arc::new(crate::cache::AppCache::new());
+    let caddy = Arc::new(crate::caddy::Caddy::new(&base));
+    let runtime = Arc::new(crate::runtime::Runtime::new(db.clone(), (*logs).clone()));
+    let deployer = Arc::new(
+        crate::deployer::Deployer::new(
+            db.clone(),
+            (*logs).clone(),
+            projects.clone(),
+            runtime.clone(),
+            cache.clone(),
+        )
+        .await,
+    );
+    let databases = Arc::new(crate::databases::Databases::new(
+        db.clone(),
+        vault,
+        (*logs).clone(),
+        &base,
+    ));
+    let updater = Arc::new(crate::updater::Updater::with_db(db.clone()));
+    let cluster = Arc::new(crate::cluster::ClusterManager::new(db.clone(), base.clone()));
+
+    AppState {
+        db,
+        auth,
+        projects,
+        logs,
+        monitor,
+        cache,
+        caddy,
+        runtime,
+        deployer,
+        databases,
+        updater,
+        cluster,
     }
 }

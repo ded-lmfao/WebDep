@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod cache;
 mod caddy;
+mod cluster;
 mod config;
 mod databases;
 mod db;
@@ -10,8 +11,10 @@ mod git;
 mod logs;
 mod monitor;
 mod monitor_net;
+mod pg_control;
 mod projects;
 mod runtime;
+mod sqlite_import;
 mod static_assets;
 mod updater;
 mod vault;
@@ -25,6 +28,9 @@ use crate::api::{create_router, AppState};
 use crate::auth::Auth;
 use crate::cache::AppCache;
 use crate::caddy::Caddy;
+use crate::cluster::{
+    detect_hostname, enroll_with_core, run_node_agent, ClusterManager, JoinOptions,
+};
 use crate::config::Config;
 use crate::db::open_db;
 use crate::deployer::Deployer;
@@ -34,6 +40,57 @@ use crate::projects::Projects;
 use crate::runtime::Runtime;
 use crate::updater::Updater;
 use crate::vault::Vault;
+
+#[derive(Default)]
+struct CliOptions {
+    core_only: bool,
+    node_mode: bool,
+    pair_local: bool,
+    enroll_only: bool,
+    join_url: Option<String>,
+    token: Option<String>,
+    name: Option<String>,
+    region: Option<String>,
+    public_ip: Option<String>,
+    wg_port: u16,
+}
+
+fn parse_cli_options() -> Result<CliOptions, String> {
+    let mut opts = CliOptions::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--core" => opts.core_only = true,
+            "--node" => opts.node_mode = true,
+            "--pair-local" => opts.pair_local = true,
+            "--enroll-only" => opts.enroll_only = true,
+            "--join" => {
+                opts.join_url = Some(args.next().ok_or("--join requires a Core URL")?);
+            }
+            "--token" => {
+                opts.token = Some(args.next().ok_or("--token requires an enrollment token")?);
+            }
+            "--name" => {
+                opts.name = Some(args.next().ok_or("--name requires a node name")?);
+            }
+            "--region" => {
+                opts.region = Some(args.next().ok_or("--region requires a region")?);
+            }
+            "--public-ip" => {
+                opts.public_ip = Some(args.next().ok_or("--public-ip requires an IP/host")?);
+            }
+            "--wg-port" => {
+                let raw = args.next().ok_or("--wg-port requires a UDP port")?;
+                opts.wg_port = raw.parse::<u16>().map_err(|_| format!("Invalid --wg-port '{raw}'"))?;
+            }
+            _ => {}
+        }
+    }
+    if opts.core_only && opts.node_mode {
+        return Err("Cannot specify both --core and --node in the same process".to_string());
+    }
+    Ok(opts)
+}
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -69,10 +126,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = Config::from_env();
+    let cli = parse_cli_options().map_err(|e| format!("CLI error: {e}"))?;
+
+    if std::env::args().nth(1).as_deref() == Some("--import-sqlite") {
+        let sqlite_path = std::env::args()
+            .nth(2)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.data_dir.join("webdep.sqlite"));
+        let overwrite = std::env::args().any(|a| a == "--overwrite");
+        let (db, handle) = open_db(&config.data_dir).await?;
+        let report =
+            crate::sqlite_import::import_sqlite_into_postgres(&db, &sqlite_path, overwrite).await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if let Some(h) = handle {
+            h.stop().await;
+        }
+        return Ok(());
+    }
+
+    // Pure Web-Node worker mode: zero PostgreSQL dependency, stores state in data/node-state.json
+    if cli.node_mode {
+        info!("Starting WebDep in Web-Node worker mode");
+        info!("Data directory: {}", config.data_dir.display());
+        if let Some(join_url) = cli.join_url.clone() {
+            let token = cli
+                .token
+                .clone()
+                .ok_or("--node --join requires --token <ENROLL_TOKEN>")?;
+            let manifest = enroll_with_core(
+                &config.data_dir,
+                JoinOptions {
+                    core_url: join_url,
+                    token,
+                    name: cli.name.clone(),
+                    region: cli.region.clone(),
+                    public_ip: cli.public_ip.clone(),
+                    wg_port: cli.wg_port,
+                },
+            )
+            .await?;
+            println!(
+                "Enrolled Web-Node '{}' (#{}, region '{}', mesh {}) into Core ({})",
+                manifest.name, manifest.node_id, manifest.region, manifest.mesh_ip, manifest.core_url
+            );
+            if cli.enroll_only {
+                return Ok(());
+            }
+        }
+        run_node_agent(config.data_dir.clone()).await;
+        return Ok(());
+    }
+
     info!("Starting WebDep — Multi-Website Deployment & Hosting Platform");
     info!("Data directory: {}", config.data_dir.display());
 
-    let db = open_db(&config.data_dir)?;
+    let (db, control_pg_handle) = open_db(&config.data_dir).await?;
+    if let Some(ref h) = control_pg_handle {
+        tracing::info!("Local control-plane PostgreSQL active on 127.0.0.1:{}", h.port);
+    }
     let vault = Arc::new(Vault::new(&config.data_dir)?);
     let mut auth_mgr = Auth::with_timeouts(
         db.clone(),
@@ -81,22 +192,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     auth_mgr.force_secure_cookies = config.force_secure_cookies;
     let auth = Arc::new(auth_mgr);
+    auth.ensure_admin().await;
+    auth.start_revocation_listener();
     let projects = Arc::new(Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(Logs::new(db.clone()));
-    tracing::info!("WebDep engine initialized (SQLite database connected and live log stream active)");
+    let _ = crate::git::Git::read_github_tokens(&db).await;
+    tracing::info!("WebDep engine initialized (PostgreSQL control DB connected and live log stream active)");
     let monitor = Arc::new(Monitor::new());
     monitor.start_background_sampler();
     let cache = Arc::new(AppCache::new());
     let caddy = Arc::new(Caddy::new(&config.data_dir));
     let runtime = Arc::new(Runtime::new(db.clone(), (*logs).clone()));
-    runtime.start_background_monitor();
-    let deployer = Arc::new(Deployer::new(
-        db.clone(),
-        (*logs).clone(),
-        projects.clone(),
-        runtime.clone(),
-        cache.clone(),
-    ));
+    runtime.start_background_monitor_with_restarts(Some(projects.clone()));
+    let deployer = Arc::new(
+        Deployer::new(
+            db.clone(),
+            (*logs).clone(),
+            projects.clone(),
+            runtime.clone(),
+            cache.clone(),
+        )
+        .await,
+    );
     let databases = Arc::new(crate::databases::Databases::new(
         db.clone(),
         vault.clone(),
@@ -104,8 +221,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &config.data_dir,
     ));
     let updater = Arc::new(Updater::with_db(db.clone()));
+    let cluster = Arc::new(ClusterManager::new(db.clone(), config.data_dir.clone()));
 
-    // Periodic memory maintenance: prunes expired cache, purges expired sessions, shrinks SQLite pager, and trims Linux heap
+    let local_core_http = format!("http://127.0.0.1:{}", config.port);
+    let local_core_ws = format!("ws://127.0.0.1:{}/api/cluster/node-ws", config.port);
+    let local_hostname = cli.name.clone().unwrap_or_else(detect_hostname);
+
+    if cli.pair_local {
+        let manifest = cluster
+            .pair_local_node(&local_core_http, &local_core_ws, &local_hostname)
+            .await?;
+        println!(
+            "Paired local control node '{}' (#{}, mesh {}) -> {}/node-state.json",
+            manifest.name,
+            manifest.node_id,
+            manifest.mesh_ip,
+            config.data_dir.display()
+        );
+        if let Some(h) = control_pg_handle {
+            h.stop().await;
+        }
+        return Ok(());
+    }
+
+    crate::cluster::shift::fail_stale_interrupted_migrations(&db).await;
+    cluster.start_staleness_reaper();
+    if !cli.core_only {
+        match cluster
+            .pair_local_node(&local_core_http, &local_core_ws, &local_hostname)
+            .await
+        {
+            Ok(_) => {
+                let node_data_dir = config.data_dir.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                    run_node_agent(node_data_dir).await;
+                });
+            }
+            Err(e) => {
+                tracing::warn!("Could not auto-pair local Web-Node: {}", e);
+            }
+        }
+    }
+
+    // Periodic memory maintenance: prunes expired cache, purges expired sessions, trims old logs, and trims Linux heap
     {
         let mem_cache = cache.clone();
         let mem_db = db.clone();
@@ -115,21 +274,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             loop {
                 interval.tick().await;
                 mem_cache.prune_expired();
-                mem_auth.purge_expired_sessions();
+                mem_auth.purge_expired_sessions().await;
                 mem_auth.prune_in_memory();
-                if let Ok(conn) = mem_db.lock() {
-                    crate::db::prune_old_logs(&conn, 20_000);
-                    crate::db::shrink_memory(&conn);
-                }
+                crate::db::prune_old_logs(&mem_db, 20_000).await;
                 trim_process_heap();
             }
         });
     }
 
-    // Auto-resume any websites marked 'running' in SQLite on platform startup,
+    // Auto-resume any websites marked 'running' in PostgreSQL on platform startup,
     // and ensure any websites marked 'stopped' have no orphan processes left on their ports
     {
         let resume_projects = projects.clone();
+        let resume_db = db.clone();
         let resume_runtime = runtime.clone();
         let resume_logs = logs.clone();
         let platform_port = config.port;
@@ -137,9 +294,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             resume_runtime.allow_firewall_port(80, None);
             resume_runtime.allow_firewall_port(443, None);
             resume_runtime.allow_firewall_port(platform_port, None);
-            if let Ok(list) = resume_projects.list() {
-                for p in list {
-                    let _ = resume_runtime.ensure_container(&p);
+            // Only workloads placed on this host: projects on remote Web-Nodes are resumed by those
+            // nodes (see project.resume), never started or killed here.
+            let local_node_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM nodes WHERE is_local = TRUE")
+                .fetch_all(&resume_db)
+                .await
+                .unwrap_or_default();
+            if let Ok(list) = resume_projects.list().await {
+                for p in list.into_iter().filter(|p| p.node_id.map_or(true, |n| local_node_ids.contains(&n))) {
+                    let _ = resume_runtime.ensure_container(&p).await;
                     if p.app_status == "running" {
                         // Check if the workload is ALREADY running from before the panel restart
                         let is_already_running = if let Some(pid) = p.app_pid {
@@ -151,15 +314,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         };
 
                         if is_already_running {
-                            tracing::info!(
-                                "Workload '{}' (PID: {:?}) is already running; preserving zero downtime",
-                                p.name,
-                                p.app_pid
+                            // The process outlived the previous panel process (e.g. KillMode=process), but
+                            // its stdout/stderr were pipes into that panel and are now closed: logs are
+                            // lost and many servers fail on their next write (Python's http.server answers
+                            // nothing; Node may crash on EPIPE). Restart it under this panel instead of
+                            // adopting a half-broken process.
+                            let _ = resume_runtime.kill_project_everything(&p).await;
+                            resume_logs.add(
+                                Some(p.id),
+                                None,
+                                "system",
+                                "info",
+                                &format!(
+                                    "Restarting '{}' after the panel restarted so its output is captured again",
+                                    p.name
+                                ),
                             );
-                            continue;
                         }
 
-                        let env = resume_projects.get_env_map(p.id);
+                        let env = resume_projects.get_env_map(p.id).await;
                         if let Err(e) = resume_runtime.start_project(&p, env, None).await {
                             resume_logs.add(
                                 Some(p.id),
@@ -188,7 +361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Enforce max-5 deployment retention cleanup across existing projects at startup.
-    crate::deployer::retention::prune_all_projects(&db, crate::deployer::MAX_DEPLOYMENT_RECORDS);
+    crate::deployer::retention::prune_all_projects(&db, crate::deployer::MAX_DEPLOYMENT_RECORDS).await;
 
     let state = AppState {
         db,
@@ -202,13 +375,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         cache,
         databases,
         updater,
+        cluster,
     };
 
     let app = create_router(state);
 
     // Background binary hot-reload watcher: if target/release/webdep.exe is rebuilt on disk,
     // automatically hand off to the new binary so changes take effect without manual restarts.
-    tokio::spawn(async move {
+    // Not under systemd (INVOCATION_ID is set for services): there the hand-off makes the managed
+    // process exit 0 while an unmanaged copy keeps running, which systemd treats as a clean stop
+    // (no restart, remaining processes killed) and which races with `systemctl restart`.
+    let under_systemd = std::env::var_os("INVOCATION_ID").is_some();
+    if !under_systemd { tokio::spawn(async move {
         let exe_path = std::path::PathBuf::from("target")
             .join("release")
             .join(if cfg!(windows) { "webdep.exe" } else { "webdep" });
@@ -241,7 +419,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
         }
-    });
+    }); }
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
@@ -265,6 +443,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
     axum::serve(listener, app).await?;
+    if let Some(h) = control_pg_handle {
+        h.stop().await;
+    }
 
     Ok(())
 }

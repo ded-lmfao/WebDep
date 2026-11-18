@@ -26,6 +26,8 @@ import { loadMonitorView } from './js/settings.js';
 // Explorer & Logs Subsystems (Initialize listeners & exports)
 import './js/files.js';
 import './js/logs.js';
+import './js/cluster.js';
+import './js/modules.js';
 
 // ============================================================================
 // Global Polling & Live Updates (Low Resource & Page Visibility Aware)
@@ -41,13 +43,18 @@ async function pollTick() {
       return;
     }
 
-    // Keep sidebar badges (databases & projects & services) up-to-date on non-overview tabs
+    // Keep sidebar badges (databases, projects, services & nodes) up-to-date on non-overview tabs
     await Promise.all([
       loadProjects().catch(() => {}),
-      loadDatabases().catch(() => {})
+      loadDatabases().catch(() => {}),
+      window.loadNodes ? window.loadNodes().catch(() => {}) : Promise.resolve()
     ]);
 
-    if (state.currentView === 'services') {
+    if (state.currentView === 'nodes') {
+      if (window.loadNodesView) await window.loadNodesView();
+    } else if (state.currentView === 'modules') {
+      if (window.loadModulesView) await window.loadModulesView();
+    } else if (state.currentView === 'services') {
       renderServicesList();
     } else if (state.currentView === 'projects') {
       renderProjectsList();
@@ -138,10 +145,64 @@ document.querySelectorAll('[data-close-modal]').forEach((btn) => {
   });
 });
 
-window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    document.querySelectorAll('.modal-overlay.active').forEach((m) => animateModalClose(m));
+// ---------- Action menus (".menu-wrap" > [data-menu-toggle] + ".menu") ----------
+function closeAllMenus(except = null) {
+  document.querySelectorAll('.menu-wrap.open').forEach((wrap) => {
+    if (wrap === except) return;
+    wrap.classList.remove('open');
+    wrap.querySelector('[data-menu-toggle]')?.setAttribute('aria-expanded', 'false');
+  });
+}
+
+document.addEventListener('click', (e) => {
+  const toggle = e.target.closest('[data-menu-toggle]');
+  if (toggle) {
+    const wrap = toggle.closest('.menu-wrap');
+    const willOpen = !wrap.classList.contains('open');
+    closeAllMenus(wrap);
+    wrap.classList.toggle('open', willOpen);
+    toggle.setAttribute('aria-expanded', String(willOpen));
+    if (willOpen) {
+      // Keep the menu inside the viewport on narrow screens.
+      const menu = wrap.querySelector('.menu');
+      if (menu) {
+        menu.classList.remove('menu-left');
+        const r = menu.getBoundingClientRect();
+        if (r.left < 8) menu.classList.add('menu-left');
+        menu.querySelector('.menu-item:not([disabled])')?.focus({ preventScroll: true });
+      }
+    }
+    return;
   }
+  if (e.target.closest('.menu .menu-item')) {
+    closeAllMenus();
+    return;
+  }
+  if (!e.target.closest('.menu')) closeAllMenus();
+});
+
+document.addEventListener('keydown', (e) => {
+  const menu = e.target.closest?.('.menu-wrap.open .menu');
+  if (!menu || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+  const items = [...menu.querySelectorAll('.menu-item:not([disabled])')];
+  const idx = items.indexOf(document.activeElement);
+  const next = e.key === 'ArrowDown' ? (idx + 1) % items.length : (idx - 1 + items.length) % items.length;
+  items[next]?.focus();
+  e.preventDefault();
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const openMenu = document.querySelector('.menu-wrap.open');
+  if (openMenu) {
+    closeAllMenus();
+    openMenu.querySelector('[data-menu-toggle]')?.focus();
+    return;
+  }
+  // Close only the dialog on top (the last one opened in DOM order wins when stacked).
+  const open = [...document.querySelectorAll('.modal-overlay.active')];
+  const top = open.sort((a, b) => (Number(getComputedStyle(a).zIndex) || 0) - (Number(getComputedStyle(b).zIndex) || 0)).pop();
+  if (top) animateModalClose(top);
 });
 
 

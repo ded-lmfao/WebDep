@@ -4,8 +4,8 @@ pub mod security;
 pub use binaries::*;
 pub use security::*;
 
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
@@ -35,6 +35,7 @@ pub struct ManagedDatabase {
     pub data_dir: String,
     pub linked_project_id: Option<i64>,
     pub linked_project_name: Option<String>,
+    pub node_id: Option<i64>,
     pub internal_url: String,
     pub external_url: String,
     pub psql_command: String,
@@ -52,6 +53,7 @@ pub struct DatabaseOverviewSummary {
     pub container_id: Option<String>,
     pub data_dir: String,
     pub linked_project_id: Option<i64>,
+    pub node_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +145,7 @@ struct RawDatabaseRow {
     created_at: i64,
     updated_at: i64,
     started_at_db: Option<i64>,
+    node_id: Option<i64>,
 }
 
 impl Databases {
@@ -166,27 +169,28 @@ impl Databases {
         }
     }
 
-    fn read_raw_row(r: &rusqlite::Row) -> Result<RawDatabaseRow, rusqlite::Error> {
+    fn read_raw_row(r: &sqlx::postgres::PgRow) -> Result<RawDatabaseRow, sqlx::Error> {
         Ok(RawDatabaseRow {
-            id: r.get(0)?,
-            name: r.get(1)?,
-            engine: r.get(2)?,
-            db_name: r.get(3)?,
-            db_user: r.get(4)?,
-            enc_pass: r.get(5)?,
-            port: r.get(6)?,
-            is_superuser: r.get::<_, i64>(7)? != 0,
-            access_mode: r.get(8)?,
-            allowed_ips: r.get(9)?,
-            status: r.get(10)?,
-            container_id: r.get(11)?,
-            data_dir: r.get(12)?,
-            linked_project_id: r.get(13)?,
-            linked_project_name: r.get(14)?,
-            domain: r.get::<_, Option<String>>(15)?.unwrap_or_default(),
-            created_at: r.get(16)?,
-            updated_at: r.get(17)?,
-            started_at_db: r.get(18)?,
+            id: r.try_get(0)?,
+            name: r.try_get(1)?,
+            engine: r.try_get(2)?,
+            db_name: r.try_get(3)?,
+            db_user: r.try_get(4)?,
+            enc_pass: r.try_get(5)?,
+            port: r.try_get::<i32, _>(6)? as u16,
+            is_superuser: r.try_get(7)?,
+            access_mode: r.try_get(8)?,
+            allowed_ips: r.try_get(9)?,
+            status: r.try_get(10)?,
+            container_id: r.try_get(11)?,
+            data_dir: r.try_get(12)?,
+            linked_project_id: r.try_get(13)?,
+            linked_project_name: r.try_get(14)?,
+            domain: r.try_get::<Option<String>, _>(15)?.unwrap_or_default(),
+            created_at: r.try_get(16)?,
+            updated_at: r.try_get(17)?,
+            started_at_db: r.try_get(18)?,
+            node_id: r.try_get(19)?,
         })
     }
 
@@ -233,6 +237,7 @@ impl Databases {
             data_dir: row.data_dir,
             linked_project_id: row.linked_project_id,
             linked_project_name: row.linked_project_name,
+            node_id: row.node_id,
             internal_url,
             external_url,
             psql_command,
@@ -242,82 +247,85 @@ impl Databases {
     }
 
     #[allow(dead_code)]
-    pub fn list(&self) -> Result<Vec<ManagedDatabase>, String> {
-        self.query_databases("ORDER BY d.id DESC", rusqlite::params![], true)
+    pub async fn list(&self) -> Result<Vec<ManagedDatabase>, String> {
+        self.query_databases(None, true).await
     }
 
-    pub fn list_with_secrets(&self, include_secrets: bool) -> Result<Vec<ManagedDatabase>, String> {
-        self.query_databases("ORDER BY d.id DESC", rusqlite::params![], include_secrets)
+    pub async fn list_with_secrets(&self, include_secrets: bool) -> Result<Vec<ManagedDatabase>, String> {
+        self.query_databases(None, include_secrets).await
     }
 
-    pub fn list_overview_summaries(&self) -> Result<Vec<DatabaseOverviewSummary>, String> {
-        let conn = self.db.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT d.id, d.name, d.port, d.domain, d.status, d.container_id, d.data_dir, d.linked_project_id
-                 FROM databases d
-                 ORDER BY d.id DESC",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params![], |r| {
+    pub async fn list_overview_summaries(&self) -> Result<Vec<DatabaseOverviewSummary>, String> {
+        let rows = sqlx::query(
+            "SELECT d.id, d.name, d.port, d.domain, d.status, d.container_id, d.data_dir, d.linked_project_id, d.node_id \
+             FROM databases d ORDER BY d.id DESC",
+        )
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        rows.into_iter()
+            .map(|r| {
                 Ok(DatabaseOverviewSummary {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    port: r.get::<_, i64>(2)? as u16,
-                    domain: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    status: r.get(4)?,
-                    container_id: r.get(5)?,
-                    data_dir: r.get(6)?,
-                    linked_project_id: r.get(7)?,
+                    id: r.try_get(0).map_err(|e| e.to_string())?,
+                    name: r.try_get(1).map_err(|e| e.to_string())?,
+                    port: r.try_get::<i32, _>(2).map_err(|e| e.to_string())? as u16,
+                    domain: r.try_get::<Option<String>, _>(3).map_err(|e| e.to_string())?.unwrap_or_default(),
+                    status: r.try_get(4).map_err(|e| e.to_string())?,
+                    container_id: r.try_get(5).map_err(|e| e.to_string())?,
+                    data_dir: r.try_get(6).map_err(|e| e.to_string())?,
+                    linked_project_id: r.try_get(7).map_err(|e| e.to_string())?,
+                    node_id: r.try_get(8).map_err(|e| e.to_string())?,
                 })
             })
-            .map_err(|e| e.to_string())?;
-        Ok(rows.flatten().collect())
+            .collect()
     }
 
-    pub fn get(&self, id: i64) -> Result<Option<ManagedDatabase>, String> {
-        Ok(self.query_databases("WHERE d.id = ? LIMIT 1", params![id], true)?.into_iter().next())
+    pub async fn get(&self, id: i64) -> Result<Option<ManagedDatabase>, String> {
+        Ok(self.query_databases(Some(id), true).await?.into_iter().next())
     }
 
-    fn query_databases<P: rusqlite::Params>(
+    async fn query_databases(
         &self,
-        clause: &str,
-        params: P,
+        filter_id: Option<i64>,
         include_secrets: bool,
     ) -> Result<Vec<ManagedDatabase>, String> {
-        let raw_rows: Vec<RawDatabaseRow> = {
-            let conn = self.db.lock().map_err(|e| e.to_string())?;
-            let sql = format!(
-                "SELECT d.id, d.name, d.engine, d.db_name, d.db_user, d.db_password, d.port,
-                        d.is_superuser, d.access_mode, d.allowed_ips, d.status, d.container_id,
-                        d.data_dir, d.linked_project_id, p.name, d.domain, d.created_at, d.updated_at,
-                        d.started_at
-                 FROM databases d
-                 LEFT JOIN projects p ON p.id = d.linked_project_id
-                 {}",
-                clause
-            );
-            let mut stmt = conn.prepare_cached(&sql).map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map(params, Self::read_raw_row)
-                .map_err(|e| e.to_string())?;
-            rows.flatten().collect()
-        };
+        let base_sql = "SELECT d.id, d.name, d.engine, d.db_name, d.db_user, d.db_password, d.port, \
+                               d.is_superuser, d.access_mode, d.allowed_ips, d.status, d.container_id, \
+                               d.data_dir, d.linked_project_id, p.name, d.domain, d.created_at, d.updated_at, \
+                               d.started_at, d.node_id \
+                        FROM databases d \
+                        LEFT JOIN projects p ON p.id = d.linked_project_id";
 
-        // Decrypt credentials and check postmaster.pid outside the DB mutex lock.
+        let rows = if let Some(id) = filter_id {
+            sqlx::query(&format!("{} WHERE d.id = $1 LIMIT 1", base_sql))
+                .bind(id)
+                .fetch_all(&self.db)
+                .await
+        } else {
+            sqlx::query(&format!("{} ORDER BY d.id DESC", base_sql))
+                .fetch_all(&self.db)
+                .await
+        }
+        .map_err(|e| e.to_string())?;
+
+        let raw_rows: Vec<RawDatabaseRow> = rows
+            .iter()
+            .filter_map(|r| Self::read_raw_row(r).ok())
+            .collect();
+
         Ok(raw_rows
             .into_iter()
             .map(|r| self.hydrate_row(r, include_secrets))
             .collect())
     }
 
-    pub fn get_logs(&self, id: i64) -> Result<String, String> {
-        let db_rec = self.get(id)?.ok_or_else(|| "Database not found".to_string())?;
+    pub async fn get_logs(&self, id: i64) -> Result<String, String> {
+        let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
         let db_dir = PathBuf::from(&db_rec.data_dir);
         let log_file = db_dir.join("postgresql.log");
         if log_file.is_file() {
-            match std::fs::read_to_string(&log_file) {
+            match tokio::fs::read_to_string(&log_file).await {
                 Ok(content) => {
                     let trimmed = content.trim();
                     if trimmed.is_empty() {
@@ -362,10 +370,7 @@ impl Databases {
         let domain = input.domain.unwrap_or_default().trim().to_string();
         let is_superuser = input.is_superuser.unwrap_or(false);
 
-        let port = {
-            let conn = self.db.lock().map_err(|e| e.to_string())?;
-            crate::db::allocate_global_unique_port(&conn, input.port, 5432, None, None)?
-        };
+        let port = crate::db::allocate_global_unique_port(&self.db, input.port, 5432, None, None).await?;
 
         let enc_password = self
             .vault
@@ -373,42 +378,36 @@ impl Databases {
             .map_err(|e| format!("Vault encryption error: {}", e))?;
 
         let ts = now();
-        let id = {
-            let conn = self.db.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "INSERT INTO databases(name, engine, db_name, db_user, db_password, port, is_superuser, access_mode, allowed_ips, domain, status, data_dir, linked_project_id, created_at, updated_at)
-                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'stopped', '', ?, ?, ?)",
-                params![
-                    name,
-                    engine,
-                    db_name,
-                    db_user,
-                    enc_password,
-                    port,
-                    if is_superuser { 1 } else { 0 },
-                    access_mode,
-                    allowed_ips,
-                    domain,
-                    input.linked_project_id,
-                    ts,
-                    ts,
-                ],
-            )
-            .map_err(|e| e.to_string())?;
-            conn.last_insert_rowid()
-        };
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO databases(name, engine, db_name, db_user, db_password, port, is_superuser, access_mode, allowed_ips, domain, status, data_dir, linked_project_id, created_at, updated_at) \
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'stopped', '', $11, $12, $13) RETURNING id",
+        )
+        .bind(name)
+        .bind(&engine)
+        .bind(db_name)
+        .bind(db_user)
+        .bind(&enc_password)
+        .bind(port as i32)
+        .bind(is_superuser)
+        .bind(&access_mode)
+        .bind(&allowed_ips)
+        .bind(&domain)
+        .bind(input.linked_project_id)
+        .bind(ts)
+        .bind(ts)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| e.to_string())?;
 
         let db_dir = self.base_dir.join(format!("db-{}", id));
         let data_dir_str = db_dir.to_string_lossy().to_string();
         let _ = tokio::fs::create_dir_all(&db_dir).await;
 
-        {
-            let conn = self.db.lock().map_err(|e| e.to_string())?;
-            let _ = conn.execute(
-                "UPDATE databases SET data_dir = ? WHERE id = ?",
-                params![data_dir_str, id],
-            );
-        }
+        let _ = sqlx::query("UPDATE databases SET data_dir = $1 WHERE id = $2")
+            .bind(&data_dir_str)
+            .bind(id)
+            .execute(&self.db)
+            .await;
 
         // Apply network firewall rules (UFW/iptables)
         Self::sync_firewall_rules(port, &access_mode, &allowed_ips).await;
@@ -430,28 +429,36 @@ impl Databases {
         {
             Ok(cid) => {
                 let started_ts = read_pg_started_at(&db_dir.join("data")).unwrap_or_else(now);
-                let conn = self.db.lock().map_err(|e| e.to_string())?;
-                let _ = conn.execute(
-                    "UPDATE databases SET status = 'running', container_id = ?, started_at = ?, updated_at = ? WHERE id = ?",
-                    params![cid, started_ts, now(), id],
-                );
+                let _ = sqlx::query(
+                    "UPDATE databases SET status = 'running', container_id = $1, started_at = $2, updated_at = $3 WHERE id = $4",
+                )
+                .bind(cid)
+                .bind(started_ts)
+                .bind(now())
+                .bind(id)
+                .execute(&self.db)
+                .await;
             }
             Err(err) => {
                 warn!("Database process container start failed: {}", err);
-                let conn = self.db.lock().map_err(|e| e.to_string())?;
-                let _ = conn.execute(
-                    "UPDATE databases SET status = 'error', updated_at = ? WHERE id = ?",
-                    params![now(), id],
-                );
+                let _ = sqlx::query(
+                    "UPDATE databases SET status = 'error', updated_at = $1 WHERE id = $2",
+                )
+                .bind(now())
+                .bind(id)
+                .execute(&self.db)
+                .await;
                 return Err(err);
             }
         }
 
-        self.get(id)?.ok_or_else(|| "Failed to retrieve created database".to_string())
+        self.get(id)
+            .await?
+            .ok_or_else(|| "Failed to retrieve created database".to_string())
     }
 
     pub async fn start(&self, id: i64) -> Result<(), String> {
-        let db_rec = self.get(id)?.ok_or_else(|| "Database not found".to_string())?;
+        let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
         let password = db_rec.db_password.unwrap_or_default();
         let db_dir = PathBuf::from(&db_rec.data_dir);
 
@@ -465,11 +472,15 @@ impl Databases {
                 .started_at
                 .or_else(|| read_pg_started_at(&db_dir.join("data")))
                 .unwrap_or_else(now);
-            let conn = self.db.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "UPDATE databases SET status = 'running', container_id = ?, started_at = ?, updated_at = ? WHERE id = ?",
-                params![format!("pid-{}", pid), started_ts, now(), id],
+            sqlx::query(
+                "UPDATE databases SET status = 'running', container_id = $1, started_at = $2, updated_at = $3 WHERE id = $4",
             )
+            .bind(format!("pid-{}", pid))
+            .bind(started_ts)
+            .bind(now())
+            .bind(id)
+            .execute(&self.db)
+            .await
             .map_err(|e| e.to_string())?;
             return Ok(());
         }
@@ -489,17 +500,21 @@ impl Databases {
             .await?;
 
         let started_ts = read_pg_started_at(&db_dir.join("data")).unwrap_or_else(now);
-        let conn = self.db.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE databases SET status = 'running', container_id = ?, started_at = ?, updated_at = ? WHERE id = ?",
-            params![cid, started_ts, now(), id],
+        sqlx::query(
+            "UPDATE databases SET status = 'running', container_id = $1, started_at = $2, updated_at = $3 WHERE id = $4",
         )
+        .bind(cid)
+        .bind(started_ts)
+        .bind(now())
+        .bind(id)
+        .execute(&self.db)
+        .await
         .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub async fn stop(&self, id: i64) -> Result<(), String> {
-        let db_rec = self.get(id)?.ok_or_else(|| "Database not found".to_string())?;
+        let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
         let db_dir = PathBuf::from(&db_rec.data_dir);
         let data_dir = db_dir.join("data");
 
@@ -521,7 +536,10 @@ impl Databases {
         }
 
         for pid in pids_to_kill {
-            crate::runtime::Runtime::kill_pid_tree(pid).await;
+            // A stale postmaster.pid or another service on the port must never be killed.
+            if crate::runtime::tree::pid_command_contains(pid, "postgres") {
+                crate::runtime::Runtime::kill_pid_tree(pid).await;
+            }
         }
 
         let pid_file = data_dir.join("postmaster.pid");
@@ -529,12 +547,12 @@ impl Databases {
             let _ = tokio::fs::remove_file(&pid_file).await;
         }
 
-        let conn = self.db.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE databases SET status = 'stopped', started_at = NULL, updated_at = ? WHERE id = ?",
-            params![now(), id],
-        )
-        .map_err(|e| e.to_string())?;
+        sqlx::query("UPDATE databases SET status = 'stopped', started_at = NULL, updated_at = $1 WHERE id = $2")
+            .bind(now())
+            .bind(id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -545,7 +563,7 @@ impl Databases {
     }
 
     pub async fn delete(&self, id: i64) -> Result<(), String> {
-        let db_rec = self.get(id)?.ok_or_else(|| "Database not found".to_string())?;
+        let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
 
         // 1. Stop PostgreSQL instance
         let _ = self.stop(id).await;
@@ -560,20 +578,23 @@ impl Databases {
         }
 
         // 4. Delete database row
-        let conn = self.db.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM databases WHERE id = ?", params![id])
+        sqlx::query("DELETE FROM databases WHERE id = $1")
+            .bind(id)
+            .execute(&self.db)
+            .await
             .map_err(|e| e.to_string())?;
 
         Ok(())
     }
 
-    pub fn set_linked_project(&self, id: i64, project_id: Option<i64>) -> Result<(), String> {
-        let conn = self.db.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE databases SET linked_project_id = ?, updated_at = ? WHERE id = ?",
-            params![project_id, now(), id],
-        )
-        .map_err(|e| e.to_string())?;
+    pub async fn set_linked_project(&self, id: i64, project_id: Option<i64>) -> Result<(), String> {
+        sqlx::query("UPDATE databases SET linked_project_id = $1, updated_at = $2 WHERE id = $3")
+            .bind(project_id)
+            .bind(now())
+            .bind(id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

@@ -4,7 +4,7 @@
  */
 
 import { icon } from './icons.js';
-import { state, escapeHtml, formatRelativeTime, setHtmlIfChanged } from './state.js';
+import { state, escapeHtml, formatRelativeTime, setHtmlIfChanged, matchesNodeFilter } from './state.js';
 import { loadProjects } from './websites.js';
 import { openWebsiteWorkspace } from './workspace.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
@@ -118,6 +118,7 @@ export function renderServicesList() {
   const filter = state.serviceStatusFilter || 'all';
 
   const filtered = services.filter((s) => {
+    if (!matchesNodeFilter(s)) return false;
     const isOnline = s.app_status === 'running' || s.status?.running;
     if (filter === 'running' && !isOnline) return false;
     if (filter === 'stopped' && isOnline) return false;
@@ -189,7 +190,7 @@ export function renderServicesList() {
     }
 
     const isLocal = !p.repo_url || p.repo_url === 'local' || pt.includes('lavalink');
-    const shaText = p.deployed_sha ? p.deployed_sha.slice(0, 7) : (p.deployedSha ? p.deployedSha.slice(0, 7) : (isLocal ? 'Manual' : 'Auto'));
+    const shaText = p.deployed_sha ? shortSha(p.deployed_sha) : (p.deployedSha ? shortSha(p.deployedSha) : (isLocal ? 'Manual' : 'Auto'));
     const portText = p.port ? `Port ${p.port}` : '';
     const accessText = p.access_mode === 'public' ? 'Public reverse proxy' : (p.access_mode === 'allowlist' || p.access_mode === 'allowed_ips' ? 'IP whitelist' : 'Localhost only');
     const resItem = resByProjId.get(p.id);

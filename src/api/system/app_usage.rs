@@ -15,7 +15,7 @@ use crate::monitor::{get_path_disk_size, NetworkMetrics};
 use crate::monitor_net::get_project_live_telemetry;
 use crate::runtime::Runtime;
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppCpuUsage {
     pub percent: f32,
@@ -23,7 +23,7 @@ pub(crate) struct AppCpuUsage {
     pub active_pids: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppRamUsage {
     pub bytes: u64,
@@ -33,7 +33,7 @@ pub(crate) struct AppRamUsage {
     pub percent_of_host: f32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppDiskUsage {
     pub bytes: u64,
@@ -44,7 +44,7 @@ pub(crate) struct AppDiskUsage {
     pub percent_of_vps: f32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppUsageResponse {
     pub project_id: i64,
@@ -62,20 +62,21 @@ fn round_one_decimal(val: f64) -> f32 {
     ((val * 10.0).round() / 10.0) as f32
 }
 
-fn collect_project_seed_pids(
-    state: &AppState,
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn collect_project_seed_pids_pure(
+    tracked_child_pid: Option<u32>,
     project_id: i64,
     slug: &str,
     app_status: &str,
     deploy_dir: &Path,
     port: Option<u16>,
-    db_pid: Option<i64>,
+    recorded_pid: Option<i64>,
     cwd: &Path,
 ) -> Vec<u32> {
     let mut seeds: HashSet<u32> = HashSet::new();
-
     let self_pid = std::process::id();
-    if let Some(pid) = db_pid {
+
+    if let Some(pid) = recorded_pid {
         let p_u32 = pid as u32;
         if pid > 1 && p_u32 != self_pid && crate::runtime::is_pid_alive(p_u32) {
             seeds.insert(p_u32);
@@ -83,14 +84,10 @@ fn collect_project_seed_pids(
     }
 
     let mut is_tracked_running = false;
-    if let Ok(map) = state.runtime.processes.lock() {
-        if let Some(child) = map.get(&project_id) {
-            if let Some(pid) = child.id() {
-                if pid > 1 && pid != self_pid {
-                    seeds.insert(pid);
-                    is_tracked_running = true;
-                }
-            }
+    if let Some(pid) = tracked_child_pid {
+        if pid > 1 && pid != self_pid {
+            seeds.insert(pid);
+            is_tracked_running = true;
         }
     }
 
@@ -129,25 +126,60 @@ fn collect_project_seed_pids(
     seeds.into_iter().collect()
 }
 
-struct EntityUsageInput<'a> {
-    tracker_key: i64,
-    public_id: i64,
-    entity_kind: &'a str,
-    status_str: &'a str,
+fn collect_project_seed_pids(
+    state: &AppState,
+    project_id: i64,
+    slug: &str,
+    app_status: &str,
+    deploy_dir: &Path,
     port: Option<u16>,
-    seed_pids: Vec<u32>,
-    runtime_running: bool,
-    disk_dirs: Vec<PathBuf>,
+    db_pid: Option<i64>,
+    cwd: &Path,
+) -> Vec<u32> {
+    let tracked_child_pid = state
+        .runtime
+        .processes
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&project_id).and_then(|c| c.id()));
+    collect_project_seed_pids_pure(
+        tracked_child_pid,
+        project_id,
+        slug,
+        app_status,
+        deploy_dir,
+        port,
+        db_pid,
+        cwd,
+    )
+}
+
+pub(crate) struct EntityUsageInput<'a> {
+    pub tracker_key: i64,
+    pub public_id: i64,
+    pub entity_kind: &'a str,
+    pub status_str: &'a str,
+    pub port: Option<u16>,
+    pub seed_pids: Vec<u32>,
+    pub runtime_running: bool,
+    pub disk_dirs: Vec<PathBuf>,
 }
 
 fn compute_entity_usage(state: &AppState, input: EntityUsageInput<'_>) -> AppUsageResponse {
-    let monitor = state.monitor.sample();
+    compute_entity_usage_with_monitor(&state.monitor, input)
+}
+
+pub(crate) fn compute_entity_usage_with_monitor(
+    mon: &crate::monitor::Monitor,
+    input: EntityUsageInput<'_>,
+) -> AppUsageResponse {
+    let monitor = mon.sample();
     let num_cores = monitor.cpu.cores.max(1);
     let total_vps_mem = monitor.memory.total.max(1);
     let total_vps_disk = monitor.disk.as_ref().map(|d| d.total).unwrap_or(1).max(1);
     let free_vps_disk = monitor.disk.as_ref().map(|d| d.free).unwrap_or(0);
 
-    let (raw_cpu, mem_bytes, alive_pids, tree_pids) = state.monitor.get_combined_tree_details(&input.seed_pids);
+    let (raw_cpu, mem_bytes, alive_pids, tree_pids) = mon.get_combined_tree_details(&input.seed_pids);
     let running = (input.status_str == "running" && !input.seed_pids.is_empty()) || alive_pids > 0 || input.runtime_running;
     let active_pid_count = if running {
         if alive_pids > 0 {
@@ -167,7 +199,7 @@ fn compute_entity_usage(state: &AppState, input: EntityUsageInput<'_>) -> AppUsa
 
     let (network, live_cpu_pct) = get_project_live_telemetry(input.tracker_key, running, &all_pids);
     let sysinfo_cpu_pct = ((raw_cpu / num_cores as f32).clamp(0.0, 100.0)) as f64;
-    let monitor_settled = running && state.monitor.has_settled_process_cpu(&all_pids);
+    let monitor_settled = running && mon.has_settled_process_cpu(&all_pids);
     let cpu_pct = if running {
         // Match Overview's stable 4s Monitor CPU baseline once settled; use the 4s-smoothed
         // live OS delta only during the brief initial warm-up of newly started processes.
@@ -235,15 +267,37 @@ pub(crate) async fn project_usage_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<AppUsageResponse>, (StatusCode, String)> {
-    let _actor = verify_project_access(&state, &headers, id)?;
+    let _actor = verify_project_access(&state, &headers, id).await?;
+    let p = state
+        .projects
+        .get(id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Project not found".to_string()))?;
+
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "metrics.project_usage",
+                serde_json::json!({ "project": &p }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        let usage = serde_json::from_value::<AppUsageResponse>(res)
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid remote usage response: {e}")))?;
+        return Ok(Json(usage));
+    }
+
+    let runtime_running = state.runtime.is_running(p.id).await;
 
     tokio::task::spawn_blocking(move || {
-        let p = state
-            .projects
-            .get(id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "Project not found".to_string()))?;
-
         static CACHED_CWD: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
         let cwd = CACHED_CWD
             .get_or_init(|| std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()))
@@ -276,7 +330,7 @@ pub(crate) async fn project_usage_handler(
                 status_str: &p.app_status,
                 port: p.port,
                 seed_pids,
-                runtime_running: state.runtime.is_running(p.id),
+                runtime_running,
                 disk_dirs,
             },
         )))
@@ -296,7 +350,8 @@ pub(crate) async fn database_usage_handler(
         &headers,
         &["databases", "databases_manage"],
         id,
-    )?;
+    )
+    .await?;
 
     tokio::task::spawn_blocking(move || {
         let mut seeds: HashSet<u32> = HashSet::new();

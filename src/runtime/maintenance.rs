@@ -3,14 +3,89 @@ use std::time::Duration;
 use crate::projects::Project;
 use super::Runtime;
 
+pub fn stop_maintenance_server_in_map(
+    maintenance_shutdowns: &std::sync::Mutex<std::collections::HashMap<i64, tokio::sync::oneshot::Sender<()>>>,
+    project_id: i64,
+) {
+    if let Ok(mut map) = maintenance_shutdowns.lock() {
+        if let Some(tx) = map.remove(&project_id) {
+            let _ = tx.send(());
+        }
+    }
+}
+
+pub fn start_maintenance_server_in_map(
+    maintenance_shutdowns: &std::sync::Mutex<std::collections::HashMap<i64, tokio::sync::oneshot::Sender<()>>>,
+    project_id: i64,
+    name: &str,
+    slug: &str,
+    port: u16,
+    status_text: &str,
+) {
+    stop_maintenance_server_in_map(maintenance_shutdowns, project_id);
+
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+    if let Ok(mut map) = maintenance_shutdowns.lock() {
+        map.insert(project_id, tx);
+    }
+
+    let html = Runtime::render_maintenance_html(name, slug, status_text);
+    let response_bytes = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html; charset=utf-8\r\nX-WebDep-Maintenance: 1\r\nCache-Control: no-store, no-cache, must-revalidate\r\nRetry-After: 30\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        html.len(),
+        html
+    )
+    .into_bytes();
+
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut listener_opt = None;
+        for _ in 0..8 {
+            if let Ok(l) = tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+                listener_opt = Some(l);
+                break;
+            }
+            if let Ok(l) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                listener_opt = Some(l);
+                break;
+            }
+            tokio::select! {
+                _ = &mut rx => return,
+                _ = tokio::time::sleep(Duration::from_millis(120)) => {}
+            }
+        }
+
+        let listener = match listener_opt {
+            Some(l) => l,
+            None => return,
+        };
+
+        loop {
+            tokio::select! {
+                _ = &mut rx => {
+                    break;
+                }
+                accept_res = listener.accept() => {
+                    if let Ok((mut stream, _)) = accept_res {
+                        let resp = response_bytes.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            let _ = tokio::time::timeout(Duration::from_millis(250), stream.read(&mut buf)).await;
+                            let _ = stream.write_all(&resp).await;
+                            let _ = stream.shutdown().await;
+                        });
+                    }
+                }
+            }
+        }
+    });
+}
+
 impl Runtime {
 
     pub fn stop_maintenance_server(&self, project_id: i64) {
-        if let Ok(mut map) = self.maintenance_shutdowns.lock() {
-            if let Some(tx) = map.remove(&project_id) {
-                let _ = tx.send(());
-            }
-        }
+        stop_maintenance_server_in_map(&self.maintenance_shutdowns, project_id);
     }
 
     pub fn render_maintenance_html(name: &str, slug: &str, status_text: &str) -> String {
@@ -251,64 +326,14 @@ impl Runtime {
         port: u16,
         status_text: &str,
     ) {
-        self.stop_maintenance_server(project_id);
-
-        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
-        if let Ok(mut map) = self.maintenance_shutdowns.lock() {
-            map.insert(project_id, tx);
-        }
-
-        let html = Self::render_maintenance_html(name, slug, status_text);
-        let response_bytes = format!(
-            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html; charset=utf-8\r\nX-WebDep-Maintenance: 1\r\nCache-Control: no-store, no-cache, must-revalidate\r\nRetry-After: 30\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            html.len(),
-            html
-        )
-        .into_bytes();
-
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-            let mut listener_opt = None;
-            for _ in 0..8 {
-                if let Ok(l) = tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
-                    listener_opt = Some(l);
-                    break;
-                }
-                if let Ok(l) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-                    listener_opt = Some(l);
-                    break;
-                }
-                tokio::select! {
-                    _ = &mut rx => return,
-                    _ = tokio::time::sleep(Duration::from_millis(120)) => {}
-                }
-            }
-
-            let listener = match listener_opt {
-                Some(l) => l,
-                None => return,
-            };
-
-            loop {
-                tokio::select! {
-                    _ = &mut rx => {
-                        break;
-                    }
-                    accept_res = listener.accept() => {
-                        if let Ok((mut stream, _)) = accept_res {
-                            let resp = response_bytes.clone();
-                            tokio::spawn(async move {
-                                let mut buf = [0u8; 1024];
-                                let _ = tokio::time::timeout(Duration::from_millis(250), stream.read(&mut buf)).await;
-                                let _ = stream.write_all(&resp).await;
-                                let _ = stream.shutdown().await;
-                            });
-                        }
-                    }
-                }
-            }
-        });
+        start_maintenance_server_in_map(
+            &self.maintenance_shutdowns,
+            project_id,
+            name,
+            slug,
+            port,
+            status_text,
+        );
     }
 
 
@@ -316,27 +341,23 @@ impl Runtime {
     pub async fn set_maintenance_mode(&self, p: &Project, enabled: bool) -> Result<(), String> {
         if enabled {
             self.bump_stop_seq(p.id);
-            {
-                let conn = self.db.lock().unwrap();
-                conn.execute(
-                    "UPDATE projects SET app_status='maintenance', app_pid=NULL, app_started_at=NULL WHERE id=?",
-                    rusqlite::params![p.id],
-                )
-                .ok();
-            }
+            let _ = sqlx::query(
+                "UPDATE projects SET app_status='maintenance', app_pid=NULL, app_started_at=NULL WHERE id=$1",
+            )
+            .bind(p.id)
+            .execute(&self.db)
+            .await;
 
             let proj_lock = self.get_project_lock(p.id);
             let _guard = proj_lock.lock().await;
             self.kill_project_everything(p).await;
 
-            {
-                let conn = self.db.lock().unwrap();
-                conn.execute(
-                    "UPDATE projects SET app_status='maintenance', app_pid=NULL, app_started_at=NULL WHERE id=?",
-                    rusqlite::params![p.id],
-                )
-                .ok();
-            }
+            let _ = sqlx::query(
+                "UPDATE projects SET app_status='maintenance', app_pid=NULL, app_started_at=NULL WHERE id=$1",
+            )
+            .bind(p.id)
+            .execute(&self.db)
+            .await;
 
             if let Some(port) = p.port {
                 self.start_maintenance_server(

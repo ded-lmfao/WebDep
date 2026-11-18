@@ -33,6 +33,8 @@ pub fn generate_pg_hba(access_mode: &str, allowed_ips: &str) -> String {
     }
     hba.push_str("host    all             all             127.0.0.1/32            scram-sha-256\n");
     hba.push_str("host    all             all             ::1/128                 scram-sha-256\n");
+    // Allow encrypted Web-Node WireGuard P2P mesh subnet for cross-node DB connections
+    hba.push_str("host    all             all             10.200.0.0/16           scram-sha-256\n");
 
     if access_mode == "public" {
         hba.push_str("host    all             all             0.0.0.0/0               scram-sha-256\n");
@@ -99,16 +101,13 @@ pub async fn wait_for_pg_ready(port: u16, data_dir: &Path, max_wait_ms: u64) -> 
 }
 
 pub fn is_process_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let mut sys = sysinfo::System::new();
-    let sys_pid = sysinfo::Pid::from_u32(pid);
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
-    sys.process(sys_pid).is_some()
+    crate::runtime::tree::is_pid_alive(pid)
 }
 
 pub async fn sync_firewall_rules(port: u16, access_mode: &str, allowed_ips: &str) {
+    if !crate::runtime::port::firewall_management_enabled() {
+        return;
+    }
     #[cfg(unix)]
     {
         if access_mode == "local" {
@@ -134,6 +133,9 @@ pub async fn sync_firewall_rules(port: u16, access_mode: &str, allowed_ips: &str
 }
 
 pub async fn remove_firewall_rules(port: u16, allowed_ips: &str) {
+    if !crate::runtime::port::firewall_management_enabled() {
+        return;
+    }
     #[cfg(unix)]
     {
         let _ = Command::new("sudo").args(["ufw", "delete", "allow", &format!("{}/tcp", port)]).output().await;

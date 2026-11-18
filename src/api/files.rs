@@ -1,10 +1,11 @@
 use axum::{
     body::Body,
     extract::{Multipart, Path as AxPath, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::Response,
     Json,
 };
+use base64::Engine as _;
 use serde::Deserialize;
 
 use super::common::*;
@@ -43,7 +44,10 @@ pub(crate) fn service_root(p: &crate::projects::Project) -> Result<std::path::Pa
     } else {
         cwd.join(p.deploy_dir.trim_start_matches("./").trim_start_matches(".\\"))
     };
-    if p.project_kind == "service" {
+    // Services, and websites without a Git repository, are edited in `app/`: that folder is the
+    // source Deploy snapshots, so edits must land there (not in the live release, where they would
+    // go live without a deploy and then vanish on the next one).
+    if p.project_kind == "service" || crate::git::is_local_source(&p.repo_url) {
         let root = base.join("app");
         let _ = std::fs::create_dir_all(&root);
         Ok(root)
@@ -81,7 +85,7 @@ pub(crate) fn safe_join(root: &std::path::Path, rel: &str) -> Result<std::path::
 }
 
 /// Verify an existing target path resolves canonically within `root` (blocks symlink escape).
-async fn ensure_existing_within_root(
+pub(crate) async fn ensure_existing_within_root(
     root: &std::path::Path,
     target: &std::path::Path,
 ) -> Result<std::path::PathBuf, (StatusCode, String)> {
@@ -98,7 +102,7 @@ async fn ensure_existing_within_root(
 }
 
 /// Verify the deepest existing ancestor (and the target if it already exists) stays within `root`.
-async fn ensure_ancestor_within_root(
+pub(crate) async fn ensure_ancestor_within_root(
     root: &std::path::Path,
     target: &std::path::Path,
 ) -> Result<(), (StatusCode, String)> {
@@ -248,7 +252,8 @@ pub(crate) async fn write_file_in_root(
         audit_action,
         Some(audit_target),
         Some(&format!("Saved file '{}'", payload.path)),
-    );
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -305,7 +310,8 @@ pub(crate) async fn delete_in_root(
         audit_action,
         Some(audit_target),
         Some(&format!("Deleted '{}'", rel_path)),
-    );
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -359,7 +365,8 @@ pub(crate) async fn upload_in_root(
         audit_action,
         Some(audit_target),
         Some(&format!("Uploaded {} file(s) into '{}'", uploaded.len(), rel_path)),
-    );
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true, "uploaded": uploaded })))
 }
 
@@ -428,7 +435,8 @@ pub(crate) async fn rename_in_root(
         audit_action,
         Some(audit_target),
         Some(&format!("Renamed '{}' to '{}'", payload.old_path, payload.new_path)),
-    );
+    )
+    .await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -438,7 +446,24 @@ pub(crate) async fn files_list_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (_actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id)?;
+    let (_actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id).await?;
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "files.list",
+                serde_json::json!({ "project": &p, "path": &q.path }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        return Ok(Json(res));
+    }
     let root = service_root(&p)?;
     list_entries_in_root(&root, &q.path).await
 }
@@ -449,7 +474,25 @@ pub(crate) async fn files_read_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id)?;
+    let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id).await?;
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        ensure_file_env_access(&actor, &[&q.path])?;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "files.read",
+                serde_json::json!({ "project": &p, "path": &q.path }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        return Ok(Json(res));
+    }
     let root = service_root(&p)?;
     read_file_in_root(&actor, &root, &q.path).await
 }
@@ -460,7 +503,34 @@ pub(crate) async fn files_write_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileWritePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        ensure_file_env_access(&actor, &[&payload.path])?;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "files.write",
+                serde_json::json!({ "project": &p, "path": &payload.path, "content": &payload.content }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        log_audit_project(
+            &state,
+            Some(id),
+            &actor.username,
+            "file.write",
+            Some(&p.name),
+            Some(&format!("Edited file '{}'", payload.path)),
+        )
+        .await;
+        return Ok(Json(res));
+    }
     let root = service_root(&p)?;
     write_file_in_root(&state, &actor, Some(id), &p.name, "file.write", &root, payload).await
 }
@@ -471,7 +541,25 @@ pub(crate) async fn files_mkdir_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileMkdirPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        ensure_file_env_access(&actor, &[&payload.path])?;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "files.mkdir",
+                serde_json::json!({ "project": &p, "path": &payload.path }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        return Ok(Json(res));
+    }
     let root = service_root(&p)?;
     mkdir_in_root(&actor, &root, payload).await
 }
@@ -482,7 +570,34 @@ pub(crate) async fn files_delete_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        ensure_file_env_access(&actor, &[&q.path])?;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "files.delete",
+                serde_json::json!({ "project": &p, "path": &q.path }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        log_audit_project(
+            &state,
+            Some(id),
+            &actor.username,
+            "file.delete",
+            Some(&p.name),
+            Some(&format!("Deleted '{}'", q.path)),
+        )
+        .await;
+        return Ok(Json(res));
+    }
     let root = service_root(&p)?;
     delete_in_root(&state, &actor, Some(id), &p.name, "file.delete", &root, &q.path).await
 }
@@ -492,9 +607,54 @@ pub(crate) async fn files_upload_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
-    multipart: Multipart,
+    mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        ensure_file_env_access(&actor, &[&q.path])?;
+        let mut files_payload = Vec::new();
+        while let Ok(Some(field)) = multipart.next_field().await {
+            let file_name = match field.file_name() {
+                Some(name) if !name.trim().is_empty() => name.to_string(),
+                _ => continue,
+            };
+            let normalized = file_name.replace('\\', "/");
+            ensure_file_env_access(&actor, &[&normalized])?;
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            files_payload.push(serde_json::json!({
+                "name": normalized,
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }));
+        }
+        let count = files_payload.len();
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "files.upload",
+                serde_json::json!({ "project": &p, "path": &q.path, "files": files_payload }),
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        log_audit_project(
+            &state,
+            Some(id),
+            &actor.username,
+            "file.upload",
+            Some(&p.name),
+            Some(&format!("Uploaded {} file(s) into '{}'", count, q.path)),
+        )
+        .await;
+        return Ok(Json(res));
+    }
     let root = service_root(&p)?;
     upload_in_root(&state, &actor, Some(id), &p.name, "file.upload", &root, &q.path, multipart).await
 }
@@ -505,7 +665,41 @@ pub(crate) async fn files_download_handler(
     AxPath(id): AxPath<i64>,
     Query(q): Query<FilesQuery>,
 ) -> Result<Response, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id)?;
+    let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id).await?;
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        ensure_file_env_access(&actor, &[&q.path])?;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "files.download",
+                serde_json::json!({ "project": &p, "path": &q.path }),
+                std::time::Duration::from_secs(60),
+            )
+            .await?;
+        let file_name = res["fileName"].as_str().unwrap_or("download");
+        let b64 = res["contentBase64"].as_str().unwrap_or("");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid file payload: {e}")))?;
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}\"",
+                    file_name.replace('"', "\\\"").replace(['\r', '\n'], "")
+                ),
+            )
+            .body(Body::from(bytes))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+    }
     let root = service_root(&p)?;
     download_in_root(&actor, &root, &q.path).await
 }
@@ -516,7 +710,34 @@ pub(crate) async fn files_rename_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<FileRenamePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id)?;
+    let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
+    if let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    {
+        ensure_file_env_access(&actor, &[&payload.old_path, &payload.new_path])?;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "files.rename",
+                serde_json::json!({ "project": &p, "oldPath": &payload.old_path, "newPath": &payload.new_path }),
+                std::time::Duration::from_secs(20),
+            )
+            .await?;
+        log_audit_project(
+            &state,
+            Some(id),
+            &actor.username,
+            "file.rename",
+            Some(&p.name),
+            Some(&format!("Renamed '{}' -> '{}'", payload.old_path, payload.new_path)),
+        )
+        .await;
+        return Ok(Json(res));
+    }
     let root = service_root(&p)?;
     rename_in_root(&state, &actor, Some(id), &p.name, "file.rename", &root, payload).await
 }

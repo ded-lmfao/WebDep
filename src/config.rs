@@ -16,6 +16,16 @@ const CONTROL_PLANE_SENSITIVE_ENV_KEYS: &[&str] = &[
     "JWT_SECRET",
     "GITHUB_TOKEN",
     "GH_TOKEN",
+    // Panel configuration from WebDep's own .env. Scrubbed before the app's own variables are applied,
+    // so an app's linked DATABASE_URL still reaches it; the panel's (external control DB) never does.
+    "DATABASE_URL",
+    "HOST",
+    "PUBLIC_IP",
+    "PG_BIN_DIR",
+    "WEBDEP_MANAGE_FIREWALL",
+    "WEBDEP_NODE_P2P_BIND",
+    "WEBDEP_NODE_P2P_PORT",
+    "WEBDEP_ALLOW_RELEASE_UPDATE",
 ];
 
 #[derive(Clone, Debug)]
@@ -120,6 +130,16 @@ impl Config {
 
     pub fn load_dotenv() -> HashMap<String, String> {
         let path = Self::dotenv_path();
+        // Web-Node workers (`--node`) serve no panel and never read admin credentials, so they must
+        // not generate (or log) a bootstrap admin password.
+        let worker_only = std::env::args().any(|a| a == "--node");
+        if worker_only {
+            let map = Self::parse_dotenv_file(&path);
+            for (k, v) in &map {
+                std::env::set_var(k, v);
+            }
+            return map;
+        }
         if !path.exists() {
             let generated = Self::generate_bootstrap_password();
             Self::write_private_file(&path, &Self::render_default_dotenv(&generated));

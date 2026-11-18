@@ -363,7 +363,7 @@ jobs:
           if [[ "${USE_ZIG}" == "false" ]]; then
             dist/webdep --version
           fi
-          ARCHIVE="webdep-${ASSET_ARCH}.tar.gz"
+          ARCHIVE="webdep3-${ASSET_ARCH}.tar.gz"
           tar -C dist -czf "dist/${ARCHIVE}" webdep
           rm -f dist/webdep
 
@@ -371,11 +371,66 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-${{ matrix.asset_arch }}
-          path: dist/webdep-${{ matrix.asset_arch }}.tar.gz
+          path: dist/webdep3-${{ matrix.asset_arch }}.tar.gz
+
+  build_windows:
+    name: Build Windows Binary (windows-x86_64)
+    needs: [meta_and_test, sonar_gate]
+    if: needs.meta_and_test.outputs.should_release == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Apply target release version to Cargo manifest
+        shell: bash
+        env:
+          NEXT_VER: ${{ needs.meta_and_test.outputs.next_ver }}
+        run: |
+          awk -v v="$NEXT_VER" '
+            { line=$0; cr=(sub(/\r$/, "", line) ? "\r" : "") }
+            line ~ /^\[package\]$/ { p=1; print $0; next }
+            line ~ /^\[/ { p=0 }
+            p && !done && line ~ /^version[[:space:]]*=/ { sub(/"[^"]+"/, "\"" v "\"", line); done=1; print line cr; next }
+            { print $0 }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows-x86_64
+
+      - name: Build release binary
+        shell: bash
+        env:
+          WEBDEP_RELEASE_TAG: ${{ needs.meta_and_test.outputs.release_tag }}
+          WEBDEP_COMMIT_SHA: ${{ needs.meta_and_test.outputs.short_sha }}
+          WEBDEP_COMMIT_MSG: ${{ needs.meta_and_test.outputs.commit_msg }}
+          WEBDEP_DEFAULT_REPO: ${{ github.repository }}
+        run: cargo build --release
+
+      - name: Package zip and verify binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/webdep.exe dist/webdep.exe
+          ./dist/webdep.exe --version
+          Compress-Archive -Path dist/webdep.exe -DestinationPath dist/webdep-windows-x86_64.zip -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-windows-x86_64
+          path: dist/webdep-windows-x86_64.zip
 
   release:
     name: Create GitHub Release
-    needs: [meta_and_test, sonar_gate, build]
+    needs: [meta_and_test, sonar_gate, build, build_windows]
     if: needs.meta_and_test.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -403,7 +458,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           cd release-artifacts
-          sha256sum webdep-linux-*.tar.gz > checksums.txt
+          sha256sum webdep3-linux-*.tar.gz webdep-windows-*.zip > checksums.txt
           cat checksums.txt
           {
             echo "## WebDep ${RELEASE_TAG}"
@@ -416,8 +471,9 @@ jobs:
             fi
             echo ""
             echo "### Included Assets"
-            echo "- \`webdep-linux-x86_64.tar.gz\` — Static Linux \`x86_64\` binary"
-            echo "- \`webdep-linux-aarch64.tar.gz\` — Static Linux \`aarch64\` binary"
+            echo "- \`webdep3-linux-x86_64.tar.gz\` — Static Linux \`x86_64\` binary"
+            echo "- \`webdep3-linux-aarch64.tar.gz\` — Static Linux \`aarch64\` binary"
+            echo "- \`webdep-windows-x86_64.zip\` — Windows \`x86_64\` binary"
             echo "- \`checksums.txt\` — SHA-256 verification checksums"
           } > ../release_notes.md
 

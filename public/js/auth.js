@@ -227,6 +227,7 @@ export function showLogin(skipIntro = false) {
   state.releases = [];
   state.selectedProjectId = null;
   state.selectedDatabaseId = null;
+  state.overviewInspectNodeId = null;
   state.currentView = 'overview';
   state.lastOverviewSig = null;
   for (const id of LOGOUT_CLEAR_CONTAINERS) {
@@ -325,6 +326,9 @@ export async function onAuthenticated(isFreshLogin = false) {
     domains: ['domains'],
     backups: ['backups'],
     databases: ['databases', 'databases_manage'],
+    // Cluster infrastructure (node IPs, WireGuard endpoints, package installs) is for operators only.
+    nodes: ['system_manage'],
+    modules: ['system_manage'],
   };
   Object.entries(navPowerMap).forEach(([view, pwrs]) => {
     const navEl = document.querySelector(`.nav-item[data-view="${view}"]`);
@@ -337,6 +341,8 @@ export async function onAuthenticated(isFreshLogin = false) {
   if (addSvcBtn) addSvcBtn.style.display = hasPower('services_manage') ? '' : 'none';
   const addDbBtn = document.getElementById('add-database-header-btn');
   if (addDbBtn) addDbBtn.style.display = hasPower('databases_manage') ? '' : 'none';
+  const addNodeBtn = document.getElementById('add-node-header-btn');
+  if (addNodeBtn) addNodeBtn.style.display = state.user.isMainAdmin ? '' : 'none';
 
   const shouldLoadDbs = hasAnyPower(['databases', 'databases_manage']);
   await Promise.all([
@@ -344,6 +350,8 @@ export async function onAuthenticated(isFreshLogin = false) {
     shouldLoadDbs
       ? (typeof loadDatabases === 'function' ? loadDatabases() : (window.loadDatabases ? window.loadDatabases() : Promise.resolve()))
       : Promise.resolve(),
+    window.loadNodes ? window.loadNodes() : Promise.resolve(),
+    (window.loadModulesBadge && hasPower('system_manage')) ? window.loadModulesBadge() : Promise.resolve(),
   ]).catch((err) => {
     console.warn('Initial project/db load warning:', err);
   });
@@ -611,7 +619,7 @@ document.getElementById('save-change-password-btn')?.addEventListener('click', a
     toast(
       res.revokedSessions
         ? `Password updated and ${res.revokedSessions} other session(s) signed out.`
-        : 'Password updated in SQLite.',
+        : 'Password updated.',
       'success'
     );
     closeModal('modal-change-password');

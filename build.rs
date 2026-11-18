@@ -110,4 +110,13 @@ fn main() {
     println!("cargo:rustc-env=WEBDEP_COMMIT_MSG={}", commit_msg);
     println!("cargo:rustc-env=WEBDEP_RELEASE_TAG={}", release_tag);
     println!("cargo:rustc-env=WEBDEP_DEFAULT_REPO={}", default_repo);
+
+    // Branch the binary was built from (release CI builds main or a detached tag). The self-updater
+    // uses it to avoid replacing a feature-branch build with an unrelated release binary.
+    let git_branch = non_empty_env("WEBDEP_GIT_BRANCH")
+        .or_else(|| non_empty_env("GITHUB_REF_NAME"))
+        .or_else(|| git_output(&["rev-parse", "--abbrev-ref", "HEAD"]))
+        .unwrap_or_default();
+    println!("cargo:rustc-env=WEBDEP_GIT_BRANCH={}", git_branch);
+    println!("cargo:rerun-if-env-changed=WEBDEP_GIT_BRANCH");
 }

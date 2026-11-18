@@ -1,5 +1,6 @@
 pub mod common;
 pub mod auth;
+pub mod cluster;
 pub mod projects;
 pub mod files;
 pub mod deployments;
@@ -47,6 +48,7 @@ async fn healthz_handler() -> (StatusCode, [(&'static str, &'static str); 3], &'
 }
 
 use self::auth::*;
+use self::cluster::*;
 use self::projects::*;
 use self::files::*;
 use self::deployments::*;
@@ -158,6 +160,43 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/users", get(list_users_handler).post(create_user_handler))
         .route("/api/users/:id", put(update_user_handler).patch(update_user_handler).delete(delete_user_handler))
         .route("/api/users/:id/reset-2fa", post(admin_reset_user_2fa_handler))
+        // Multi-Node Cluster Mesh & Enrollment
+        .route("/api/cluster/enroll", post(enroll_node_handler))
+        .route("/api/cluster/node-ws", get(node_ws_handler))
+        .route("/api/cluster/nodes", get(list_cluster_nodes_handler))
+        .route("/api/cluster/panel-info", get(cluster_panel_info_handler))
+        .route(
+            "/api/cluster/enroll-tokens",
+            get(list_enroll_tokens_handler).post(create_enroll_token_handler),
+        )
+        .route("/api/cluster/nodes/:id/drain", post(drain_cluster_node_handler))
+        .route("/api/cluster/nodes/:id/evacuate", post(evacuate_cluster_node_handler))
+        .route("/api/cluster/nodes/:id", delete(delete_cluster_node_handler))
+        .route("/api/cluster/modules", get(list_cluster_modules_handler))
+        .route(
+            "/api/cluster/modules/install-fleet",
+            post(install_fleet_modules_handler),
+        )
+        .route(
+            "/api/cluster/nodes/:id/modules/refresh",
+            post(refresh_node_modules_handler),
+        )
+        .route(
+            "/api/cluster/nodes/:id/modules/install",
+            post(install_node_modules_handler),
+        )
+        .route(
+            "/api/cluster/nodes/:id/modules/uninstall",
+            post(uninstall_node_modules_handler),
+        )
+        .route("/api/cluster/fleet-update", post(fleet_update_handler))
+        // Live App Shifting (`Move to Node`)
+        .route("/api/projects/:id/move", post(move_project_handler))
+        .route("/api/projects/:id/migrations", get(list_project_migrations_handler))
+        .route("/api/migrations/:id", get(get_migration_handler))
+        .route("/api/migrations/:id/check-dns", post(check_migration_dns_handler))
+        .route("/api/migrations/:id/complete", post(complete_migration_handler))
+        .route("/api/migrations/:id/abort", post(abort_migration_handler))
         // Managed Databases (PostgreSQL)
         .route("/api/databases", get(list_databases_handler).post(create_database_handler))
         .route("/api/databases/:id", get(get_database_handler).delete(delete_database_handler))

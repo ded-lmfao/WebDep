@@ -13,10 +13,11 @@ pub(crate) async fn get_env_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<Vec<EnvVarView>>, (StatusCode, String)> {
-    let _actor = verify_power(&state, &headers, "env", Some(id))?;
+    let _actor = verify_power(&state, &headers, "env", Some(id)).await?;
     let list = state
         .projects
         .get_env_vars(id)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string()))?;
     Ok(Json(list))
 }
@@ -35,8 +36,15 @@ pub(crate) async fn set_env_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<SetEnvPayload>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "env", Some(id))?;
-    let p_name = state.projects.get(id).ok().flatten().map(|p| p.name).unwrap_or_else(|| format!("Website #{}", id));
+    let actor = verify_power(&state, &headers, "env", Some(id)).await?;
+    let p_name = state
+        .projects
+        .get(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_else(|| format!("Website #{}", id));
     state
         .projects
         .set_env_var_with_rename(
@@ -46,7 +54,11 @@ pub(crate) async fn set_env_handler(
             payload.is_secret.unwrap_or(false),
             payload.previous_key.as_deref(),
         )
+        .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if let Ok(Some(p)) = state.projects.get(id).await {
+        state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
+    }
     log_audit_project(
         &state,
         Some(id),
@@ -54,7 +66,8 @@ pub(crate) async fn set_env_handler(
         "env.set",
         Some(&p_name),
         Some(&format!("Saved environment variable '{}'", payload.key)),
-    );
+    )
+    .await;
     Ok(StatusCode::OK)
 }
 
@@ -79,13 +92,21 @@ pub(crate) async fn bulk_set_env_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<BulkEnvPayload>,
 ) -> Result<Json<BulkEnvResponse>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, "env", Some(id))?;
-    let p_name = state.projects.get(id).ok().flatten().map(|p| p.name).unwrap_or_else(|| format!("Website #{}", id));
+    let actor = verify_power(&state, &headers, "env", Some(id)).await?;
+    let p_name = state
+        .projects
+        .get(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_else(|| format!("Website #{}", id));
     let replace_all = payload.replace_all.unwrap_or(false);
     let count = if let Some(ref items) = payload.items {
         state
             .projects
             .set_batch_env_items(id, items, replace_all)
+            .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     } else {
         state
@@ -96,8 +117,12 @@ pub(crate) async fn bulk_set_env_handler(
                 payload.is_secret.unwrap_or(true),
                 replace_all,
             )
+            .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     };
+    if let Ok(Some(p)) = state.projects.get(id).await {
+        state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
+    }
     log_audit_project(
         &state,
         Some(id),
@@ -105,7 +130,8 @@ pub(crate) async fn bulk_set_env_handler(
         "env.bulk_import",
         Some(&p_name),
         Some(&format!("Saved {} environment variables", count)),
-    );
+    )
+    .await;
     Ok(Json(BulkEnvResponse { count }))
 }
 
@@ -119,10 +145,11 @@ pub(crate) async fn get_raw_env_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<RawEnvResponse>, (StatusCode, String)> {
-    let _actor = verify_power(&state, &headers, "env", Some(id))?;
+    let _actor = verify_power(&state, &headers, "env", Some(id)).await?;
     let content = state
         .projects
         .export_raw_env(id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(RawEnvResponse { content }))
 }
@@ -144,9 +171,22 @@ pub(crate) async fn reveal_env_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<RevealEnvPayload>,
 ) -> Result<Json<RevealEnvResponse>, StatusCode> {
-    let actor = verify_power(&state, &headers, "env", Some(id)).map_err(|(c, _)| c)?;
-    let p_name = state.projects.get(id).ok().flatten().map(|p| p.name).unwrap_or_else(|| format!("Website #{}", id));
-    let val = state.projects.reveal_env_var(id, &payload.key).ok_or(StatusCode::NOT_FOUND)?;
+    let actor = verify_power(&state, &headers, "env", Some(id))
+        .await
+        .map_err(|(c, _)| c)?;
+    let p_name = state
+        .projects
+        .get(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_else(|| format!("Website #{}", id));
+    let val = state
+        .projects
+        .reveal_env_var(id, &payload.key)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
     log_audit_project(
         &state,
         Some(id),
@@ -154,7 +194,8 @@ pub(crate) async fn reveal_env_handler(
         "env.reveal",
         Some(&p_name),
         Some(&format!("Revealed secret variable '{}'", payload.key)),
-    );
+    )
+    .await;
     Ok(Json(RevealEnvResponse {
         key: payload.key,
         value: val,
@@ -166,9 +207,25 @@ pub(crate) async fn delete_env_handler(
     headers: HeaderMap,
     AxPath((id, key)): AxPath<(i64, String)>,
 ) -> Result<StatusCode, StatusCode> {
-    let actor = verify_power(&state, &headers, "env", Some(id)).map_err(|(c, _)| c)?;
-    let p_name = state.projects.get(id).ok().flatten().map(|p| p.name).unwrap_or_else(|| format!("Website #{}", id));
-    state.projects.delete_env_var(id, &key).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let actor = verify_power(&state, &headers, "env", Some(id))
+        .await
+        .map_err(|(c, _)| c)?;
+    let p_name = state
+        .projects
+        .get(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_else(|| format!("Website #{}", id));
+    state
+        .projects
+        .delete_env_var(id, &key)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Ok(Some(p)) = state.projects.get(id).await {
+        state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
+    }
     log_audit_project(
         &state,
         Some(id),
@@ -176,7 +233,8 @@ pub(crate) async fn delete_env_handler(
         "env.delete",
         Some(&p_name),
         Some(&format!("Deleted environment variable '{}'", key)),
-    );
+    )
+    .await;
     Ok(StatusCode::OK)
 }
 

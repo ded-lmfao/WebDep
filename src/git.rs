@@ -31,6 +31,38 @@ fn copy_dir_all(src: &Path, dst: &Path, skip_git: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// True when a project has no Git remote and its files are managed through the Files tab
+/// (the panel stores `local` as the repository URL for these projects).
+pub fn is_local_source(repo_url: &str) -> bool {
+    let t = repo_url.trim();
+    t.is_empty() || t.eq_ignore_ascii_case("local")
+}
+
+/// Commit metadata recorded for a deployment of manually managed files.
+pub fn local_snapshot_commit(now: i64) -> CommitInfo {
+    CommitInfo {
+        sha: format!("local-{now}"),
+        short_sha: "local".to_string(),
+        author: "Files tab".to_string(),
+        date: now,
+        message: "Snapshot of files uploaded in the Files tab".to_string(),
+    }
+}
+
+/// Copy the manually managed `app/` folder into a release directory.
+pub fn snapshot_local_files(app_dir: &Path, destination_dir: &Path) -> Result<(), String> {
+    let has_files = std::fs::read_dir(app_dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if !has_files {
+        return Err(
+            "No files to deploy yet. This project has no Git repository: upload your files in the Files tab, then deploy again."
+                .to_string(),
+        );
+    }
+    copy_dir_all(app_dir, destination_dir, true)
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct StoredGithubToken {
     #[serde(default)]
@@ -38,53 +70,18 @@ pub struct StoredGithubToken {
     pub token: String,
 }
 
-impl Git {
-    fn resolve_sqlite_path() -> std::path::PathBuf {
-        if let Some(active) = crate::db::active_db_path() {
-            if active.exists() {
-                return active;
-            }
-        }
-        if let Ok(p) = std::env::var("WEBDEP_DB").or_else(|_| std::env::var("NEXUS_DB")) {
-            let pb = std::path::PathBuf::from(p);
-            if pb.exists() {
-                return pb;
-            }
-        }
-        if let Ok(data_dir) = std::env::var("DATA_DIR") {
-            let pb = std::path::PathBuf::from(data_dir).join("webdep.sqlite");
-            if pb.exists() {
-                return pb;
-            }
-        }
-        let default_pb = std::path::PathBuf::from("./data/webdep.sqlite");
-        if default_pb.exists() {
-            return default_pb;
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                for rel in ["data/webdep.sqlite", "../data/webdep.sqlite", "../../data/webdep.sqlite"] {
-                    let cand = exe_dir.join(rel);
-                    if cand.exists() {
-                        return cand;
-                    }
-                }
-            }
-        }
-        default_pb
-    }
+static GITHUB_TOKENS_CACHE: std::sync::RwLock<Vec<StoredGithubToken>> = std::sync::RwLock::new(Vec::new());
 
-    pub fn read_github_tokens_from_conn(conn: &rusqlite::Connection) -> Vec<StoredGithubToken> {
+impl Git {
+    fn parse_github_tokens(
+        raw_tokens_json: Option<&str>,
+        raw_single: Option<&str>,
+    ) -> Vec<StoredGithubToken> {
         let mut list: Vec<StoredGithubToken> = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // 1. Read structured multi-token JSON list (`github_tokens`)
-        if let Ok(raw_json) = conn.query_row(
-            "SELECT value FROM settings WHERE key = 'github_tokens'",
-            [],
-            |r| r.get::<_, String>(0),
-        ) {
-            if let Ok(parsed) = serde_json::from_str::<Vec<StoredGithubToken>>(&raw_json) {
+        if let Some(raw_json) = raw_tokens_json {
+            if let Ok(parsed) = serde_json::from_str::<Vec<StoredGithubToken>>(raw_json) {
                 for item in parsed {
                     let t = item.token.trim().to_string();
                     if !t.is_empty() && seen.insert(t.clone()) {
@@ -98,7 +95,7 @@ impl Git {
                         });
                     }
                 }
-            } else if let Ok(parsed_strs) = serde_json::from_str::<Vec<String>>(&raw_json) {
+            } else if let Ok(parsed_strs) = serde_json::from_str::<Vec<String>>(raw_json) {
                 for raw_t in parsed_strs {
                     let t = raw_t.trim().to_string();
                     if !t.is_empty() && seen.insert(t.clone()) {
@@ -111,13 +108,8 @@ impl Git {
             }
         }
 
-        // 2. Also include any token(s) in `github_token` (supports single or comma/newline-separated tokens)
-        if let Ok(raw_single) = conn.query_row(
-            "SELECT value FROM settings WHERE key = 'github_token'",
-            [],
-            |r| r.get::<_, String>(0),
-        ) {
-            for part in raw_single.split(|c| c == ',' || c == '\n' || c == ';') {
+        if let Some(raw_s) = raw_single {
+            for part in raw_s.split(|c| c == ',' || c == '\n' || c == ';') {
                 let t = part.trim().to_string();
                 if !t.is_empty() && seen.insert(t.clone()) {
                     list.push(StoredGithubToken {
@@ -128,7 +120,6 @@ impl Git {
             }
         }
 
-        // 3. Also include GITHUB_TOKEN env var if set
         if let Ok(env_tok) = std::env::var("GITHUB_TOKEN") {
             for part in env_tok.split(|c| c == ',' || c == '\n' || c == ';') {
                 let t = part.trim().to_string();
@@ -144,17 +135,65 @@ impl Git {
         list
     }
 
-    pub fn get_sqlite_github_tokens() -> Vec<StoredGithubToken> {
-        let db_path = Self::resolve_sqlite_path();
-        if let Ok(conn) = rusqlite::Connection::open(db_path) {
-            return Self::read_github_tokens_from_conn(&conn);
-        }
+    pub async fn read_github_tokens(pool: &crate::db::DbPool) -> Vec<StoredGithubToken> {
+        let raw_json: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'github_tokens'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+        let raw_single: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'github_token'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
 
-        let mut list = Vec::new();
+        let tokens = Self::parse_github_tokens(raw_json.as_deref(), raw_single.as_deref());
+        if let Ok(mut guard) = GITHUB_TOKENS_CACHE.write() {
+            *guard = tokens.clone();
+        }
+        tokens
+    }
+
+    pub fn set_cached_github_tokens(tokens: Vec<StoredGithubToken>) {
+        if let Ok(mut guard) = GITHUB_TOKENS_CACHE.write() {
+            *guard = tokens;
+        }
+    }
+
+    pub fn write_project_deploy_key(
+        data_dir: &Path,
+        project_id: i64,
+        public_key: &str,
+        private_key: &str,
+    ) -> Result<(), String> {
+        let key_dir = data_dir.join("keys");
+        std::fs::create_dir_all(&key_dir).map_err(|e| e.to_string())?;
+        let key_path = key_dir.join(format!("deploy_key_{project_id}"));
+        let pub_path = key_dir.join(format!("deploy_key_{project_id}.pub"));
+        if !private_key.trim().is_empty() {
+            std::fs::write(&key_path, private_key).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+        if !public_key.trim().is_empty() {
+            std::fs::write(&pub_path, format!("{}\n", public_key.trim())).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn get_stored_github_tokens() -> Vec<StoredGithubToken> {
+        let mut list = GITHUB_TOKENS_CACHE
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let mut seen: std::collections::HashSet<String> = list.iter().map(|t| t.token.clone()).collect();
         if let Ok(env_tok) = std::env::var("GITHUB_TOKEN") {
             for part in env_tok.split(|c| c == ',' || c == '\n' || c == ';') {
                 let t = part.trim().to_string();
-                if !t.is_empty() {
+                if !t.is_empty() && seen.insert(t.clone()) {
                     list.push(StoredGithubToken {
                         label: format!("Env Token #{}", list.len() + 1),
                         token: t,
@@ -209,7 +248,7 @@ impl Git {
     }
 
     fn candidate_auth_urls(repo_url: &str) -> Vec<String> {
-        let tokens = Self::get_sqlite_github_tokens();
+        let tokens = Self::get_stored_github_tokens();
         if let Some(slug) = Self::extract_github_slug(repo_url) {
             let mut urls: Vec<String> = Vec::new();
             for t in &tokens {
@@ -300,7 +339,7 @@ impl Git {
                 .map_err(|e| format!("Failed to run git fetch: {}", e))?;
 
             if !fallback.status.success() {
-                let tokens = Self::get_sqlite_github_tokens();
+                let tokens = Self::get_stored_github_tokens();
                 return Err(Self::sanitize_err(
                     &String::from_utf8_lossy(&out.stderr),
                     &tokens,
@@ -327,7 +366,7 @@ impl Git {
     pub fn clone_or_fetch(repo_url: &str, target_dir: &Path, branch: &str) -> Result<(), String> {
         Self::validate_git_url(repo_url)?;
         let clean_branch = Self::validate_git_ref(branch)?;
-        let tokens = Self::get_sqlite_github_tokens();
+        let tokens = Self::get_stored_github_tokens();
         let candidates = Self::candidate_auth_urls(repo_url);
         let mut last_err = String::from("Git operation failed");
 
@@ -522,7 +561,7 @@ impl Git {
     pub fn ls_remote(repo_url: &str, branch: &str) -> Result<String, String> {
         Self::validate_git_url(repo_url)?;
         let clean_branch = Self::validate_git_ref(branch)?;
-        let tokens = Self::get_sqlite_github_tokens();
+        let tokens = Self::get_stored_github_tokens();
         let candidates = Self::candidate_auth_urls(repo_url);
         let mut last_err = String::from("Failed to query remote repository");
         let ref_arg = if clean_branch.is_empty() {

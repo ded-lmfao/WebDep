@@ -10,8 +10,8 @@ use axum::{
 };
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use std::convert::Infallible;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use super::common::*;
@@ -26,8 +26,8 @@ pub(crate) async fn get_app_logs_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<AppLogsResponse>, (StatusCode, String)> {
-    let _actor = verify_power(&state, &headers, "logs", Some(id))?;
-    let entries = state.logs.list(Some(id), None, Some("app"), None, 200);
+    let _actor = verify_power(&state, &headers, "logs", Some(id)).await?;
+    let entries = state.logs.list(Some(id), None, Some("app"), None, 200).await;
     let logs = entries
         .into_iter()
         .map(|l| l.message)
@@ -43,7 +43,7 @@ pub(crate) async fn get_app_logs_handler(
 #[derive(Deserialize)]
 pub(crate) struct LogsQuery {
     project: Option<i64>,
-    #[allow(dead_code)]
+    /// Log channel to list (`app` by default; e.g. `system`, `deployment`, `health`; `all` for every channel).
     channel: Option<String>,
     level: Option<String>,
     backlog: Option<usize>,
@@ -56,18 +56,17 @@ pub(crate) async fn list_logs_handler(
     Query(q): Query<LogsQuery>,
 ) -> Result<Json<Vec<crate::logs::LogEntry>>, (StatusCode, String)> {
     let Some(pid) = q.project else {
-        let _actor = require_current_user(&state, &headers)?;
+        let _actor = require_current_user(&state, &headers).await?;
         return Ok(Json(Vec::new()));
     };
-    let _actor = verify_power(&state, &headers, "logs", Some(pid))?;
+    let _actor = verify_power(&state, &headers, "logs", Some(pid)).await?;
     let limit = q.limit.or(q.backlog).unwrap_or(300).min(2000);
-    let logs = state.logs.list(
-        Some(pid),
-        None,
-        Some("app"),
-        q.level.as_deref(),
-        limit,
-    );
+    let channel = match q.channel.as_deref().map(str::trim) {
+        None | Some("") => Some("app"),
+        Some(c) if c.eq_ignore_ascii_case("all") => None,
+        Some(c) => Some(c),
+    };
+    let logs = state.logs.list(Some(pid), None, channel, q.level.as_deref(), limit).await;
     Ok(Json(logs))
 }
 
@@ -76,20 +75,25 @@ pub(crate) async fn logs_sse_handler(
     headers: HeaderMap,
     Query(q): Query<LogsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
-    if let Some(pid) = q.project {
-        let _actor = verify_power(&state, &headers, "logs", Some(pid))?;
+    let actor = if let Some(pid) = q.project {
+        verify_power(&state, &headers, "logs", Some(pid)).await?
     } else {
-        let _actor = require_current_user(&state, &headers)?;
-    }
+        require_current_user(&state, &headers).await?
+    };
     let backlog_limit = q.backlog.unwrap_or(200).min(1000);
     let initial_logs = match q.project {
-        Some(pid) => state.logs.list(
-            Some(pid),
-            None,
-            Some("app"),
-            q.level.as_deref(),
-            backlog_limit,
-        ),
+        Some(pid) => {
+            state
+                .logs
+                .list(
+                    Some(pid),
+                    None,
+                    Some("app"),
+                    q.level.as_deref(),
+                    backlog_limit,
+                )
+                .await
+        }
         None => Vec::new(),
     };
     let project_filter = q.project;
@@ -103,27 +107,84 @@ pub(crate) async fn logs_sse_handler(
         None
     };
 
-    let rx = state.logs.subscribe();
-    let live_stream = BroadcastStream::new(rx).filter_map(move |msg| {
-        if let Ok(entry) = msg {
-            // Strict per-app console isolation: only emit `app` channel logs for this exact project.
-            let Some(pid) = project_filter else {
-                return None;
-            };
-            if entry.project_id != Some(pid) || entry.channel != "app" {
-                return None;
-            }
-            if let Some(ref lvl) = level_filter {
-                if !lvl.is_empty() && &entry.level != lvl {
+    let log_rx = state.logs.subscribe();
+    let rev_rx = state.auth.subscribe_revocations();
+    let rev_state = state.clone();
+    let rev_user = actor;
+    let live_stream = futures_util::stream::unfold(
+        (log_rx, rev_rx, false),
+        move |(mut log_rx, mut rev_rx, done)| {
+            let state = rev_state.clone();
+            let user = rev_user.clone();
+            let level_filter = level_filter.clone();
+            async move {
+                if done {
                     return None;
                 }
+                loop {
+                    tokio::select! {
+                        biased;
+                        rev = rev_rx.recv() => {
+                            match rev {
+                                Ok(ev) if ev.user_id == user.id => {
+                                    let revoked = if matches!(ev.kind.as_str(), "session_revoked" | "user_disabled") {
+                                        true
+                                    } else if let Some(pid) = project_filter {
+                                        !state.auth.has_power_for_scope(&user, "logs", "project", Some(pid)).await
+                                    } else {
+                                        false
+                                    };
+                                    if revoked {
+                                        let payload = serde_json::json!({
+                                            "reason": ev.reason,
+                                            "kind": ev.kind,
+                                        }).to_string();
+                                        let evt = Event::default().event("revoked").data(payload);
+                                        return Some((Ok::<Event, Infallible>(evt), (log_rx, rev_rx, true)));
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    if let Some(pid) = project_filter {
+                                        if !state.auth.has_power_for_scope(&user, "logs", "project", Some(pid)).await {
+                                            let evt = Event::default()
+                                                .event("revoked")
+                                                .data(r#"{"reason":"Access revoked","kind":"grant_revoked"}"#);
+                                            return Some((Ok::<Event, Infallible>(evt), (log_rx, rev_rx, true)));
+                                        }
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
+                                _ => {}
+                            }
+                        }
+                        msg = log_rx.recv() => {
+                            match msg {
+                                Ok(entry) => {
+                                    // Strict per-app console isolation: only emit `app` channel logs for this exact project.
+                                    let Some(pid) = project_filter else {
+                                        continue;
+                                    };
+                                    if entry.project_id != Some(pid) || entry.channel != "app" {
+                                        continue;
+                                    }
+                                    if let Some(ref lvl) = level_filter {
+                                        if !lvl.is_empty() && &entry.level != lvl {
+                                            continue;
+                                        }
+                                    }
+                                    if let Ok(json) = serde_json::to_string(&vec![entry]) {
+                                        return Some((Ok(Event::default().data(json)), (log_rx, rev_rx, false)));
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                            }
+                        }
+                    }
+                }
             }
-            if let Ok(json) = serde_json::to_string(&vec![entry]) {
-                return Some(Ok(Event::default().data(json)));
-            }
-        }
-        None
-    });
+        },
+    );
 
     let combined = futures_util::stream::iter(initial_event.into_iter()).chain(live_stream);
     Ok(Sse::new(combined).keep_alive(KeepAlive::default()))
@@ -141,11 +202,11 @@ pub(crate) async fn logs_download_handler(
 ) -> Result<Response, (StatusCode, String)> {
     let logs = match q.project {
         Some(pid) => {
-            let _actor = verify_power(&state, &headers, "logs", Some(pid))?;
-            state.logs.list(Some(pid), None, Some("app"), None, 5000)
+            let _actor = verify_power(&state, &headers, "logs", Some(pid)).await?;
+            state.logs.list(Some(pid), None, Some("app"), None, 5000).await
         }
         None => {
-            let _actor = require_current_user(&state, &headers)?;
+            let _actor = require_current_user(&state, &headers).await?;
             Vec::new()
         }
     };
@@ -178,16 +239,16 @@ pub(crate) struct AuditItem {
     ip: Option<String>,
 }
 
-pub(crate) fn row_to_audit_item(r: &rusqlite::Row, default_target: Option<String>) -> rusqlite::Result<AuditItem> {
+pub(crate) fn pg_row_to_audit_item(r: &sqlx::postgres::PgRow, default_target: Option<String>) -> Result<AuditItem, sqlx::Error> {
     Ok(AuditItem {
-        id: r.get(0)?,
-        project_id: r.get(1)?,
-        ts: r.get(2)?,
-        actor: r.get(3)?,
-        action: r.get(4)?,
-        target: r.get::<_, Option<String>>(5)?.or(default_target),
-        detail: r.get(6)?,
-        ip: r.get(7)?,
+        id: r.try_get(0)?,
+        project_id: r.try_get(1)?,
+        ts: r.try_get(2)?,
+        actor: r.try_get(3)?,
+        action: r.try_get(4)?,
+        target: r.try_get::<Option<String>, _>(5)?.or(default_target),
+        detail: r.try_get(6)?,
+        ip: r.try_get(7)?,
     })
 }
 
@@ -211,10 +272,11 @@ pub(crate) async fn audit_handler(
             &headers,
             &["databases", "databases_manage", "audit"],
             db_id,
-        )?;
+        )
+        .await?;
         (user, Some(db))
     } else {
-        (verify_power(&state, &headers, "audit", q.project_id)?, None)
+        (verify_power(&state, &headers, "audit", q.project_id).await?, None)
     };
     let max_limit = q.limit.unwrap_or(500).min(1000);
     let cache_key = format!(
@@ -228,58 +290,60 @@ pub(crate) async fn audit_handler(
         return Ok(res);
     }
 
-    let conn = state.db.lock().unwrap();
-
     let mut list = Vec::new();
     if let Some(db) = db_opt {
         let db_tag = format!("DB #{}", db.id);
-        let sql = format!(
-            "SELECT id, project_id, ts, actor, action, target, detail, ip
-             FROM audit
-             WHERE LOWER(COALESCE(target, '')) = LOWER(?1)
-                OR (LOWER(COALESCE(target, '')) = LOWER(?2) AND action LIKE 'database.%')
-             ORDER BY ts DESC, id DESC LIMIT {}",
-            max_limit
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let rows = stmt
-            .query_map(rusqlite::params![db_tag, db.name], |r| {
-                row_to_audit_item(r, Some(db.name.clone()))
-            })
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        for r in rows.flatten() {
-            list.push(r);
+        let rows = sqlx::query(
+            "SELECT id, project_id, ts, actor, action, target, detail, ip \
+             FROM audit \
+             WHERE LOWER(COALESCE(target, '')) = LOWER($1) \
+                OR (LOWER(COALESCE(target, '')) = LOWER($2) AND action LIKE 'database.%') \
+             ORDER BY ts DESC, id DESC LIMIT $3",
+        )
+        .bind(&db_tag)
+        .bind(&db.name)
+        .bind(max_limit as i64)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        for r in rows {
+            if let Ok(item) = pg_row_to_audit_item(&r, Some(db.name.clone())) {
+                list.push(item);
+            }
         }
     } else if let Some(pid) = q.project_id {
-        let p_info: Option<(String, String)> = conn
-            .query_row("SELECT name, slug FROM projects WHERE id = ?", rusqlite::params![pid], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .ok();
+        let p_info: Option<(String, String)> = sqlx::query_as(
+            "SELECT name, slug FROM projects WHERE id = $1",
+        )
+        .bind(pid)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
         let (p_name, p_slug) = p_info.unwrap_or_default();
 
-        let sql = format!(
-            "SELECT id, project_id, ts, actor, action, target, detail, ip
-             FROM audit
-             WHERE project_id = ?1
-                OR LOWER(COALESCE(target, '')) = LOWER(?2)
-                OR LOWER(COALESCE(target, '')) = LOWER(?3)
-                OR COALESCE(target, '') = CAST(?1 AS TEXT)
-             ORDER BY ts DESC, id DESC LIMIT {}",
-            max_limit
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let rows = stmt
-            .query_map(rusqlite::params![pid, p_name, p_slug], |r| {
-                row_to_audit_item(r, Some(p_name.clone()))
-            })
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        for r in rows.flatten() {
-            list.push(r);
+        let rows = sqlx::query(
+            "SELECT id, project_id, ts, actor, action, target, detail, ip \
+             FROM audit \
+             WHERE project_id = $1 \
+                OR LOWER(COALESCE(target, '')) = LOWER($2) \
+                OR LOWER(COALESCE(target, '')) = LOWER($3) \
+                OR COALESCE(target, '') = CAST($1 AS TEXT) \
+             ORDER BY ts DESC, id DESC LIMIT $4",
+        )
+        .bind(pid)
+        .bind(&p_name)
+        .bind(&p_slug)
+        .bind(max_limit as i64)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        for r in rows {
+            if let Ok(item) = pg_row_to_audit_item(&r, Some(p_name.clone())) {
+                list.push(item);
+            }
         }
 
         let mut existing_dep_ids = std::collections::HashSet::with_capacity(list.len());
@@ -301,111 +365,92 @@ pub(crate) async fn audit_handler(
 
         // Also include historical deployments & rollbacks from the `deployments` table
         // that predate per-website audit rows so the Activity tab shows the full timeline.
-        if let Ok(mut dstmt) = conn.prepare_cached(
-            "SELECT id, kind, status, sha, trigger, actor, error, started_at, finished_at, release_id
-             FROM deployments WHERE project_id = ? ORDER BY id DESC LIMIT 200",
-        ) {
-            if let Ok(drows) = dstmt.query_map(rusqlite::params![pid], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, Option<String>>(6)?,
-                    r.get::<_, i64>(7)?,
-                    r.get::<_, Option<i64>>(8)?,
-                    r.get::<_, Option<i64>>(9)?,
-                ))
-            }) {
-                for d in drows.flatten() {
-                    let (dep_id, kind, status, sha, trigger, actor, error, started_at, finished_at, rel_id) = d;
-                    if !existing_dep_ids.contains(&dep_id) {
-                        let short_sha = sha.as_deref().map(|s| &s[..s.len().min(7)]).unwrap_or("HEAD");
-                        let action = match (kind.as_str(), status.as_str()) {
-                            ("rollback", "success") => "rollback.success",
-                            ("rollback", "failed") => "rollback.failed",
-                            ("rollback", _) => "rollback.trigger",
-                            (_, "success") => "deploy.success",
-                            (_, "failed") => "deploy.failed",
-                            _ => "deploy.trigger",
-                        };
-                        let detail = match status.as_str() {
-                            "success" => format!(
-                                "{} #{} succeeded (commit {}, release #{}, trigger: {})",
-                                if kind == "rollback" { "Rollback" } else { "Deployment" },
-                                dep_id,
-                                short_sha,
-                                rel_id.unwrap_or(0),
-                                trigger
-                            ),
-                            "failed" => format!(
-                                "{} #{} failed (commit {}): {}",
-                                if kind == "rollback" { "Rollback" } else { "Deployment" },
-                                dep_id,
-                                short_sha,
-                                error.unwrap_or_else(|| "build/runtime error".to_string())
-                            ),
-                            _ => format!(
-                                "{} #{} started (commit {}, trigger: {})",
-                                if kind == "rollback" { "Rollback" } else { "Deployment" },
-                                dep_id,
-                                short_sha,
-                                trigger
-                            ),
-                        };
-                        list.push(AuditItem {
-                            id: 1_000_000 + dep_id,
-                            project_id: Some(pid),
-                            ts: finished_at.unwrap_or(started_at),
-                            actor,
-                            action: action.to_string(),
-                            target: Some(p_name.clone()),
-                            detail: Some(detail),
-                            ip: None,
-                        });
-                    }
+        if let Ok(drows) = sqlx::query_as::<_, (i64, String, String, Option<String>, String, String, Option<String>, i64, Option<i64>, Option<i64>)>(
+            "SELECT id, kind, status, sha, trigger, actor, error, started_at, finished_at, release_id \
+             FROM deployments WHERE project_id = $1 ORDER BY id DESC LIMIT 200",
+        )
+        .bind(pid)
+        .fetch_all(&state.db)
+        .await
+        {
+            for (dep_id, kind, status, sha, trigger, actor, error, started_at, finished_at, rel_id) in drows {
+                if !existing_dep_ids.contains(&dep_id) {
+                    let short_sha = sha.as_deref().map(|s| &s[..s.len().min(7)]).unwrap_or("HEAD");
+                    let action = match (kind.as_str(), status.as_str()) {
+                        ("rollback", "success") => "rollback.success",
+                        ("rollback", "failed") => "rollback.failed",
+                        ("rollback", _) => "rollback.trigger",
+                        (_, "success") => "deploy.success",
+                        (_, "failed") => "deploy.failed",
+                        _ => "deploy.trigger",
+                    };
+                    let detail = match status.as_str() {
+                        "success" => format!(
+                            "{} #{} succeeded (commit {}, release #{}, trigger: {})",
+                            if kind == "rollback" { "Rollback" } else { "Deployment" },
+                            dep_id,
+                            short_sha,
+                            rel_id.unwrap_or(0),
+                            trigger
+                        ),
+                        "failed" => format!(
+                            "{} #{} failed (commit {}): {}",
+                            if kind == "rollback" { "Rollback" } else { "Deployment" },
+                            dep_id,
+                            short_sha,
+                            error.unwrap_or_else(|| "build/runtime error".to_string())
+                        ),
+                        _ => format!(
+                            "{} #{} started (commit {}, trigger: {})",
+                            if kind == "rollback" { "Rollback" } else { "Deployment" },
+                            dep_id,
+                            short_sha,
+                            trigger
+                        ),
+                    };
+                    list.push(AuditItem {
+                        id: 1_000_000 + dep_id,
+                        project_id: Some(pid),
+                        ts: finished_at.unwrap_or(started_at),
+                        actor,
+                        action: action.to_string(),
+                        target: Some(p_name.clone()),
+                        detail: Some(detail),
+                        ip: None,
+                    });
                 }
             }
         }
 
         // Also include historical snapshots from the `backups` table if not already in audit
-        if let Ok(mut bstmt) = conn.prepare_cached(
-            "SELECT id, kind, note, size_bytes, created_at FROM backups WHERE project_id = ? ORDER BY id DESC LIMIT 100",
-        ) {
-            if let Ok(brows) = bstmt.query_map(rusqlite::params![pid], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            }) {
-                for b in brows.flatten() {
-                    let (bid, bkind, bnote, bsize, bts) = b;
-                    let note_str = bnote.unwrap_or_else(|| "Snapshot".to_string());
-                    let idx = backup_ts.partition_point(|&ts| ts <= bts - 5000);
-                    let already_logged = idx < backup_ts.len() && backup_ts[idx] < bts + 5000;
-                    if !already_logged && bts > 0 {
-                        list.push(AuditItem {
-                            id: 2_000_000 + bid,
-                            project_id: Some(pid),
-                            ts: bts,
-                            actor: "system".to_string(),
-                            action: "backup.create".to_string(),
-                            target: Some(p_name.clone()),
-                            detail: Some(format!(
-                                "Backup #{}: {} ({}, {} KB)",
-                                bid,
-                                note_str,
-                                bkind,
-                                (bsize / 1024).max(1)
-                            )),
-                            ip: None,
-                        });
-                    }
+        if let Ok(brows) = sqlx::query_as::<_, (i64, String, Option<String>, i64, i64)>(
+            "SELECT id, kind, note, size_bytes, created_at FROM backups WHERE project_id = $1 ORDER BY id DESC LIMIT 100",
+        )
+        .bind(pid)
+        .fetch_all(&state.db)
+        .await
+        {
+            for (bid, bkind, bnote, bsize, bts) in brows {
+                let note_str = bnote.unwrap_or_else(|| "Snapshot".to_string());
+                let idx = backup_ts.partition_point(|&ts| ts <= bts - 5000);
+                let already_logged = idx < backup_ts.len() && backup_ts[idx] < bts + 5000;
+                if !already_logged && bts > 0 {
+                    list.push(AuditItem {
+                        id: 2_000_000 + bid,
+                        project_id: Some(pid),
+                        ts: bts,
+                        actor: "system".to_string(),
+                        action: "backup.create".to_string(),
+                        target: Some(p_name.clone()),
+                        detail: Some(format!(
+                            "Backup #{}: {} ({}, {} KB)",
+                            bid,
+                            note_str,
+                            bkind,
+                            (bsize / 1024).max(1)
+                        )),
+                        ip: None,
+                    });
                 }
             }
         }
@@ -413,27 +458,26 @@ pub(crate) async fn audit_handler(
         list.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| b.id.cmp(&a.id)));
         list.truncate(max_limit);
     } else {
-        let sql = format!(
-            "SELECT id, project_id, ts, actor, action, target, detail, ip FROM audit ORDER BY id DESC LIMIT {}",
-            max_limit
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let rows = stmt
-            .query_map([], |r| row_to_audit_item(r, None))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT id, project_id, ts, actor, action, target, detail, ip FROM audit ORDER BY id DESC LIMIT $1",
+        )
+        .bind(max_limit as i64)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
         let can_global = u.is_main_admin || u.has_power("settings_manage");
-        for r in rows.flatten() {
-            match r.project_id {
-                Some(pid) if !u.can_access_project(pid) => continue,
-                None if !can_global => continue,
-                _ => {}
+        for row in rows {
+            if let Ok(r) = pg_row_to_audit_item(&row, None) {
+                match r.project_id {
+                    Some(pid) if !u.can_access_project(pid) => continue,
+                    None if !can_global => continue,
+                    _ => {}
+                }
+                list.push(r);
             }
-            list.push(r);
         }
     }
-    drop(conn);
 
     cached_json_response(&state.cache, cache_key, &list, std::time::Duration::from_secs(5))
         .map_err(|c| (c, "Serialization error".to_string()))

@@ -303,7 +303,7 @@ export async function deleteUser(userId, username) {
   if (!ok) return;
   try {
     await api(`/api/users/${userId}`, { method: 'DELETE' });
-    toast(`User "${username}" removed from SQLite.`, 'success');
+    toast(`User "${username}" removed from database.`, 'success');
     if (window.loadSettingsView) await window.loadSettingsView();
   } catch (err) {
     toast(`Delete failed: ${err.message}`, 'error');
@@ -367,7 +367,7 @@ document.getElementById('save-new-user-btn')?.addEventListener('click', async (e
         method: 'POST',
         body: { username, password, permissions, allProjects, allowedProjects },
       });
-      toast(`User "${username}" created in SQLite.`, 'success');
+      toast(`User "${username}" created.`, 'success');
     }
     closeModal('modal-create-user');
     if (window.loadSettingsView) await window.loadSettingsView();

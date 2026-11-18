@@ -1,5 +1,6 @@
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use sqlx::{Postgres, QueryBuilder, Row};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -21,6 +22,7 @@ pub struct Logs {
     db: DbPool,
     sender: Arc<broadcast::Sender<LogEntry>>,
     last_entry: Arc<Mutex<Option<(Option<i64>, String, String, i64)>>>,
+    seq: Arc<AtomicI64>,
 }
 
 impl Logs {
@@ -30,6 +32,7 @@ impl Logs {
             db,
             sender: Arc::new(sender),
             last_entry: Arc::new(Mutex::new(None)),
+            seq: Arc::new(AtomicI64::new(1)),
         }
     }
 
@@ -37,6 +40,7 @@ impl Logs {
         self.sender.subscribe()
     }
 
+    /// Broadcasts log immediately to live SSE subscribers and persists asynchronously to PostgreSQL.
     pub fn add(
         &self,
         project_id: Option<i64>,
@@ -62,16 +66,8 @@ impl Logs {
                 *guard = Some((project_id, channel.to_string(), trimmed_msg.to_string(), ts));
             }
         }
-        let id = {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO logs(project_id, deployment_id, channel, level, message, ts) VALUES(?, ?, ?, ?, ?, ?)",
-                params![project_id, deployment_id, channel, level, message, ts],
-            )
-            .ok();
-            conn.last_insert_rowid()
-        };
 
+        let id = self.seq.fetch_add(1, Ordering::Relaxed);
         let entry = LogEntry {
             id,
             project_id,
@@ -82,13 +78,29 @@ impl Logs {
             ts,
         };
 
-        // Broadcast to SSE clients (ignore if no listeners)
-        let _ = self.sender.send(entry);
+        let _ = self.sender.send(entry.clone());
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pool = self.db.clone();
+            handle.spawn(async move {
+                let _ = sqlx::query(
+                    "INSERT INTO logs(project_id, deployment_id, channel, level, message, ts) VALUES($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(entry.project_id)
+                .bind(entry.deployment_id)
+                .bind(entry.channel)
+                .bind(entry.level)
+                .bind(entry.message)
+                .bind(entry.ts)
+                .execute(&pool)
+                .await;
+            });
+        }
 
         id
     }
 
-    pub fn list(
+    pub async fn list(
         &self,
         project_id: Option<i64>,
         deployment_id: Option<i64>,
@@ -96,59 +108,48 @@ impl Logs {
         level: Option<&str>,
         limit: usize,
     ) -> Vec<LogEntry> {
-        let conn = self.db.lock().unwrap();
-        let mut sql = "SELECT id, project_id, deployment_id, channel, level, message, ts FROM logs WHERE 1=1".to_string();
-        let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+            "SELECT id, project_id, deployment_id, channel, level, message, ts FROM logs WHERE 1=1",
+        );
 
         if let Some(pid) = project_id {
-            sql.push_str(" AND project_id = ?");
-            params_vec.push(pid.into());
+            qb.push(" AND project_id = ").push_bind(pid);
         }
         if let Some(did) = deployment_id {
-            sql.push_str(" AND deployment_id = ?");
-            params_vec.push(did.into());
+            qb.push(" AND deployment_id = ").push_bind(did);
         }
         if let Some(ch) = channel {
             if !ch.is_empty() {
-                sql.push_str(" AND channel = ?");
-                params_vec.push(ch.to_string().into());
+                qb.push(" AND channel = ").push_bind(ch);
             }
         }
         if let Some(lvl) = level {
             if !lvl.is_empty() {
-                sql.push_str(" AND level = ?");
-                params_vec.push(lvl.to_string().into());
+                qb.push(" AND level = ").push_bind(lvl);
             }
         }
 
-        sql.push_str(&format!(" ORDER BY id DESC LIMIT {}", limit));
+        qb.push(" ORDER BY id DESC LIMIT ").push_bind(limit as i64);
 
-        let mut stmt = match conn.prepare(&sql) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
+        let Ok(rows) = qb.build().fetch_all(&self.db).await else {
+            return Vec::new();
         };
 
-        let params_slice: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(params_slice.as_slice(), |r| {
-            Ok(LogEntry {
-                id: r.get(0)?,
-                project_id: r.get(1)?,
-                deployment_id: r.get(2)?,
-                channel: r.get(3)?,
-                level: r.get(4)?,
-                message: r.get(5)?,
-                ts: r.get(6)?,
+        let mut list: Vec<LogEntry> = rows
+            .into_iter()
+            .filter_map(|r| {
+                Some(LogEntry {
+                    id: r.try_get(0).ok()?,
+                    project_id: r.try_get(1).ok()?,
+                    deployment_id: r.try_get(2).ok()?,
+                    channel: r.try_get(3).ok()?,
+                    level: r.try_get(4).ok()?,
+                    message: r.try_get(5).ok()?,
+                    ts: r.try_get(6).ok()?,
+                })
             })
-        });
-
-        match rows {
-            Ok(r) => {
-                let mut list: Vec<LogEntry> = r.flatten().collect();
-                list.reverse(); // Chronological order
-                list
-            }
-            Err(_) => Vec::new(),
-        }
+            .collect();
+        list.reverse();
+        list
     }
 }
-

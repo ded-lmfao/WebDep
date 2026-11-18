@@ -1,14 +1,72 @@
-use rusqlite::params;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
-use super::builder::{merge_copy_dir, switch_current, run_shell_cmd};
+use super::builder::{merge_copy_dir, record_release_start_cmd, recorded_release_start_cmd, switch_current, run_shell_cmd};
 use super::Deployer;
 use crate::db::now;
 use crate::git::{CommitInfo, Git};
 
 impl Deployer {
+    /// Copy the app's last output lines into the deployment log, so a failed start shows *why*
+    /// (e.g. "can't open file 'server.py'") instead of only an exit status.
+    async fn attach_recent_app_output(&self, project_id: i64, dep_id: i64) {
+        // stderr/stdout are read asynchronously; give the reader a moment to flush.
+        sleep(Duration::from_millis(400)).await;
+        let mut lines = self.logs.list(Some(project_id), None, Some("app"), None, 12).await;
+        // Only output from this start attempt, not older request logs.
+        let cutoff = now() - 20_000;
+        lines.retain(|l| l.ts >= cutoff);
+        if lines.is_empty() {
+            return;
+        }
+        lines.sort_by_key(|l| l.id);
+        self.logs.add(Some(project_id), Some(dep_id), "deployment", "error", "Last output from the app:");
+        for l in lines {
+            self.logs.add(Some(project_id), Some(dep_id), "app", &l.level, &l.message);
+        }
+    }
+
+    /// After a failed start or health check, put the previously live release back so a broken
+    /// deploy does not leave the site down.
+    async fn restore_previous_release(&self, p: &crate::projects::Project, dep_id: i64, current_symlink: &Path) {
+        let Some(prev_id) = p.current_release_id else {
+            return;
+        };
+        let prev_dir: Option<String> = sqlx::query_scalar("SELECT dir FROM releases WHERE id = $1")
+            .bind(prev_id)
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten();
+        let Some(prev_dir) = prev_dir.map(PathBuf::from).filter(|d| d.is_dir()) else {
+            return;
+        };
+        switch_current(current_symlink, &prev_dir);
+        let env_map = self.projects.get_env_map(p.id).await;
+        // The failed deploy may have come with a new start command: run the old release the way it last worked.
+        let mut prev_project = p.clone();
+        if let Some(cmd) = recorded_release_start_cmd(&prev_dir) {
+            prev_project.start_cmd = cmd;
+        }
+        match self.runtime.start_project(&prev_project, env_map, Some(&prev_dir)).await {
+            Ok(pid) => self.logs.add(
+                Some(p.id),
+                Some(dep_id),
+                "deployment",
+                "warn",
+                &format!("Restored the previous release #{prev_id} (PID {pid}): the site keeps serving the last working version."),
+            ),
+            Err(e) => self.logs.add(
+                Some(p.id),
+                Some(dep_id),
+                "deployment",
+                "error",
+                &format!("Could not restore the previous release #{prev_id}: {e}"),
+            ),
+        };
+    }
+
     pub async fn run_deploy(self: Arc<Self>, project_id: i64, dep_id: i64) {
         {
             let mut spawned = self.spawned_deployments.lock().unwrap();
@@ -28,16 +86,16 @@ impl Deployer {
     }
 
     pub(crate) async fn execute_deploy_inner(&self, project_id: i64, dep_id: i64) {
-        let p = match self.projects.get(project_id) {
+        let p = match self.projects.get(project_id).await {
             Ok(Some(p)) => p,
             _ => {
-                self.finish_deployment(dep_id, "failed", Some("Project not found"));
+                self.finish_deployment(dep_id, "failed", Some("Project not found")).await;
                 return;
             }
         };
 
         let start_stop_seq = self.runtime.get_stop_seq(p.id);
-        let container = self.runtime.ensure_container(&p);
+        let container = self.runtime.ensure_container(&p).await;
         self.logs.add(
             Some(p.id),
             Some(dep_id),
@@ -54,62 +112,81 @@ impl Deployer {
         );
 
         // Stage 1: Fetching
-        self.update_stage(dep_id, "fetching");
+        self.update_stage(dep_id, "fetching").await;
         let repo_dir = Path::new(&p.deploy_dir).join("repo");
-        if let Err(e) = Git::clone_or_fetch(&p.repo_url, &repo_dir, &p.branch) {
+        let local_source = crate::git::is_local_source(&p.repo_url);
+        if local_source {
+            self.logs.add(
+                Some(p.id),
+                Some(dep_id),
+                "deployment",
+                "info",
+                "No Git repository configured: deploying the files uploaded in the Files tab",
+            );
+        } else if let Err(e) = Git::clone_or_fetch(&p.repo_url, &repo_dir, &p.branch) {
             self.logs.add(Some(p.id), Some(dep_id), "github", "error", &format!("Git fetch failed: {}", e));
-            self.finish_deployment(dep_id, "failed", Some(&e));
+            self.finish_deployment(dep_id, "failed", Some(&e)).await;
             return;
         }
 
-        {
-            let conn = self.db.lock().unwrap();
-            let _ = conn.execute(
-                "UPDATE projects SET last_poll_at = ? WHERE id = ?",
-                params![now(), p.id],
-            );
-        }
+        let _ = sqlx::query("UPDATE projects SET last_poll_at = $1 WHERE id = $2")
+            .bind(now())
+            .bind(p.id)
+            .execute(&self.db)
+            .await;
 
-        let requested_sha: Option<String> = {
-            let conn = self.db.lock().unwrap();
-            conn.query_row(
-                "SELECT sha FROM deployments WHERE id = ?",
-                params![dep_id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-            .filter(|s| !s.trim().is_empty())
-        };
+        let requested_sha: Option<String> =
+            sqlx::query_scalar::<_, Option<String>>("SELECT sha FROM deployments WHERE id = $1")
+                .bind(dep_id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten()
+                .flatten()
+                .filter(|s| !s.trim().is_empty());
 
-        let head = match requested_sha {
-            Some(sha) => sha,
-            None => match Git::resolve_head(&repo_dir) {
+        // Commit dates are Unix seconds (as reported by `git log --format=%at`).
+        let local_commit = local_source.then(|| crate::git::local_snapshot_commit(now() / 1000));
+        let head = match (local_commit.as_ref(), requested_sha) {
+            (Some(c), _) => c.sha.clone(),
+            (None, Some(sha)) => sha,
+            (None, None) => match Git::resolve_head(&repo_dir) {
                 Ok(h) => h,
                 Err(e) => {
-                    self.finish_deployment(dep_id, "failed", Some(&e));
+                    self.finish_deployment(dep_id, "failed", Some(&e)).await;
                     return;
                 }
             },
         };
 
         // Stage 2: Pulling
-        self.update_stage(dep_id, "pulling");
+        self.update_stage(dep_id, "pulling").await;
         let is_service = p.project_kind == "service";
         let mut release_dir = Path::new(&p.deploy_dir).join("releases").join(format!("rel-{}", dep_id));
-        if let Err(e) = Git::checkout(&repo_dir, &head, &release_dir) {
+        if local_source {
+            let app_dir = Path::new(&p.deploy_dir).join("app");
+            if is_service {
+                // Manual services run straight from their persistent `app/` folder.
+                let _ = tokio::fs::create_dir_all(&app_dir).await;
+                release_dir = app_dir;
+            } else if let Err(e) = crate::git::snapshot_local_files(&app_dir, &release_dir) {
+                self.logs.add(Some(p.id), Some(dep_id), "deployment", "error", &e);
+                self.finish_deployment(dep_id, "failed", Some(&e)).await;
+                return;
+            }
+        } else if let Err(e) = Git::checkout(&repo_dir, &head, &release_dir) {
             self.logs.add(Some(p.id), Some(dep_id), "deployment", "error", &format!("Checkout error: {}", e));
-            self.finish_deployment(dep_id, "failed", Some(&e));
+            self.finish_deployment(dep_id, "failed", Some(&e)).await;
             return;
         }
 
         // Backend services: merge only the changed/tracked files into the persistent `app/` folder.
         // Untracked files (.env, local configs, databases, uploads) are never deleted or overwritten.
-        if is_service {
+        if is_service && !local_source {
             let app_dir = Path::new(&p.deploy_dir).join("app");
             if let Err(e) = merge_copy_dir(&release_dir, &app_dir) {
                 self.logs.add(Some(p.id), Some(dep_id), "deployment", "error", &format!("Merge error: {}", e));
-                self.finish_deployment(dep_id, "failed", Some(&e));
+                self.finish_deployment(dep_id, "failed", Some(&e)).await;
                 return;
             }
             let _ = tokio::fs::remove_dir_all(&release_dir).await;
@@ -123,36 +200,45 @@ impl Deployer {
             release_dir = app_dir;
         }
 
-        let commit_info = Git::get_commit_info(&repo_dir, &head).unwrap_or(CommitInfo {
+        let commit_info = local_commit.unwrap_or_else(|| Git::get_commit_info(&repo_dir, &head).unwrap_or(CommitInfo {
             sha: head.clone(),
             short_sha: head[..7.min(head.len())].to_string(),
             author: "System".to_string(),
             date: now(),
             message: "Deploy".to_string(),
-        });
+        }));
 
         // Insert release record
-        let release_id = {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO releases(project_id, deployment_id, sha, short_sha, message, author, committed_at, dir, status, created_at)
-                 VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pulled', ?)",
-                params![p.id, dep_id, head, commit_info.short_sha, commit_info.message, commit_info.author, commit_info.date, release_dir.to_str().unwrap_or(""), now()],
-            ).ok();
-            conn.last_insert_rowid()
-        };
+        let release_id: i64 = sqlx::query_scalar(
+            "INSERT INTO releases(project_id, deployment_id, sha, short_sha, message, author, committed_at, dir, status, created_at) \
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'pulled', $9) RETURNING id",
+        )
+        .bind(p.id)
+        .bind(dep_id)
+        .bind(&head)
+        .bind(&commit_info.short_sha)
+        .bind(&commit_info.message)
+        .bind(&commit_info.author)
+        .bind(commit_info.date)
+        .bind(release_dir.to_str().unwrap_or(""))
+        .bind(now())
+        .fetch_one(&self.db)
+        .await
+        .unwrap_or(0);
 
-        {
-            let conn = self.db.lock().unwrap();
-            conn.execute("UPDATE deployments SET release_id=?, sha=? WHERE id=?", params![release_id, head, dep_id]).ok();
-        }
+        let _ = sqlx::query("UPDATE deployments SET release_id = $1, sha = $2 WHERE id = $3")
+            .bind(if release_id > 0 { Some(release_id) } else { None })
+            .bind(&head)
+            .bind(dep_id)
+            .execute(&self.db)
+            .await;
 
         // Link release `data/` folder to isolated container DB and write container-isolated .env
         if !is_service {
             self.runtime.link_work_dir_to_container(&release_dir, &container);
-            let env_map = self.projects.get_env_map(p.id);
+            let env_map = self.projects.get_env_map(p.id).await;
             let (_isolated_env, dotenv_body) = self.runtime.build_container_env(&p, &env_map, &container);
-            let _ = tokio::fs::write(release_dir.join(".env"), dotenv_body).await;
+            crate::runtime::container::write_app_dotenv(&release_dir.join(".env"), dotenv_body).await;
         }
 
         // Stage 3: Installing dependencies
@@ -166,14 +252,14 @@ impl Deployer {
         };
 
         if !effective_install_cmd.trim().is_empty() {
-            self.update_stage(dep_id, "installing");
+            self.update_stage(dep_id, "installing").await;
             self.logs.add(Some(p.id), Some(dep_id), "build", "info", &format!("Running install: {}", effective_install_cmd));
             if let Err(e) = run_shell_cmd(&effective_install_cmd, &release_dir, &self.logs, p.id, dep_id).await {
                 if effective_install_cmd.contains("npm ci") && has_pkg_json {
                     self.logs.add(Some(p.id), Some(dep_id), "build", "warn", "npm ci failed, falling back to npm install...");
                     if let Err(e2) = run_shell_cmd("npm install", &release_dir, &self.logs, p.id, dep_id).await {
                         self.logs.add(Some(p.id), Some(dep_id), "build", "error", &format!("Install failed: {}", e2));
-                        self.finish_deployment(dep_id, "failed", Some(&e2));
+                        self.finish_deployment(dep_id, "failed", Some(&e2)).await;
                         return;
                     }
                 } else if effective_install_cmd.contains("pip") && (e.contains("externally-managed-environment") || e.contains("break-system-packages") || e.contains("uninstall-no-record-file") || e.contains("RECORD")) {
@@ -181,12 +267,12 @@ impl Deployer {
                     let retry_cmd = format!("{} --break-system-packages --ignore-installed", effective_install_cmd);
                     if let Err(e2) = run_shell_cmd(&retry_cmd, &release_dir, &self.logs, p.id, dep_id).await {
                         self.logs.add(Some(p.id), Some(dep_id), "build", "error", &format!("Install failed: {}", e2));
-                        self.finish_deployment(dep_id, "failed", Some(&e2));
+                        self.finish_deployment(dep_id, "failed", Some(&e2)).await;
                         return;
                     }
                 } else {
                     self.logs.add(Some(p.id), Some(dep_id), "build", "error", &format!("Install failed: {}", e));
-                    self.finish_deployment(dep_id, "failed", Some(&e));
+                    self.finish_deployment(dep_id, "failed", Some(&e)).await;
                     return;
                 }
             }
@@ -207,16 +293,16 @@ impl Deployer {
         };
 
         if !effective_build_cmd.trim().is_empty() {
-            self.update_stage(dep_id, "building");
+            self.update_stage(dep_id, "building").await;
             self.logs.add(Some(p.id), Some(dep_id), "build", "info", &format!("Running build: {}", effective_build_cmd));
             if let Err(e) = run_shell_cmd(&effective_build_cmd, &release_dir, &self.logs, p.id, dep_id).await {
-                self.fail_deployment_step(dep_id, p.id, "build", &format!("Build failed: {}", e));
+                self.fail_deployment_step(dep_id, p.id, "build", &format!("Build failed: {}", e)).await;
                 return;
             }
         }
 
         // Stage 5: Deploying (Atomic Symlink Switch)
-        self.update_stage(dep_id, "deploying");
+        self.update_stage(dep_id, "deploying").await;
         let current_symlink = Path::new(&p.deploy_dir).join("current");
         switch_current(&current_symlink, &release_dir);
 
@@ -230,19 +316,34 @@ impl Deployer {
                 "Website was stopped by user during deployment — release built and linked without starting process.",
             );
             let ts = now();
-            {
-                let conn = self.db.lock().unwrap();
-                conn.execute("UPDATE releases SET status='succeeded', build_status='success', health_status='ok', deployed_at=? WHERE id=?", params![ts, release_id]).ok();
-                conn.execute("UPDATE projects SET current_release_id=?, deployed_sha=?, updated_at=? WHERE id=?", params![release_id, head, ts, p.id]).ok();
-            }
-            self.finish_deployment(dep_id, "success", None);
+            let _ = sqlx::query(
+                "UPDATE releases SET status = 'succeeded', build_status = 'success', health_status = 'ok', deployed_at = $1 WHERE id = $2",
+            )
+            .bind(ts)
+            .bind(release_id)
+            .execute(&self.db)
+            .await;
+            let _ = sqlx::query(
+                "UPDATE projects SET current_release_id = $1, deployed_sha = $2, updated_at = $3 WHERE id = $4",
+            )
+            .bind(release_id)
+            .bind(&head)
+            .bind(ts)
+            .bind(p.id)
+            .execute(&self.db)
+            .await;
+            self.finish_deployment(dep_id, "success", None).await;
             return;
         }
 
-        self.update_stage(dep_id, "health_checking");
-        let env_map = self.projects.get_env_map(p.id);
+        self.update_stage(dep_id, "health_checking").await;
+        let env_map = self.projects.get_env_map(p.id).await;
         if let Err(e) = self.runtime.start_project(&p, env_map, Some(&release_dir)).await {
-            self.fail_deployment_step(dep_id, p.id, "app", &format!("Start failed: {}", e));
+            self.attach_recent_app_output(p.id, dep_id).await;
+            if !is_service {
+                self.restore_previous_release(&p, dep_id, &current_symlink).await;
+            }
+            self.fail_deployment_step(dep_id, p.id, "app", &format!("Start failed: {}", e)).await;
             return;
         }
 
@@ -251,7 +352,11 @@ impl Deployer {
             let resolved_health_url = p.health_url.replace("{{PORT}}", &port_str);
             self.logs.add(Some(p.id), Some(dep_id), "health", "info", &format!("Probing health check URL: {}", resolved_health_url));
             if let Err(e) = self.runtime.health_check(&resolved_health_url, p.health_timeout_s as u64).await {
-                self.fail_deployment_step(dep_id, p.id, "health", &format!("Health check failed: {}", e));
+                self.attach_recent_app_output(p.id, dep_id).await;
+                if !is_service {
+                    self.restore_previous_release(&p, dep_id, &current_symlink).await;
+                }
+                self.fail_deployment_step(dep_id, p.id, "health", &format!("Health check failed: {}", e)).await;
                 return;
             }
         }
@@ -261,33 +366,42 @@ impl Deployer {
             sleep(Duration::from_secs(p.stability_s as u64)).await;
         }
 
-        // Mark success & record backup snapshot in SQLite
-        let ts = now();
-        {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "UPDATE releases SET status='succeeded', build_status='success', health_status='ok', deployed_at=? WHERE id=?",
-                params![ts, release_id],
-            ).ok();
-            conn.execute(
-                "UPDATE projects SET current_release_id=?, deployed_sha=?, updated_at=? WHERE id=?",
-                params![release_id, head, ts, p.id],
-            ).ok();
-            conn.execute(
-                "INSERT INTO backups(project_id, release_id, path, size_bytes, note, created_at) VALUES(?, ?, ?, ?, ?, ?)",
-                params![
-                    p.id,
-                    release_id,
-                    release_dir.to_str().unwrap_or(""),
-                    5 * 1024 * 1024i64,
-                    format!("Auto-snapshot for Release #{} ({})", release_id, commit_info.short_sha),
-                    ts
-                ],
-            ).ok();
+        if !is_service {
+            record_release_start_cmd(&release_dir, &p.start_cmd);
         }
 
+        // Mark success & record backup snapshot in PostgreSQL
+        let ts = now();
+        let _ = sqlx::query(
+            "UPDATE releases SET status = 'succeeded', build_status = 'success', health_status = 'ok', deployed_at = $1 WHERE id = $2",
+        )
+        .bind(ts)
+        .bind(release_id)
+        .execute(&self.db)
+        .await;
+        let _ = sqlx::query(
+            "UPDATE projects SET current_release_id = $1, deployed_sha = $2, updated_at = $3 WHERE id = $4",
+        )
+        .bind(release_id)
+        .bind(&head)
+        .bind(ts)
+        .bind(p.id)
+        .execute(&self.db)
+        .await;
+        let _ = sqlx::query(
+            "INSERT INTO backups(project_id, release_id, path, size_bytes, note, created_at) VALUES($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(p.id)
+        .bind(release_id)
+        .bind(release_dir.to_str().unwrap_or(""))
+        .bind(5 * 1024 * 1024i64)
+        .bind(format!("Auto-snapshot for Release #{} ({})", release_id, commit_info.short_sha))
+        .bind(ts)
+        .execute(&self.db)
+        .await;
+
         self.logs.add(Some(p.id), Some(dep_id), "deployment", "info", "Deployment completed successfully! Version is live.");
-        self.finish_deployment(dep_id, "success", None);
+        self.finish_deployment(dep_id, "success", None).await;
     }
 
     pub async fn run_rollback(self: Arc<Self>, project_id: i64, dep_id: i64, target_release_id: i64) {
@@ -303,20 +417,24 @@ impl Deployer {
             None => return,
         };
 
-        let p = match self.projects.get(project_id) {
+        let p = match self.projects.get(project_id).await {
             Ok(Some(p)) => p,
             _ => {
-                self.finish_deployment(dep_id, "failed", Some("Project not found"));
+                self.finish_deployment(dep_id, "failed", Some("Project not found")).await;
                 drop(permit);
                 return;
             }
         };
 
-        let releases = self.list_releases(project_id);
-        let target = releases
-            .into_iter()
-            .find(|r| r.id == target_release_id)
-            .or_else(|| self.list_releases(project_id).into_iter().find(|r| r.status == "succeeded"));
+        let releases = self.list_releases(project_id).await;
+        let target = match releases.into_iter().find(|r| r.id == target_release_id) {
+            Some(r) => Some(r),
+            None => self
+                .list_releases(project_id)
+                .await
+                .into_iter()
+                .find(|r| r.status == "succeeded"),
+        };
 
         let target = match target {
             Some(r) => r,
@@ -335,15 +453,17 @@ impl Deployer {
             &format!("Rolling back {} to Release #{} ({})", p.name, target.id, target.short_sha),
         );
 
-        {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "UPDATE deployments SET release_id=?, from_release_id=?, sha=? WHERE id=?",
-                params![target.id, p.current_release_id, target.sha, dep_id],
-            ).ok();
-        }
+        let _ = sqlx::query(
+            "UPDATE deployments SET release_id = $1, from_release_id = $2, sha = $3 WHERE id = $4",
+        )
+        .bind(target.id)
+        .bind(p.current_release_id)
+        .bind(&target.sha)
+        .bind(dep_id)
+        .execute(&self.db)
+        .await;
 
-        self.update_stage(dep_id, "deploying");
+        self.update_stage(dep_id, "deploying").await;
         let release_dir = PathBuf::from(&target.dir);
         if !release_dir.exists() {
             self.execute_deploy_inner(project_id, dep_id).await;
@@ -354,25 +474,27 @@ impl Deployer {
         let current_symlink = Path::new(&p.deploy_dir).join("current");
         switch_current(&current_symlink, &release_dir);
 
-        self.update_stage(dep_id, "health_checking");
-        let env_map = self.projects.get_env_map(p.id);
+        self.update_stage(dep_id, "health_checking").await;
+        let env_map = self.projects.get_env_map(p.id).await;
         if let Err(e) = self.runtime.start_project(&p, env_map, Some(&release_dir)).await {
-            self.fail_deployment_step(dep_id, p.id, "rollback", &format!("Start failed: {}", e));
+            self.fail_deployment_step(dep_id, p.id, "rollback", &format!("Start failed: {}", e)).await;
             drop(permit);
             return;
         }
 
         let ts = now();
-        {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "UPDATE projects SET current_release_id=?, deployed_sha=?, updated_at=? WHERE id=?",
-                params![target.id, target.sha, ts, p.id],
-            ).ok();
-        }
+        let _ = sqlx::query(
+            "UPDATE projects SET current_release_id = $1, deployed_sha = $2, updated_at = $3 WHERE id = $4",
+        )
+        .bind(target.id)
+        .bind(&target.sha)
+        .bind(ts)
+        .bind(p.id)
+        .execute(&self.db)
+        .await;
 
         self.logs.add(Some(p.id), Some(dep_id), "rollback", "info", &format!("Rollback to Release #{} succeeded!", target.id));
-        self.finish_deployment(dep_id, "success", None);
+        self.finish_deployment(dep_id, "success", None).await;
         drop(permit);
     }
 }

@@ -43,7 +43,7 @@ async function loadReleasesView() {
         return `
           <tr>
             <td><strong>Release #${r.id}</strong></td>
-            <td><span class="sha-pill">${r.short_sha || r.sha.slice(0, 7)}</span></td>
+            <td><span class="sha-pill">${r.short_sha || shortSha(r.sha)}</span></td>
             <td style="max-width: 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(r.message || '')}</td>
             <td>${escapeHtml(r.author || 'Unknown')}</td>
             <td>${formatDate(r.deployed_at || r.created_at)}</td>
@@ -64,6 +64,125 @@ async function loadReleasesView() {
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--danger); padding: 24px;">${escapeHtml(err.message)}</td></tr>`;
   }
+
+  await loadProjectBackupsTable(p);
+}
+
+function formatBackupSize(bytes) {
+  const b = Number(bytes || 0);
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function loadProjectBackupsTable(p) {
+  const tbody = document.getElementById('backups-table-body');
+  if (!tbody || !p) return;
+  try {
+    const backups = await api(`/api/projects/${p.id}/backups`, { noCache: true });
+    if (!Array.isArray(backups) || !backups.length) {
+      setHtmlIfChanged(tbody, '<tr><td colspan="6" style="text-align: center; padding: 20px;">No backups or snapshots recorded yet.</td></tr>');
+      return;
+    }
+    const onlineNodes = (state.nodes || []).filter((n) => n.status === 'online');
+    const html = backups.map((b) => {
+      const isOffNode = b.storageMode === 'off-node';
+      const storageBadge = isOffNode
+        ? '<span class="badge badge-info">Off-Node (Core)</span>'
+        : '<span class="badge badge-neutral">Local</span>';
+      const nodeOptions = onlineNodes.length
+        ? onlineNodes.map((n) =>
+            `<option value="${n.id}" ${Number(n.id) === Number(p.node_id) ? 'selected' : ''}>${escapeHtml(n.name)}</option>`
+          ).join('')
+        : '<option value="">Current Node</option>';
+      return `
+        <tr>
+          <td><strong>#${b.id}</strong> <span style="font-size:11.5px; color:var(--text-dim);">${escapeHtml(b.kind || '')}</span></td>
+          <td>${storageBadge}</td>
+          <td>${formatBackupSize(b.size)}</td>
+          <td style="max-width:220px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(b.note || '')}</td>
+          <td>${formatDate(b.ts)}</td>
+          <td>
+            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+              ${isOffNode && onlineNodes.length ? `<select id="backup-restore-node-${b.id}" class="form-control" style="width:130px; height:28px; font-size:11.5px; padding:2px 6px;">${nodeOptions}</select>` : ''}
+              ${hasPower('backups') ? `<button class="btn btn-primary btn-sm" onclick="restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})">Restore</button>` : ''}
+              ${hasPower('backups') ? `<button class="btn btn-danger btn-sm" onclick="deleteProjectBackup(${p.id}, ${b.id})">Delete</button>` : ''}
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+    setHtmlIfChanged(tbody, html);
+  } catch (err) {
+    setHtmlIfChanged(tbody, `<tr><td colspan="6" style="text-align: center; color: var(--danger); padding: 20px;">${escapeHtml(err.message)}</td></tr>`);
+  }
+}
+
+async function createProjectBackupSnapshot() {
+  const p = getSelectedProject();
+  if (!p) {
+    toast('Select a website first.', 'warning');
+    return;
+  }
+  const offNode = Boolean(document.getElementById('backup-offnode-checkbox')?.checked);
+  const btn = document.getElementById('create-backup-snapshot-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api(`/api/projects/${p.id}/backup`, {
+      method: 'POST',
+      body: {
+        kind: 'full-snapshot',
+        note: offNode ? 'Off-node archive snapshot' : 'Manual snapshot',
+        offNode,
+      },
+    });
+    toast(`Created ${res.storageMode || 'local'} backup #${res.backupId}`, 'success');
+    await loadReleasesView();
+  } catch (err) {
+    toast(`Backup failed: ${err.message}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function restoreProjectBackup(projectId, backupId, isOffNode) {
+  const sel = document.getElementById(`backup-restore-node-${backupId}`);
+  const targetNodeId = isOffNode && sel && sel.value ? Number(sel.value) : null;
+  const ok = await showConfirmDialog({
+    title: `Restore Backup #${backupId}`,
+    message: targetNodeId
+      ? `Restore off-node backup #${backupId} onto Node #${targetNodeId}?`
+      : `Restore backup #${backupId} on the active node?`,
+    confirmText: 'Restore Backup',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const body = targetNodeId ? { backupId, targetNodeId } : { backupId };
+    await api(`/api/projects/${projectId}/backups/restore`, { method: 'POST', body });
+    toast(`Restored backup #${backupId}`, 'success');
+    if (typeof window.refreshProjects === 'function') await window.refreshProjects();
+    await loadReleasesView();
+  } catch (err) {
+    toast(`Restore failed: ${err.message}`, 'error');
+  }
+}
+
+async function deleteProjectBackup(projectId, backupId) {
+  const ok = await showConfirmDialog({
+    title: `Delete Backup #${backupId}`,
+    message: `Remove backup #${backupId} permanently?`,
+    confirmText: 'Delete Backup',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/projects/${projectId}/backups/${backupId}`, { method: 'DELETE' });
+    toast(`Deleted backup #${backupId}`, 'info');
+    await loadReleasesView();
+  } catch (err) {
+    toast(`Delete failed: ${err.message}`, 'error');
+  }
 }
 
 async function loadRollbacksView() {
@@ -78,7 +197,7 @@ async function loadRollbacksView() {
     const live = releases.find((r) => r.live);
 
     if (live) {
-      liveInfo.innerHTML = `Release #${live.id} &bull; Commit <span class="sha-pill">${live.sha.slice(0, 7)}</span> &bull; <em>"${escapeHtml(live.message || 'No commit message')}"</em> &bull; Deployed ${formatRelativeTime(live.deployed_at || live.created_at)}`;
+      liveInfo.innerHTML = `Release #${live.id} &bull; Commit <span class="sha-pill">${shortSha(live.sha)}</span> &bull; <em>"${escapeHtml(live.message || 'No commit message')}"</em> &bull; Deployed ${formatRelativeTime(live.deployed_at || live.created_at)}`;
     } else {
       liveInfo.textContent = 'No live release active currently.';
     }
@@ -96,7 +215,7 @@ async function loadRollbacksView() {
       setHtmlIfChanged(tbody, slice.map((r) => `
         <tr>
           <td><strong>Release #${r.id}</strong></td>
-          <td><span class="sha-pill">${r.sha.slice(0, 7)}</span></td>
+          <td><span class="sha-pill">${shortSha(r.sha)}</span></td>
           <td style="max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(r.message || '')}</td>
           <td>${escapeHtml(r.author || 'Unknown')}</td>
           <td>${formatDate(r.deployed_at || r.created_at)}</td>
@@ -135,7 +254,7 @@ async function rollbackToRelease(projectId, releaseId) {
 async function deleteRelease(projectId, releaseId) {
   const ok = await showConfirmDialog({
     title: `Delete Release #${releaseId}`,
-    message: `Permanently delete Release #${releaseId} from disk and SQLite?\n\nThis release artifact and rollback point will be removed.`,
+    message: `Permanently delete Release #${releaseId} from disk and the control database?\n\nThis release artifact and rollback point will be removed.`,
     confirmText: 'Delete Release',
     danger: true,
   });
@@ -254,6 +373,9 @@ window.rollbackToRelease = rollbackToRelease;
 window.deleteRelease = deleteRelease;
 window.openCreateReleaseModal = openCreateReleaseModal;
 window.confirmCreateRelease = confirmCreateRelease;
+window.createProjectBackupSnapshot = createProjectBackupSnapshot;
+window.restoreProjectBackup = restoreProjectBackup;
+window.deleteProjectBackup = deleteProjectBackup;
 
 document.getElementById('create-release-btn')?.addEventListener('click', openCreateReleaseModal);
 document.getElementById('confirm-create-release-btn')?.addEventListener('click', confirmCreateRelease);

@@ -335,6 +335,8 @@ fn is_spa_route_path(raw: &str) -> bool {
             | "monitor"
             | "settings"
             | "audit"
+            | "nodes"
+            | "modules"
     )
 }
 
@@ -508,6 +510,17 @@ fn build_asset_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_every_sidebar_view_is_a_spa_route() {
+        // Reloading the browser on any sidebar view must serve index.html, not 404.
+        for view in ["overview", "projects", "services", "databases", "nodes", "modules", "settings"] {
+            assert!(is_spa_route_path(view), "{view} should be a SPA route");
+            assert!(is_spa_route_path(&format!("/{view}/42")), "{view}/<id> should be a SPA route");
+        }
+        assert!(!is_spa_route_path("/style.css"));
+        assert!(!is_spa_route_path("/api/projects"));
+    }
 
     #[test]
     fn test_embedded_css_bundle_and_etag_consistency() {
