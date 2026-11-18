@@ -19,13 +19,31 @@ let modulesSearch = '';
 const activeInstalls = new Set();
 let lastInstallLogs = [];
 
+const isDigit = (c) => c >= '0' && c <= '9';
+
+// First "<digits>.<digit>..." run in the text, cut to at most 4 parts. A plain scan instead of a
+// regex keeps it linear-time on any input.
+function findVersionNumber(s) {
+  for (let i = 0; i < s.length; i++) {
+    if (!isDigit(s[i])) continue;
+    let end = i;
+    while (end < s.length && (isDigit(s[end]) || s[end] === '.')) end++;
+    const run = s.slice(i, end);
+    const dot = run.indexOf('.');
+    if (dot > 0 && isDigit(run[dot + 1] || '')) {
+      return run.split('.').filter(Boolean).slice(0, 4).join('.');
+    }
+  }
+  return null;
+}
+
 function shortVersion(ver) {
   const s = String(ver || '').trim();
   if (!s) return 'Installed';
   // Tool banners vary ("git version 2.54.0 (Apple Git-157)", 'openjdk version "17.0.18" 2026-01-20',
   // "go version go1.26.0 darwin/arm64"): show just the version number, full text stays in the tooltip.
-  const m = s.match(/\d+\.\d[\d.]*/);
-  if (m) return m[0].split('.').filter(Boolean).slice(0, 4).join('.');
+  const version = findVersionNumber(s);
+  if (version) return version;
   const cleaned = s.replace(/^"|"$/g, '');
   return cleaned.length > 16 ? `${cleaned.slice(0, 15)}…` : cleaned;
 }
