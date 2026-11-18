@@ -354,7 +354,8 @@ function openAddWebsiteModal() {
   const portInput = document.getElementById('website-port');
   if (portInput) portInput.value = getNextAvailablePort(3000);
 
-  populateTargetNodeSelect('website-node-id', 'website-node-group', null, false);
+  populateTargetNodeSelect('website-node-id', 'website-node-group', null, false)
+    .catch((err) => console.warn('Could not load target nodes:', err));
   openModal('modal-website');
 }
 window.openAddWebsiteModal = openAddWebsiteModal;
@@ -405,7 +406,8 @@ async function openEditWebsiteModal(projectId) {
     c.classList.toggle('active', c.getAttribute('data-type') === p.project_type);
   });
 
-  populateTargetNodeSelect('website-node-id', 'website-node-group', p.node_id, true);
+  populateTargetNodeSelect('website-node-id', 'website-node-group', p.node_id, true)
+    .catch((err) => console.warn('Could not load target nodes:', err));
   openModal('modal-website');
 }
 window.openEditWebsiteModal = openEditWebsiteModal;

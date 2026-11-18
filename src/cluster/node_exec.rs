@@ -820,7 +820,8 @@ async fn run_remote_deploy_task(
     });
     let current_symlink = Path::new(&p.deploy_dir).join("current");
     // Remember the live release so a failed start/health check can put it back.
-    let previous_release = std::fs::read_link(&current_symlink)
+    let previous_release = tokio::fs::read_link(&current_symlink)
+        .await
         .ok()
         .filter(|prev| prev.is_dir() && *prev != release_dir);
     switch_current(&current_symlink, &release_dir);
@@ -2730,22 +2731,23 @@ async fn p2p_receive_shift_tar(
     let mut received_bytes = 0u64;
     let mut stream = body.into_data_stream();
     loop {
-        let next_chunk = tokio::time::timeout(Duration::from_secs(45), stream.next())
-            .await
-            .map_err(|_| {
-                let _ = std::fs::remove_file(&tmp_archive);
-                (
-                    StatusCode::REQUEST_TIMEOUT,
-                    "P2P upload stream stalled for 45s".to_string(),
-                )
-            })?;
+        let Ok(next_chunk) = tokio::time::timeout(Duration::from_secs(45), stream.next()).await else {
+            let _ = tokio::fs::remove_file(&tmp_archive).await;
+            return Err((
+                StatusCode::REQUEST_TIMEOUT,
+                "P2P upload stream stalled for 45s".to_string(),
+            ));
+        };
         let Some(chunk_res) = next_chunk else {
             break;
         };
-        let chunk = chunk_res.map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_archive);
-            (StatusCode::BAD_REQUEST, format!("Stream read failed: {e}"))
-        })?;
+        let chunk = match chunk_res {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp_archive).await;
+                return Err((StatusCode::BAD_REQUEST, format!("Stream read failed: {e}")));
+            }
+        };
         received_bytes = received_bytes.saturating_add(chunk.len() as u64);
         if received_bytes > ticket.max_bytes {
             let _ = tokio::fs::remove_file(&tmp_archive).await;
@@ -2775,12 +2777,15 @@ async fn p2p_receive_shift_tar(
         )?;
         Ok::<u64, String>(extracted)
     })
-    .await
-    .map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_archive);
-        let _ = std::fs::remove_dir_all(&unpack_stage);
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Unpack worker failed: {e}"))
-    })?;
+    .await;
+    let extracted_res = match extracted_res {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp_archive).await;
+            let _ = tokio::fs::remove_dir_all(&unpack_stage).await;
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Unpack worker failed: {e}")));
+        }
+    };
 
     let _ = tokio::fs::remove_file(&tmp_archive).await;
     let _ = tokio::fs::remove_dir_all(&unpack_stage).await;

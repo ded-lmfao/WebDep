@@ -47,7 +47,7 @@ document.getElementById('db-create-dbname')?.addEventListener('input', (e) => {
 document.getElementById('db-create-name')?.addEventListener('input', (e) => {
   const dbNameEl = document.getElementById('db-create-dbname');
   if (!dbNameEl || dbNameEl.dataset.touched === '1') return;
-  let slug = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
+  let slug = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_/, '').replace(/_$/, '').slice(0, 48);
   if (slug && /^[0-9]/.test(slug)) slug = `db_${slug}`;
   dbNameEl.value = slug;
 });

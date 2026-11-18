@@ -565,14 +565,16 @@ impl Updater {
         #[cfg(not(test))]
         if Path::new(".git").exists() {
             let git_url = format!("https://github.com/{}.git", slug);
-            let set_out = Command::new("git")
+            let set_out = tokio::process::Command::new("git")
                 .args(["remote", "set-url", "origin", &git_url])
-                .output();
+                .output()
+                .await;
             if let Ok(o) = set_out {
                 if !o.status.success() {
-                    let _ = Command::new("git")
+                    let _ = tokio::process::Command::new("git")
                         .args(["remote", "add", "origin", &git_url])
-                        .output();
+                        .output()
+                        .await;
                 }
             }
         }

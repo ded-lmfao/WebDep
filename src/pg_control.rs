@@ -164,10 +164,10 @@ pub async fn ensure_local_pg_with_port(
     let pgdata_dir = control_dir.join("pgdata");
     let conn_json_path = control_dir.join("conn.json");
     let log_file = control_dir.join("postgresql.log");
-    std::fs::create_dir_all(&control_dir)?;
+    tokio::fs::create_dir_all(&control_dir).await?;
 
     let mut cfg = if conn_json_path.is_file() {
-        let raw = std::fs::read_to_string(&conn_json_path)?;
+        let raw = tokio::fs::read_to_string(&conn_json_path).await?;
         serde_json::from_str::<ControlPgConfig>(&raw)?
     } else {
         let port = forced_port.unwrap_or_else(pick_control_pg_port);
@@ -178,11 +178,11 @@ pub async fn ensure_local_pg_with_port(
             database: "webdep_core".to_string(),
         };
         let serialized = serde_json::to_string_pretty(&new_cfg)?;
-        std::fs::write(&conn_json_path, serialized)?;
+        tokio::fs::write(&conn_json_path, serialized).await?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&conn_json_path, std::fs::Permissions::from_mode(0o600));
+            let _ = tokio::fs::set_permissions(&conn_json_path, std::fs::Permissions::from_mode(0o600)).await;
         }
         new_cfg
     };
@@ -193,14 +193,15 @@ pub async fn ensure_local_pg_with_port(
 
     let pgdata_initialized = pgdata_dir.join("PG_VERSION").is_file();
     if !pgdata_initialized {
-        std::fs::create_dir_all(&pgdata_dir)?;
+        tokio::fs::create_dir_all(&pgdata_dir).await?;
         let pwfile_path = control_dir.join(".init_pw");
-        std::fs::write(&pwfile_path, format!("{}\n", cfg.password))?;
+        tokio::fs::write(&pwfile_path, format!("{}\n", cfg.password)).await?;
         ensure_pg_permissions(&control_dir, Some(&pgdata_dir));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&pwfile_path, std::fs::Permissions::from_mode(0o644));
+            // Owner-only: ensure_pg_permissions above already chowned it to the user initdb runs as.
+            let _ = tokio::fs::set_permissions(&pwfile_path, std::fs::Permissions::from_mode(0o600)).await;
         }
 
         let data_arg = to_clean_path_str(&pgdata_dir);
@@ -219,7 +220,7 @@ pub async fn ensure_local_pg_with_port(
         )
         .output()
         .await;
-        let _ = std::fs::remove_file(&pwfile_path);
+        let _ = tokio::fs::remove_file(&pwfile_path).await;
 
         let out = out?;
         if !out.status.success() {
@@ -233,11 +234,11 @@ pub async fn ensure_local_pg_with_port(
             cfg.port
         );
         let conf_path = pgdata_dir.join("postgresql.conf");
-        let existing = std::fs::read_to_string(&conf_path).unwrap_or_default();
-        std::fs::write(&conf_path, format!("{}{}", existing, pg_conf))?;
+        let existing = tokio::fs::read_to_string(&conf_path).await.unwrap_or_default();
+        tokio::fs::write(&conf_path, format!("{}{}", existing, pg_conf)).await?;
 
         let hba = generate_pg_hba("local", "");
-        std::fs::write(pgdata_dir.join("pg_hba.conf"), hba)?;
+        tokio::fs::write(pgdata_dir.join("pg_hba.conf"), hba).await?;
         ensure_pg_permissions(&control_dir, Some(&pgdata_dir));
         info!("Initialized zero-config control PostgreSQL cluster at {} (port {})", pgdata_dir.display(), cfg.port);
     }
@@ -252,7 +253,7 @@ pub async fn ensure_local_pg_with_port(
         if pid_file.exists() {
             let stale = read_pg_pid(&pgdata_dir).map(|p| !is_process_alive(p)).unwrap_or(true);
             if stale {
-                let _ = std::fs::remove_file(&pid_file);
+                let _ = tokio::fs::remove_file(&pid_file).await;
             }
         }
         ensure_pg_permissions(&control_dir, Some(&pgdata_dir));
@@ -268,7 +269,7 @@ pub async fn ensure_local_pg_with_port(
         let _ = tokio::time::timeout(Duration::from_secs(5), start_cmd.status()).await;
 
         if wait_for_pg_ready(cfg.port, &pgdata_dir, 15_000).await.is_none() {
-            let log_tail = std::fs::read_to_string(&log_file).unwrap_or_default();
+            let log_tail = tokio::fs::read_to_string(&log_file).await.unwrap_or_default();
             let pid = read_pg_pid(&pgdata_dir);
             let alive = pid.map(is_process_alive).unwrap_or(false);
             let tcp_ok = tokio::net::TcpStream::connect(("127.0.0.1", cfg.port))

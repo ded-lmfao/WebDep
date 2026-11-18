@@ -24,8 +24,8 @@ function shortVersion(ver) {
   if (!s) return 'Installed';
   // Tool banners vary ("git version 2.54.0 (Apple Git-157)", 'openjdk version "17.0.18" 2026-01-20',
   // "go version go1.26.0 darwin/arm64"): show just the version number, full text stays in the tooltip.
-  const m = s.match(/\d+(?:\.\d+){1,3}/);
-  if (m) return m[0];
+  const m = s.match(/\d+\.\d[\d.]*/);
+  if (m) return m[0].split('.').filter(Boolean).slice(0, 4).join('.');
   const cleaned = s.replace(/^"|"$/g, '');
   return cleaned.length > 16 ? `${cleaned.slice(0, 15)}…` : cleaned;
 }

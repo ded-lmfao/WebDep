@@ -577,15 +577,15 @@ function escapeHtml(str) {
 }
 
 function normalizeTimestampMs(ts) {
-  if (ts === null || ts === undefined || ts === '') return NaN;
+  if (ts === null || ts === undefined || ts === '') return Number.NaN;
   if (typeof ts === 'number') {
-    if (!Number.isFinite(ts) || ts <= 0) return NaN;
+    if (!Number.isFinite(ts) || ts <= 0) return Number.NaN;
     return ts < 1e12 ? ts * 1000 : ts;
   }
   const raw = String(ts).trim();
   if (/^\d+(\.\d+)?$/.test(raw)) {
     const n = Number(raw);
-    if (!Number.isFinite(n) || n <= 0) return NaN;
+    if (!Number.isFinite(n) || n <= 0) return Number.NaN;
     return n < 1e12 ? n * 1000 : n;
   }
   return new Date(raw).getTime();
