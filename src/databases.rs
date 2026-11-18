@@ -739,6 +739,7 @@ impl Databases {
             let _ = tokio::fs::remove_file(&pid_file).await;
         }
 
+        crate::databases::security::ensure_tcp_only_pg_conf(&data_dir).await;
         ensure_pg_permissions(db_dir, Some(&data_dir));
         rotate_pg_log(&log_file).await;
         let mut start_cmd = make_pg_server_command(

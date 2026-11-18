@@ -86,6 +86,30 @@ pub fn read_pg_started_at(data_dir: &Path) -> Option<i64> {
     None
 }
 
+const TCP_ONLY_SETTING: &str = "unix_socket_directories = ''";
+
+/// WebDep connects to every PostgreSQL it runs over TCP (127.0.0.1), so turn off the Unix socket.
+/// Its default folder (e.g. /var/run/postgresql) belongs to the `postgres` user, and a server
+/// started as any other user dies with "could not create lock file ... Permission denied".
+/// Idempotent; run before each start so clusters created by older versions get it too.
+pub async fn ensure_tcp_only_pg_conf(pgdata_dir: &Path) {
+    let conf_path = pgdata_dir.join("postgresql.conf");
+    let Ok(existing) = tokio::fs::read_to_string(&conf_path).await else {
+        return;
+    };
+    if existing.lines().any(|l| l.trim() == TCP_ONLY_SETTING) {
+        return;
+    }
+    let mut updated = existing;
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("# WebDep: TCP only, no Unix socket (its default folder may not be writable)\n");
+    updated.push_str(TCP_ONLY_SETTING);
+    updated.push('\n');
+    let _ = tokio::fs::write(&conf_path, updated).await;
+}
+
 pub async fn wait_for_pg_ready(port: u16, data_dir: &Path, max_wait_ms: u64) -> Option<u32> {
     let start = std::time::Instant::now();
     let addr = format!("127.0.0.1:{}", port);
@@ -157,6 +181,22 @@ pub async fn remove_firewall_rules(port: u16, allowed_ips: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tcp_only_conf_is_appended_once() {
+        let dir = std::env::temp_dir().join(format!("webdep-tcp-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("postgresql.conf");
+        std::fs::write(&conf, "port = 5432").unwrap();
+
+        ensure_tcp_only_pg_conf(&dir).await;
+        ensure_tcp_only_pg_conf(&dir).await;
+
+        let text = std::fs::read_to_string(&conf).unwrap();
+        assert!(text.starts_with("port = 5432\n"));
+        assert_eq!(text.lines().filter(|l| l.trim() == TCP_ONLY_SETTING).count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn test_ip_allowlist_validation() {

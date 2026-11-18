@@ -7,7 +7,9 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::databases::binaries::{ensure_pg_permissions, make_pg_server_command, PgBinaries};
-use crate::databases::security::{generate_pg_hba, is_process_alive, read_pg_pid, to_clean_path_str, wait_for_pg_ready};
+use crate::databases::security::{
+    ensure_tcp_only_pg_conf, generate_pg_hba, is_process_alive, read_pg_pid, to_clean_path_str, wait_for_pg_ready,
+};
 
 pub const DEFAULT_CONTROL_PG_PORT: u16 = 5431;
 
@@ -256,6 +258,7 @@ pub async fn ensure_local_pg_with_port(
                 let _ = tokio::fs::remove_file(&pid_file).await;
             }
         }
+        ensure_tcp_only_pg_conf(&pgdata_dir).await;
         ensure_pg_permissions(&control_dir, Some(&pgdata_dir));
         let data_arg = to_clean_path_str(&pgdata_dir);
         let log_arg = to_clean_path_str(&log_file);
