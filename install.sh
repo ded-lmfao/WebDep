@@ -137,7 +137,8 @@ if [[ -z "$ROLE" ]] && ( : </dev/tty ) 2>/dev/null; then
     ask INSTALL_DIR "Install folder" "$INSTALL_DIR"
     if [[ "$ROLE" == "node" ]]; then
         echo "  (Get the URL and token from your dashboard: Nodes -> + Add Node)"
-        [[ -n "$JOIN_URL" ]]   || ask JOIN_URL "Dashboard URL (e.g. http://1.2.3.4:4600)"
+        # Example text only; the panel listens on plain HTTP until a domain with HTTPS is configured.
+        [[ -n "$JOIN_URL" ]]   || ask JOIN_URL "Dashboard URL (e.g. http://1.2.3.4:4600)"  # NOSONAR
         [[ -n "$JOIN_TOKEN" ]] || ask JOIN_TOKEN "Join token"
         ask node_name "Name for this server (optional)" "$(hostname)"
         [[ -n "$node_name" ]] && NODE_ARGS+=(--name "$node_name")
@@ -195,7 +196,8 @@ echo ""
 say "Installed in ${INSTALL_DIR}."
 if [[ "$ROLE" != "node" ]]; then
     PORT=$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
-    say "Open the dashboard:  http://<this-server-ip>:${PORT:-4600}"
+    # Display text only: a fresh panel serves plain HTTP on its port until HTTPS is set up for a domain.
+    say "Open the dashboard:  http://<this-server-ip>:${PORT:-4600}"  # NOSONAR
     say "First-login password: sudo journalctl -u webdep-core | grep -i password   (or see ${INSTALL_DIR}/.env)"
 fi
 say "Update later: run the same install command again."
