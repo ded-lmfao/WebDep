@@ -120,8 +120,9 @@ fn clear_readonly_recursive(path: &Path) {
                 use std::os::unix::fs::PermissionsExt;
                 perms.set_mode(perms.mode() | 0o200);
             }
+            // Windows has no group/other bits: this only clears the file's read-only attribute.
             #[cfg(not(unix))]
-            perms.set_readonly(false);
+            perms.set_readonly(false); // NOSONAR
             let _ = std::fs::set_permissions(path, perms);
         }
         if meta.is_dir() {
