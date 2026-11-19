@@ -18,9 +18,8 @@ import {
   showConfirmDialog,
   showCopyDialog,
   hasCachedApi,
-  isSensitivePublicIp,
-  renderBlurPublicIpPill,
-  renderBlurredPublicIpText,
+  isPublicIp,
+  renderPublicIpPill,
 } from './state.js';
 import { api, toast } from './api.js';
 import { formatLogLine } from './logs.js';
@@ -250,7 +249,7 @@ async function loadDatabaseOverviewSection(db) {
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px;">
         <div style="background: var(--bg-alt); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px 12px;">
           <div style="font-size: 11px; color: var(--text-dim); margin-bottom: 4px;">Host / Endpoint</div>
-          <div style="font-family: var(--font-mono); font-size: 12.5px; color: var(--text-main); font-weight: 600; display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">${isSensitivePublicIp(hostOrDomain) ? `${renderBlurPublicIpPill(hostOrDomain, { label: 'Host' })}:${db.port || 5432}` : `${escapeHtml(hostOrDomain)}:${db.port || 5432}`}</div>
+          <div style="font-family: var(--font-mono); font-size: 12.5px; color: var(--text-main); font-weight: 600; display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">${isPublicIp(hostOrDomain) ? `${renderPublicIpPill(hostOrDomain, { label: 'Host' })}:${db.port || 5432}` : `${escapeHtml(hostOrDomain)}:${db.port || 5432}`}</div>
         </div>
         <div style="background: var(--bg-alt); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px 12px;">
           <div style="font-size: 11px; color: var(--text-dim); margin-bottom: 4px;">Database Name</div>
@@ -268,7 +267,7 @@ async function loadDatabaseOverviewSection(db) {
       <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; background: var(--bg-alt); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 12px;">
         <div style="min-width: 0; flex: 1;">
           <div style="font-size: 11px; color: var(--text-dim); margin-bottom: 2px;">PostgreSQL CLI Command &bull; Data Dir: <code>${escapeHtml(dataDir)}</code></div>
-          <code style="font-size: 12px; color: var(--text-main); word-break: break-all;">${renderBlurredPublicIpText(psqlCmd)}</code>
+          <code style="font-size: 12px; color: var(--text-main); word-break: break-all;">${escapeHtml(psqlCmd)}</code>
         </div>
         <div style="display: flex; gap: 6px; flex-shrink: 0;">
           ${canCreds ? `<button class="btn btn-secondary btn-sm" onclick="showDatabaseDetails(${db.id})" title="Connection Strings &amp; Credentials">Creds</button>` : ''}

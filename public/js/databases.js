@@ -12,8 +12,7 @@ import {
   formatRelativeTime,
   setHtmlIfChanged,
   matchesNodeFilter,
-  hasSensitivePublicIpv4,
-  renderBlurredPublicIpText,
+  appNodeBadgeHtml,
 } from './state.js';
 import { api, toast } from './api.js';
 import { renderPipelineStages } from './deployments.js';
@@ -254,14 +253,15 @@ export function renderDatabasesList() {
 
         <!-- Command / Endpoint Line -->
         <div style="background: var(--bg-alt); padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); font-size: 11.5px; font-family: var(--font-mono); margin: 2px 0 0 0; display: flex; justify-content: space-between; align-items: center; overflow: hidden; height: 34px; box-sizing: border-box;">
-          <span style="color: var(--text-dim); text-overflow: ellipsis; white-space: nowrap; overflow: hidden; max-width: 78%;"${hasSensitivePublicIpv4(psqlCmd) ? '' : ` title="${escapeHtml(psqlCmd)}"`}>
-            $ ${renderBlurredPublicIpText(psqlCmd)}
+          <span style="color: var(--text-dim); text-overflow: ellipsis; white-space: nowrap; overflow: hidden; max-width: 78%;" title="${escapeHtml(psqlCmd)}">
+            $ ${escapeHtml(psqlCmd)}
           </span>
           ${pidVal ? `<span class="badge badge-neutral" style="font-size: 9.5px; padding: 1px 6px; flex-shrink: 0;">PID ${pidVal}</span>` : ''}
         </div>
 
         <!-- Badges & Telemetry Row -->
         <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px;">
+          ${appNodeBadgeHtml(d.nodeId)}
           <span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">Port ${d.port || 5432}</span>
           <span class="badge ${accessBadgeCls}" style="font-size: 10px; padding: 2px 8px;">${icon(accessIconName, { size: 10 })} ${accessLabel}</span>
           ${d.domain ? `<span class="badge badge-primary" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">${escapeHtml(d.domain)}</span>` : ''}

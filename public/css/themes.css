@@ -469,6 +469,277 @@ html[data-theme="paper-espresso"] {
   --autofill-bg: #efeae0;
 }
 
+/* 11. Sage Mist — Muted Grey-Green & Soft Sage (soft, low-glare) */
+html[data-theme="sage-mist"] {
+  color-scheme: dark;
+  --bg-canvas: #1b201d;
+  --bg-sidebar: #161a17;
+  --bg-header: #1b201d;
+  --bg-card: #222925;
+  --bg-card-hover: #2a322d;
+  --bg-card-elevated: #2a322d;
+  --bg-alt: #1e2420;
+  --bg-input: #171b18;
+  --bg-terminal: #151916;
+
+  --border-subtle: rgba(214, 221, 215, 0.09);
+  --border-color: rgba(214, 221, 215, 0.09);
+  --border-medium: rgba(214, 221, 215, 0.16);
+  --border-focus: #8fb39b;
+
+  --accent: #8fb39b;
+  --accent-light: #a8c6b2;
+  --accent-hover: #7ba388;
+  --accent-glow: rgba(143, 179, 155, 0.15);
+  --accent-border: rgba(143, 179, 155, 0.32);
+  --accent-selection: rgba(143, 179, 155, 0.28);
+
+  --success: #9cc29f;
+  --success-light: #9cc29f;
+  --success-bg: rgba(156, 194, 159, 0.11);
+  --success-border: rgba(156, 194, 159, 0.28);
+
+  --warning: #d9c08a;
+  --warning-light: #d9c08a;
+  --warning-bg: rgba(217, 192, 138, 0.11);
+  --warning-border: rgba(217, 192, 138, 0.28);
+
+  --danger: #d08a85;
+  --danger-fill: #b87570;
+  --danger-light: #e0a19c;
+  --danger-bg: rgba(208, 138, 133, 0.12);
+  --danger-border: rgba(208, 138, 133, 0.30);
+
+  --info: #8fb0c4;
+  --info-bg: rgba(143, 176, 196, 0.11);
+
+  --text-main: #d6ddd7;
+  --text-normal: #b7c0b9;
+  --text-muted: #a3ada5;
+  --text-dim: #7f8a82;
+  --text-inverse: #161a17;
+  --autofill-bg: #171b18;
+}
+
+/* 12. Lavender Dusk — Muted Violet-Grey & Lavender (soft, low-glare) */
+html[data-theme="lavender-dusk"] {
+  color-scheme: dark;
+  --bg-canvas: #1c1b22;
+  --bg-sidebar: #17161c;
+  --bg-header: #1c1b22;
+  --bg-card: #24232c;
+  --bg-card-hover: #2c2b36;
+  --bg-card-elevated: #2c2b36;
+  --bg-alt: #1f1e26;
+  --bg-input: #18171e;
+  --bg-terminal: #16151b;
+
+  --border-subtle: rgba(220, 217, 230, 0.09);
+  --border-color: rgba(220, 217, 230, 0.09);
+  --border-medium: rgba(220, 217, 230, 0.16);
+  --border-focus: #a99bd6;
+
+  --accent: #a99bd6;
+  --accent-light: #beb3e2;
+  --accent-hover: #9585c9;
+  --accent-glow: rgba(169, 155, 214, 0.15);
+  --accent-border: rgba(169, 155, 214, 0.32);
+  --accent-selection: rgba(169, 155, 214, 0.28);
+
+  --success: #9fc4a3;
+  --success-light: #9fc4a3;
+  --success-bg: rgba(159, 196, 163, 0.11);
+  --success-border: rgba(159, 196, 163, 0.28);
+
+  --warning: #d8bf8c;
+  --warning-light: #d8bf8c;
+  --warning-bg: rgba(216, 191, 140, 0.11);
+  --warning-border: rgba(216, 191, 140, 0.28);
+
+  --danger: #d48c99;
+  --danger-fill: #bb7683;
+  --danger-light: #e2a4b0;
+  --danger-bg: rgba(212, 140, 153, 0.12);
+  --danger-border: rgba(212, 140, 153, 0.30);
+
+  --info: #93a7d4;
+  --info-bg: rgba(147, 167, 212, 0.11);
+
+  --text-main: #dcd9e6;
+  --text-normal: #bdb9cc;
+  --text-muted: #aaa6bb;
+  --text-dim: #858197;
+  --text-inverse: #17161c;
+  --autofill-bg: #18171e;
+}
+
+/* 13. Harbor Slate — Calm Blue-Grey & Sea Teal (soft, low-glare) */
+html[data-theme="harbor-slate"] {
+  color-scheme: dark;
+  --bg-canvas: #192127;
+  --bg-sidebar: #141b20;
+  --bg-header: #192127;
+  --bg-card: #202a31;
+  --bg-card-hover: #28333b;
+  --bg-card-elevated: #28333b;
+  --bg-alt: #1c252b;
+  --bg-input: #151c21;
+  --bg-terminal: #131a1f;
+
+  --border-subtle: rgba(211, 222, 227, 0.09);
+  --border-color: rgba(211, 222, 227, 0.09);
+  --border-medium: rgba(211, 222, 227, 0.16);
+  --border-focus: #7fb4bf;
+
+  --accent: #7fb4bf;
+  --accent-light: #9cc6cf;
+  --accent-hover: #6aa3af;
+  --accent-glow: rgba(127, 180, 191, 0.15);
+  --accent-border: rgba(127, 180, 191, 0.32);
+  --accent-selection: rgba(127, 180, 191, 0.28);
+
+  --success: #93c2a2;
+  --success-light: #93c2a2;
+  --success-bg: rgba(147, 194, 162, 0.11);
+  --success-border: rgba(147, 194, 162, 0.28);
+
+  --warning: #d5bd88;
+  --warning-light: #d5bd88;
+  --warning-bg: rgba(213, 189, 136, 0.11);
+  --warning-border: rgba(213, 189, 136, 0.28);
+
+  --danger: #cf8a88;
+  --danger-fill: #b77573;
+  --danger-light: #dea2a0;
+  --danger-bg: rgba(207, 138, 136, 0.12);
+  --danger-border: rgba(207, 138, 136, 0.30);
+
+  --info: #8fa9cc;
+  --info-bg: rgba(143, 169, 204, 0.11);
+
+  --text-main: #d3dee3;
+  --text-normal: #b3c1c8;
+  --text-muted: #9fafb7;
+  --text-dim: #7b8b94;
+  --text-inverse: #141b20;
+  --autofill-bg: #151c21;
+}
+
+/* 14. Cocoa Ember — Warm Cocoa Brown & Gentle Amber (soft, low-glare) */
+html[data-theme="cocoa-ember"] {
+  color-scheme: dark;
+  --bg-canvas: #1f1b18;
+  --bg-sidebar: #191613;
+  --bg-header: #1f1b18;
+  --bg-card: #28231f;
+  --bg-card-hover: #312b26;
+  --bg-card-elevated: #312b26;
+  --bg-alt: #231f1b;
+  --bg-input: #1a1714;
+  --bg-terminal: #181512;
+
+  --border-subtle: rgba(227, 219, 210, 0.09);
+  --border-color: rgba(227, 219, 210, 0.09);
+  --border-medium: rgba(227, 219, 210, 0.16);
+  --border-focus: #d1a774;
+
+  --accent: #d1a774;
+  --accent-light: #ddbb8f;
+  --accent-hover: #c39563;
+  --accent-glow: rgba(209, 167, 116, 0.15);
+  --accent-border: rgba(209, 167, 116, 0.32);
+  --accent-selection: rgba(209, 167, 116, 0.28);
+
+  --success: #a5c296;
+  --success-light: #a5c296;
+  --success-bg: rgba(165, 194, 150, 0.11);
+  --success-border: rgba(165, 194, 150, 0.28);
+
+  --warning: #d9b878;
+  --warning-light: #d9b878;
+  --warning-bg: rgba(217, 184, 120, 0.11);
+  --warning-border: rgba(217, 184, 120, 0.28);
+
+  --danger: #d38d7f;
+  --danger-fill: #bb786b;
+  --danger-light: #e2a698;
+  --danger-bg: rgba(211, 141, 127, 0.12);
+  --danger-border: rgba(211, 141, 127, 0.30);
+
+  --info: #a2b0c8;
+  --info-bg: rgba(162, 176, 200, 0.11);
+
+  --text-main: #e3dbd2;
+  --text-normal: #c6bcb1;
+  --text-muted: #b2a89c;
+  --text-dim: #8c8277;
+  --text-inverse: #191613;
+  --autofill-bg: #1a1714;
+}
+
+/* 15. Soft Linen — Low-Glare Warm Linen & Muted Teal (soft, low-glare) */
+html[data-theme="soft-linen"] {
+  color-scheme: light;
+  --bg-canvas: #e7e2d8;
+  --bg-sidebar: #ddd7cb;
+  --bg-header: #e7e2d8;
+  --bg-card: #efebe3;
+  --bg-card-hover: #e4dfd4;
+  --bg-card-elevated: #e4dfd4;
+  --bg-alt: #e2ddd2;
+  --bg-input: #ece7de;
+  --bg-terminal: #e0dacf;
+
+  --border-subtle: rgba(56, 52, 47, 0.10);
+  --border-color: rgba(56, 52, 47, 0.10);
+  --border-medium: rgba(56, 52, 47, 0.18);
+  --border-focus: #4f7f7a;
+
+  --accent: #4f7f7a;
+  --accent-light: #5e8f8a;
+  --accent-hover: #426f6a;
+  --accent-glow: rgba(79, 127, 122, 0.15);
+  --accent-border: rgba(79, 127, 122, 0.32);
+  --accent-selection: rgba(79, 127, 122, 0.28);
+
+  --success: #4f7d55;
+  --success-light: #4f7d55;
+  --success-bg: rgba(79, 125, 85, 0.11);
+  --success-border: rgba(79, 125, 85, 0.28);
+
+  --warning: #8a6a2c;
+  --warning-light: #8a6a2c;
+  --warning-bg: rgba(138, 106, 44, 0.11);
+  --warning-border: rgba(138, 106, 44, 0.28);
+
+  --danger: #a1504a;
+  --danger-fill: #a1504a;
+  --danger-light: #a1504a;
+  --danger-bg: rgba(161, 80, 74, 0.12);
+  --danger-border: rgba(161, 80, 74, 0.30);
+
+  --info: #4f6f93;
+  --info-bg: rgba(79, 111, 147, 0.11);
+
+  --text-main: #38342f;
+  --text-normal: #4b4640;
+  --text-muted: #5f5a53;
+  --text-dim: #7f7970;
+  --text-inverse: #f4f1ea;
+  --autofill-bg: #ece7de;
+
+  --ink-1: rgba(56, 52, 47, 0.03);
+  --ink-2: rgba(56, 52, 47, 0.05);
+  --ink-3: rgba(56, 52, 47, 0.075);
+  --ink-4: rgba(56, 52, 47, 0.10);
+  --ink-hover: rgba(56, 52, 47, 0.24);
+  --ink-scroll: rgba(56, 52, 47, 0.18);
+  --btn-primary-hover: #2b2824;
+  --btn-secondary-hover-text: #38342f;
+  --scrim-backdrop: rgba(56, 52, 47, 0.42);
+  --scrim-surface: rgba(239, 235, 227, 0.94);
+}
+
 /* Ensure light themes apply clean color-scheme across native inputs/scrollbars */
 html[data-theme="daylight-crisp"],
 html[data-theme="daylight-crisp"] input,
@@ -477,7 +748,11 @@ html[data-theme="daylight-crisp"] select,
 html[data-theme="paper-espresso"],
 html[data-theme="paper-espresso"] input,
 html[data-theme="paper-espresso"] textarea,
-html[data-theme="paper-espresso"] select {
+html[data-theme="paper-espresso"] select,
+html[data-theme="soft-linen"],
+html[data-theme="soft-linen"] input,
+html[data-theme="soft-linen"] textarea,
+html[data-theme="soft-linen"] select {
   color-scheme: light;
 }
 

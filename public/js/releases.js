@@ -14,6 +14,7 @@ import {
   openModal,
   closeModal,
   showConfirmDialog,
+  nodeLabel,
 } from './state.js';
 import { api, toast } from './api.js';
 
@@ -92,7 +93,7 @@ async function loadProjectBackupsTable(p) {
         : '<span class="badge badge-neutral">Local</span>';
       const nodeOptions = onlineNodes.length
         ? onlineNodes.map((n) =>
-            `<option value="${n.id}" ${Number(n.id) === Number(p.node_id) ? 'selected' : ''}>${escapeHtml(n.name)}</option>`
+            `<option value="${n.id}" ${Number(n.id) === Number(p.node_id) ? 'selected' : ''}>${escapeHtml(nodeLabel(n))}</option>`
           ).join('')
         : '<option value="">Current Node</option>';
       return `

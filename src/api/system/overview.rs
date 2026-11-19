@@ -152,6 +152,7 @@ pub(crate) struct OverviewNodeSummary {
     pub website_count: i64,
     pub service_count: i64,
     pub database_count: i64,
+    pub display_name: String,
 }
 
 #[derive(Serialize)]
@@ -544,6 +545,7 @@ fn build_overview_node_summaries(
                         website_count: n.project_count,
                         service_count: 0,
                         database_count: n.database_count,
+                        display_name: n.display_name.clone(),
                     };
                 }
             }
@@ -615,6 +617,7 @@ fn build_overview_node_summaries(
                 website_count: n.project_count,
                 service_count: 0,
                 database_count: n.database_count,
+                display_name: n.display_name.clone(),
             }
         })
         .collect();
@@ -1419,6 +1422,7 @@ mod tests {
                 updated_at: 100,
                 project_count: 0,
                 database_count: 0,
+                display_name: String::new(),
             }
         };
 

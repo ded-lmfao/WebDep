@@ -422,6 +422,12 @@ document.getElementById('clear-cache-btn')?.addEventListener('click', async () =
 // ============================================================================
 let updatePollTimer = null;
 
+// "v3.0.1-7bdfc49" / "3.0.1" -> "v3.0.1"; anything without a version number -> ''.
+function releaseVersionLabel(tag) {
+  const m = String(tag || '').match(/\d+\.\d+\.\d+/);
+  return m ? `v${m[0]}` : '';
+}
+
 export async function loadSystemVersionInfo(quiet = false, forceRefresh = false) {
   try {
     const endpoint = forceRefresh ? '/api/system/version?refresh=1' : '/api/system/version';
@@ -432,9 +438,16 @@ export async function loadSystemVersionInfo(quiet = false, forceRefresh = false)
     const badgeEl = document.getElementById('platform-version-badge');
     const repoInput = document.getElementById('platform-update-repo-input');
 
-    if (branchEl) branchEl.textContent = v.current_release_tag || v.current_branch || `v${v.current_version || '2.0.0'}`;
-    if (hashEl) hashEl.textContent = v.current_commit || 'unknown';
-    if (msgEl) msgEl.textContent = v.commit_message || 'Self-hosted WebDep deployment platform';
+    // Show release versions only (e.g. v3.0.1); commit hashes mean nothing to most operators.
+    const installed = releaseVersionLabel(v.current_version ? `v${v.current_version}` : v.current_release_tag);
+    const latest = releaseVersionLabel(v.remote_tag || v.remote_version);
+    if (branchEl) branchEl.textContent = installed || 'unknown';
+    if (hashEl) hashEl.style.display = 'none';
+    if (msgEl) {
+      msgEl.textContent = v.has_update && latest
+        ? `${latest} is available`
+        : (latest ? 'You are on the latest release' : 'Checking for releases...');
+    }
     if (repoInput && document.activeElement !== repoInput && v.remote_url) {
       repoInput.value = v.remote_url;
     }
@@ -450,8 +463,7 @@ export async function loadSystemVersionInfo(quiet = false, forceRefresh = false)
         badgeEl.textContent = 'Restart required';
       } else if (v.has_update) {
         badgeEl.className = 'badge badge-success';
-        const label = v.remote_commit || v.remote_tag || 'latest';
-        badgeEl.textContent = `Update available (${label})`;
+        badgeEl.textContent = latest ? `${latest} available` : 'Update available';
       } else if (v.check_error && /built from the '/.test(v.check_error)) {
         badgeEl.className = 'badge badge-info';
         badgeEl.textContent = 'Branch build';
@@ -509,7 +521,7 @@ export async function checkPlatformUpdates(manual = false) {
       toast('A new release is ready. Click Restart Panel to activate it.', 'warning', 6000);
     } else if (v.has_update) {
       const sizeMb = v.asset_size_bytes ? ` • ${(v.asset_size_bytes / (1024 * 1024)).toFixed(1)} MB` : '';
-      toast(`Release ${v.remote_tag || v.remote_commit} is available${sizeMb}. Click Update to install.`, 'success', 5500);
+      toast(`${releaseVersionLabel(v.remote_tag) || 'A new release'} is available${sizeMb}. Click Update to install.`, 'success', 5500);
     } else if (v.check_error) {
       toast(v.check_error, 'warning', 6500);
     } else {
@@ -520,7 +532,7 @@ export async function checkPlatformUpdates(manual = false) {
 
 export async function startPlatformUpdate() {
   const v = await loadSystemVersionInfo(true, true);
-  const targetLabel = v?.remote_tag || v?.remote_commit || 'latest';
+  const targetLabel = releaseVersionLabel(v?.remote_tag) || 'latest';
   const assetMeta = v?.asset_name
     ? `${escapeHtml(v.asset_name)}${v.asset_size_bytes ? ` (${(v.asset_size_bytes / (1024 * 1024)).toFixed(1)} MB)` : ''}`
     : 'prebuilt Linux release binary';

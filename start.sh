@@ -16,6 +16,13 @@ else
     HAS_PRIVS=0
 fi
 
+# Package installs must never stop at a prompt: several run with output sent to /dev/null, so a
+# debconf or needrestart dialog (e.g. "Pending kernel upgrade") would hang the installer invisibly.
+# `env` passes the settings through sudo, which otherwise drops them.
+apt_get() {
+    $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 apt-get "$@"
+}
+
 echo "==================================================="
 echo "     WebDep - Multi-Website Hosting Platform"
 echo "==================================================="
@@ -240,7 +247,7 @@ if [[ "$BUILD_FROM_SOURCE" == "1" || "$NEED_BINARY" == "1" ]]; then
         if ! command -v cargo >/dev/null 2>&1; then
             echo "[*] Rust (cargo) not found. Installing build essentials & Rust toolchain..."
             if command -v apt-get >/dev/null 2>&1; then
-                $SUDO apt-get update -y && $SUDO apt-get install -y curl build-essential pkg-config libssl-dev git
+                apt_get update -y && apt_get install -y curl build-essential pkg-config libssl-dev git
             elif command -v dnf >/dev/null 2>&1; then
                 $SUDO dnf install -y curl gcc make pkgconfig openssl-devel git
             fi
@@ -262,7 +269,7 @@ if [[ -z "${DATABASE_URL:-}" ]] && ! grep -q "^DATABASE_URL=" .env 2>/dev/null; 
     if ! command -v pg_ctl >/dev/null 2>&1 && ! ls /usr/lib/postgresql/*/bin/pg_ctl >/dev/null 2>&1; then
         echo "[*] PostgreSQL server binaries not found. Installing postgresql for zero-config control DB..."
         if command -v apt-get >/dev/null 2>&1; then
-            $SUDO apt-get update -y && $SUDO apt-get install -y postgresql postgresql-client
+            apt_get update -y && apt_get install -y postgresql postgresql-client
         elif command -v dnf >/dev/null 2>&1; then
             $SUDO dnf install -y postgresql-server postgresql
         fi
@@ -330,7 +337,7 @@ print_panel_info() {
 if [[ "$HAS_PRIVS" == "1" ]]; then
     echo "[*] Configuring automatic firewall rules (UFW & iptables)..."
     if ! command -v ufw >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-        $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y ufw >/dev/null 2>&1 || true
+        apt_get update -y >/dev/null 2>&1 && apt_get install -y ufw >/dev/null 2>&1 || true
     fi
     P2P_PORT="${WEBDEP_NODE_P2P_PORT:-4601}"
     if command -v ufw >/dev/null 2>&1; then
@@ -344,7 +351,7 @@ if [[ "$HAS_PRIVS" == "1" ]]; then
     fi
     if ! command -v wg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
         echo "[*] Installing wireguard-tools for encrypted multi-node P2P mesh..."
-        $SUDO apt-get update -y >/dev/null 2>&1 && $SUDO apt-get install -y wireguard-tools >/dev/null 2>&1 || true
+        apt_get update -y >/dev/null 2>&1 && apt_get install -y wireguard-tools >/dev/null 2>&1 || true
     fi
     if command -v iptables >/dev/null 2>&1; then
         for p in 80 443 "${PORT}" "${P2P_PORT}"; do

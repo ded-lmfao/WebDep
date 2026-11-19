@@ -25,6 +25,9 @@ pub struct ClusterNode {
     pub project_count: i64,
     #[serde(default)]
     pub database_count: i64,
+    /// Operator-chosen label; empty means the panel shows `name`.
+    #[serde(default)]
+    pub display_name: String,
 }
 
 impl ClusterNode {
@@ -51,6 +54,7 @@ impl ClusterNode {
             updated_at: r.try_get(15)?,
             project_count: r.try_get::<Option<i64>, _>(16).ok().flatten().unwrap_or(0),
             database_count: r.try_get::<Option<i64>, _>(17).ok().flatten().unwrap_or(0),
+            display_name: r.try_get::<Option<String>, _>(18).ok().flatten().unwrap_or_default(),
         })
     }
 }

@@ -157,6 +157,15 @@ pub fn make_pg_server_command(prog: &Path, args: &[&str]) -> Command {
     for a in args {
         cmd.arg(a);
     }
+    // Give PostgreSQL its own hidden console. Sharing WebDep's console ties the server to it: once
+    // WebDep is stopped, the still-running postmaster cannot start new backend processes (they die
+    // with 0xC0000142) and shuts itself down on the next connection.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    }
     cmd
 }
 

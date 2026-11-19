@@ -121,6 +121,16 @@ fn now_time_str() -> String {
     format!("{:02}:{:02}:{:02}", hours, mins, s)
 }
 
+/// First `MAJOR.MINOR.PATCH` in `s` ("v3.0.2", "3.0.1-7bdfc49"), as a comparable tuple.
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let start = s.find(|c: char| c.is_ascii_digit())?;
+    let mut parts = s[start..].split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
 fn current_arch_asset_name() -> Option<&'static str> {
     if cfg!(target_os = "linux") {
         match std::env::consts::ARCH {
@@ -505,13 +515,21 @@ impl Updater {
             Some(b) => Some(feature_branch_update_message(b)),
             None => check_error,
         };
-        let has_update = branch_build.is_none() && match (&remote_tag, &remote_commit) {
-            (Some(r_tag), Some(r_sha))
+        // Compare release versions when both sides have one: offer only a strictly newer release.
+        // (A locally built v3.0.1 is tagged like "v3.0.1-7bdfc49" and must not see v3.0.1 as new.)
+        let version_cmp = remote_tag
+            .as_deref()
+            .and_then(parse_semver)
+            .zip(parse_semver(&current_version))
+            .map(|(remote, current)| remote > current);
+        let has_update = branch_build.is_none() && match (version_cmp, &remote_tag, &remote_commit) {
+            (Some(newer), _, _) => newer,
+            (None, Some(r_tag), Some(r_sha))
                 if current_commit != "unknown" && !current_commit.is_empty() =>
             {
                 r_tag != &current_release_tag && !r_sha.eq_ignore_ascii_case(&current_commit)
             }
-            (Some(r_tag), _) => r_tag != &current_release_tag,
+            (None, Some(r_tag), _) => r_tag != &current_release_tag,
             _ => false,
         };
 
@@ -1186,6 +1204,16 @@ ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff *dist/webdep3-l
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn test_parse_semver_orders_releases() {
+        assert_eq!(parse_semver("v3.0.2"), Some((3, 0, 2)));
+        assert_eq!(parse_semver("v3.0.1-7bdfc49"), Some((3, 0, 1)));
+        assert_eq!(parse_semver("3.10.0"), Some((3, 10, 0)));
+        assert_eq!(parse_semver("main"), None);
+        assert!(parse_semver("v3.10.0") > parse_semver("v3.9.9"));
+        assert!(parse_semver("v3.0.1") <= parse_semver("v3.0.1-7bdfc49"));
     }
 
     #[test]

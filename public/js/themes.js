@@ -1,5 +1,5 @@
 /**
- * WebDep Predefined Platform Theme Manager (10 Curated Presets)
+ * WebDep Predefined Platform Theme Manager (15 Curated Presets)
  * Instant client-side application + localStorage caching + SQLite platform default sync.
  */
 
@@ -79,6 +79,41 @@ export const PLATFORM_THEMES = [
     category: 'Light • Forest',
     metaColor: '#f4f1ea',
     preview: { canvas: '#f4f1ea', sidebar: '#eae5da', card: '#fcfbf7', accent: '#15803d', text: '#1c1917' },
+  },
+  {
+    id: 'sage-mist',
+    name: 'Sage Mist',
+    category: 'Dark • Soft Sage',
+    metaColor: '#1b201d',
+    preview: { canvas: '#1b201d', sidebar: '#161a17', card: '#222925', accent: '#8fb39b', text: '#d6ddd7' },
+  },
+  {
+    id: 'lavender-dusk',
+    name: 'Lavender Dusk',
+    category: 'Dark • Soft Violet',
+    metaColor: '#1c1b22',
+    preview: { canvas: '#1c1b22', sidebar: '#17161c', card: '#24232c', accent: '#a99bd6', text: '#dcd9e6' },
+  },
+  {
+    id: 'harbor-slate',
+    name: 'Harbor Slate',
+    category: 'Dark • Soft Teal',
+    metaColor: '#192127',
+    preview: { canvas: '#192127', sidebar: '#141b20', card: '#202a31', accent: '#7fb4bf', text: '#d3dee3' },
+  },
+  {
+    id: 'cocoa-ember',
+    name: 'Cocoa Ember',
+    category: 'Dark • Soft Amber',
+    metaColor: '#1f1b18',
+    preview: { canvas: '#1f1b18', sidebar: '#191613', card: '#28231f', accent: '#d1a774', text: '#e3dbd2' },
+  },
+  {
+    id: 'soft-linen',
+    name: 'Soft Linen',
+    category: 'Light • Dimmed',
+    metaColor: '#e7e2d8',
+    preview: { canvas: '#e7e2d8', sidebar: '#ddd7cb', card: '#efebe3', accent: '#4f7f7a', text: '#38342f' },
   },
 ];
 

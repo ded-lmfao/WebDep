@@ -169,9 +169,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/cluster/enroll-tokens",
             get(list_enroll_tokens_handler).post(create_enroll_token_handler),
         )
+        .route("/api/cluster/enroll-tokens/:id", delete(delete_enroll_token_handler))
         .route("/api/cluster/nodes/:id/drain", post(drain_cluster_node_handler))
         .route("/api/cluster/nodes/:id/evacuate", post(evacuate_cluster_node_handler))
-        .route("/api/cluster/nodes/:id", delete(delete_cluster_node_handler))
+        .route("/api/cluster/nodes/:id", delete(delete_cluster_node_handler).patch(update_cluster_node_handler))
         .route("/api/cluster/modules", get(list_cluster_modules_handler))
         .route(
             "/api/cluster/modules/install-fleet",

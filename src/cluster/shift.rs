@@ -1187,12 +1187,6 @@ pub async fn evacuate_node_workloads(
     source_node_id: i64,
     preferred_target_node_id: Option<i64>,
 ) -> Result<EvacuateNodeResult, (StatusCode, String)> {
-    let _ = state
-        .cluster
-        .set_node_status(source_node_id, "draining")
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
     let nodes = state
         .cluster
         .list_nodes()
@@ -1203,12 +1197,20 @@ pub async fn evacuate_node_workloads(
         .into_iter()
         .filter(|n| n.id != source_node_id && n.status == "online")
         .collect();
+    // Check for a destination before draining: with nowhere to move the apps, a failed evacuation
+    // must not leave the source node draining and refusing new deployments.
     if online_targets.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             "No healthy online destination Web-Node available for evacuation".to_string(),
         ));
     }
+
+    let _ = state
+        .cluster
+        .set_node_status(source_node_id, "draining")
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if let Some(pref_id) = preferred_target_node_id {
         if let Some(pos) = online_targets.iter().position(|n| n.id == pref_id) {
             let preferred = online_targets.remove(pos);
@@ -1448,6 +1450,26 @@ mod tests {
         });
 
         (enrolled.node_id, node_data, p2p_handle, rpc_handle)
+    }
+
+    #[tokio::test]
+    async fn evacuate_without_destination_fails_and_leaves_node_online() {
+        let state = crate::api::common::tests_state_helper().await;
+        let local = state
+            .cluster
+            .pair_local_node("http://127.0.0.1:8080", "ws://127.0.0.1:8080/api/cluster/node-ws", "solo-node")
+            .await
+            .unwrap();
+        let before = state.cluster.get_node(local.node_id).await.unwrap().unwrap().status;
+
+        let err = evacuate_node_workloads(&state, "admin", local.node_id, None)
+            .await
+            .expect_err("a single-node cluster has nowhere to evacuate to");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        let after = state.cluster.get_node(local.node_id).await.unwrap().unwrap().status;
+        assert_eq!(after, before, "a failed evacuation must not drain the node");
+        assert_ne!(after, "draining");
     }
 
     #[tokio::test]

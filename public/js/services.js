@@ -4,7 +4,7 @@
  */
 
 import { icon } from './icons.js';
-import { state, escapeHtml, formatRelativeTime, setHtmlIfChanged, matchesNodeFilter } from './state.js';
+import { state, escapeHtml, formatRelativeTime, setHtmlIfChanged, matchesNodeFilter, appNodeBadgeHtml } from './state.js';
 import { loadProjects } from './websites.js';
 import { openWebsiteWorkspace } from './workspace.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
@@ -231,6 +231,7 @@ export function renderServicesList() {
 
         <!-- Badges & Telemetry Row -->
         <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px;">
+          ${appNodeBadgeHtml(p.node_id)}
           <span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">
             ${isLocal ? icon('folder', { size: 10 }) + ' ' + shaText : icon('git-branch', { size: 10 }) + ' ' + escapeHtml(shaText)}
           </span>

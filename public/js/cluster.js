@@ -9,21 +9,19 @@ import {
   setHtmlIfChanged,
   matchesNodeFilter,
   getNodeDisplayName,
+  nodeLabel,
   getNodeEffectivePublicIp,
-  isSensitivePublicIp,
-  hasSensitivePublicIpv4,
-  renderBlurPublicIpPill,
-  renderBlurredPublicIpText,
+  isPublicIp,
+  renderPublicIpPill,
   escapeHtml,
   formatRelativeTime,
   openModal,
   closeModal,
   showConfirmDialog,
+  showPromptDialog,
 } from './state.js';
 import { api, toast } from './api.js';
-import { renderResourceBreakdown } from './overview.js';
-import { renderServicesList } from './services.js';
-import { renderDatabasesList } from './databases.js';
+import { nodeNetChartHtml, syncNodeNetCharts, stopNodeNetCharts } from './node_net_charts.js';
 
 function formatBytesHuman(bytes) {
   const b = Number(bytes || 0);
@@ -92,15 +90,28 @@ export function renderNodesView(enrollTokens = null) {
     0,
   );
   const totalRam = nodes.reduce((sum, n) => sum + Number(n.metrics?.memTotal || 0), 0);
+  const totalCores = nodes.reduce((sum, n) => sum + Number(n.capabilities?.cpuCores || 0), 0);
+  const totalDisk = nodes.reduce((sum, n) => sum + Number(n.metrics?.diskTotal || 0), 0);
+  const usedDisk = nodes.reduce((sum, n) => sum + Number(n.metrics?.diskUsed || 0), 0);
 
   const statTotal = document.getElementById('nodes-stat-total');
   const statOnline = document.getElementById('nodes-stat-online');
   const statWorkloads = document.getElementById('nodes-stat-workloads');
   const statRam = document.getElementById('nodes-stat-ram');
   if (statTotal) statTotal.textContent = String(nodes.length);
-  if (statOnline) statOnline.textContent = drainingCount > 0 ? `${onlineCount} (${drainingCount} draining)` : String(onlineCount);
+  if (statOnline) statOnline.textContent = drainingCount > 0 ? `${onlineCount} (${drainingCount} frozen)` : String(onlineCount);
   if (statWorkloads) statWorkloads.textContent = String(totalWorkloads);
   if (statRam) statRam.textContent = totalRam > 0 ? formatBytesHuman(totalRam) : '--';
+  const statCores = document.getElementById('nodes-stat-cores');
+  const statStorage = document.getElementById('nodes-stat-storage');
+  const statStorageMeta = document.getElementById('nodes-stat-storage-meta');
+  if (statCores) statCores.textContent = totalCores > 0 ? `${totalCores} core${totalCores === 1 ? '' : 's'}` : '--';
+  if (statStorage) statStorage.textContent = totalDisk > 0 ? formatBytesHuman(totalDisk) : '--';
+  if (statStorageMeta) {
+    statStorageMeta.textContent = totalDisk > 0
+      ? `${formatBytesHuman(Math.max(0, totalDisk - usedDisk))} free`
+      : 'Total disk across nodes';
+  }
 
   const addBtn = document.getElementById('add-node-header-btn');
   if (addBtn) addBtn.style.display = isMainAdmin ? '' : 'none';
@@ -112,6 +123,7 @@ export function renderNodesView(enrollTokens = null) {
   const barTone = (pct) => (pct >= 85 ? 'rose' : pct >= 65 ? 'amber' : 'green');
 
   if (!nodes.length) {
+    stopNodeNetCharts();
     setHtmlIfChanged(
       container,
       `
@@ -125,6 +137,9 @@ export function renderNodesView(enrollTokens = null) {
       `,
     );
   } else {
+    // Freeze (stop new deploys here) and Evacuate move work to other nodes, so they only make sense
+    // when another node is online.
+    const onlineNodeIds = nodes.filter((x) => x.status === 'online').map((x) => x.id);
     const cardsHtml = nodes.map((n) => {
       const m = n.metrics || {};
       const caps = n.capabilities || {};
@@ -134,7 +149,7 @@ export function renderNodesView(enrollTokens = null) {
       const statusBadge = isOnline
         ? '<span class="badge badge-success">Online</span>'
         : isDraining
-          ? '<span class="badge badge-warning">Draining</span>'
+          ? '<span class="badge badge-warning" title="No new deployments are placed here; running apps keep running">Frozen</span>'
           : '<span class="badge badge-danger">Offline</span>';
 
       const cpuPct = Math.max(0, Math.min(100, Number(m.cpuPct || 0)));
@@ -157,7 +172,10 @@ export function renderNodesView(enrollTokens = null) {
         .join(' ');
 
       const pubIp = getNodeEffectivePublicIp(n);
-      const isSelectedFilter = String(state.selectedNodeFilter || 'all') === String(n.id);
+      const hasOtherOnlineNode = onlineNodeIds.some((id) => id !== n.id);
+      // Unfreeze stays available so a frozen node can always be put back.
+      const showDrain = isMainAdmin && (isDraining || hasOtherOnlineNode);
+      const showEvacuate = isMainAdmin && hasOtherOnlineNode && Number(n.projectCount || 0) > 0;
 
       return `
         <div class="node-card">
@@ -165,14 +183,15 @@ export function renderNodesView(enrollTokens = null) {
             <div style="min-width: 0;">
               <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                 <span class="status-dot ${statusDot}"></span>
-                <strong style="font-size: 15px; color: var(--text-main);">${escapeHtml(n.name)}</strong>
+                <strong style="font-size: 15px; color: var(--text-main);">${escapeHtml(nodeLabel(n))}</strong>
+                ${n.displayName ? `<span style="font-size: 11.5px; color: var(--text-dim); font-family: var(--font-mono);" title="Node's own name">${escapeHtml(n.name)}</span>` : ''}
                 ${n.isLocal ? '<span class="badge badge-info" style="font-size: 10.5px;">Control Node</span>' : '<span class="badge badge-neutral" style="font-size: 10.5px;">Worker</span>'}
                 ${statusBadge}
               </div>
               <div class="node-card-meta">
                 <span class="node-meta-item">Region <strong style="color: var(--text-main);">${escapeHtml(n.region || 'default')}</strong></span>
                 <span class="node-meta-item">Mesh <code>${escapeHtml(n.meshIp || '--')}</code></span>
-                ${pubIp ? `<span class="node-meta-item">${renderBlurPublicIpPill(pubIp, { label: 'Public IP' })}</span>` : ''}
+                ${pubIp ? `<span class="node-meta-item">${renderPublicIpPill(pubIp, { label: 'Public IP' })}</span>` : ''}
               </div>
             </div>
             <div style="text-align: right; font-size: 11.5px; color: var(--text-dim); white-space: nowrap;">
@@ -199,6 +218,8 @@ export function renderNodesView(enrollTokens = null) {
             </div>
           </div>
 
+          ${nodeNetChartHtml(n.id)}
+
           <div style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
             ${capBadges}
           </div>
@@ -209,19 +230,19 @@ export function renderNodesView(enrollTokens = null) {
               <strong style="color: var(--text-main);">${Number(n.databaseCount || 0)}</strong> databases
             </div>
             <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-              <button class="btn btn-secondary btn-sm" onclick="setGlobalNodeFilter('${isSelectedFilter ? 'all' : n.id}')">
-                ${isSelectedFilter ? 'Clear Filter' : 'Filter View'}
-              </button>
               ${isMainAdmin ? `
-                <button class="btn btn-secondary btn-sm" onclick="toggleNodeDrain(${n.id}, ${isDraining ? 'false' : 'true'})">
-                  ${isDraining ? 'Resume' : 'Drain'}
+                <button class="btn btn-secondary btn-sm" onclick="renameClusterNode(${n.id})" title="Set the name shown for this node in the panel">Rename</button>
+              ` : ''}
+              ${showDrain ? `
+                <button class="btn btn-secondary btn-sm" onclick="toggleNodeDrain(${n.id}, ${isDraining ? 'false' : 'true'})" title="${isDraining ? 'Allow new deployments on this node again' : 'Stop new deployments landing on this node; running apps keep running'}">
+                  ${isDraining ? 'Unfreeze' : 'Freeze'}
                 </button>
-                ${Number(n.projectCount || 0) > 0 ? `
-                  <button class="btn btn-secondary btn-sm" onclick="evacuateClusterNode(${n.id}, '${escapeHtml(n.name)}')">Evacuate</button>
-                ` : ''}
+              ` : ''}
+              ${showEvacuate ? `
+                <button class="btn btn-secondary btn-sm" onclick="evacuateClusterNode(${n.id}, '${escapeHtml(nodeLabel(n))}')" title="Freeze this node and move all its apps to other online nodes">Evacuate</button>
               ` : ''}
               ${isMainAdmin && !n.isLocal ? `
-                <button class="btn btn-danger btn-sm" onclick="removeClusterNode(${n.id}, '${escapeHtml(n.name)}')">Remove</button>
+                <button class="btn btn-danger btn-sm" onclick="removeClusterNode(${n.id}, '${escapeHtml(nodeLabel(n))}')">Remove</button>
               ` : ''}
             </div>
           </div>
@@ -229,6 +250,7 @@ export function renderNodesView(enrollTokens = null) {
       `;
     }).join('');
     setHtmlIfChanged(container, cardsHtml);
+    syncNodeNetCharts(nodes.map((n) => n.id));
   }
 
   const tokensEl = document.getElementById('nodes-tokens-panel');
@@ -246,8 +268,10 @@ export function renderNodesView(enrollTokens = null) {
         else if (t.expiresAt <= nowS) status = '<span class="badge badge-danger">Expired</span>';
 
         const resultCell = t.usedNodeId
-          ? `<span class="badge badge-info">Enrolled &bull; Node #${t.usedNodeId}</span>`
+          ? `<span class="badge badge-info">Joined as ${escapeHtml(getNodeDisplayName(t.usedNodeId))}</span>`
           : (t.expiresAt > nowS ? `Expires ${formatRelativeTime(t.expiresAt)}` : 'Expired');
+        const isActive = !t.usedAt && t.expiresAt > nowS;
+        const actionCell = `<button class="btn btn-secondary btn-sm" onclick="deleteEnrollToken(${Number(t.id)}, ${isActive})">${isActive ? 'Revoke' : 'Delete'}</button>`;
 
         return `
           <tr>
@@ -255,7 +279,8 @@ export function renderNodesView(enrollTokens = null) {
             <td><span class="badge badge-neutral">${escapeHtml(t.region || 'default')}</span></td>
             <td>${status}</td>
             <td style="color: var(--text-dim);">${formatRelativeTime(t.createdAt)}</td>
-            <td style="text-align: right;">${resultCell}</td>
+            <td>${resultCell}</td>
+            <td style="text-align: right;">${actionCell}</td>
           </tr>
         `;
       }).join('');
@@ -270,7 +295,8 @@ export function renderNodesView(enrollTokens = null) {
                   <th>Region</th>
                   <th>Status</th>
                   <th>Created</th>
-                  <th style="text-align: right;">Result / Expiry</th>
+                  <th>Result / Expiry</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>${rows}</tbody>
@@ -279,50 +305,6 @@ export function renderNodesView(enrollTokens = null) {
         `,
       );
     }
-  }
-}
-
-export function setGlobalNodeFilter(nodeId) {
-  state.selectedNodeFilter = String(nodeId || 'all');
-
-  if (state.currentView === 'projects' && typeof window.renderProjectsList === 'function') {
-    window.renderProjectsList();
-  } else if (state.currentView === 'services') {
-    renderServicesList();
-  } else if (state.currentView === 'databases') {
-    renderDatabasesList();
-  } else if (state.currentView === 'overview') {
-    if (typeof window.resetOverviewNetGraph === 'function') window.resetOverviewNetGraph();
-    if (typeof window.loadOverview === 'function') {
-      void window.loadOverview();
-    } else {
-      renderResourceBreakdown();
-    }
-  } else if (state.currentView === 'nodes') {
-    renderNodesView();
-  }
-}
-
-export function setAddNodeTargetIp(ip) {
-  const el = document.getElementById('add-node-target-ip');
-  if (el) el.value = ip;
-  if (ip === '127.0.0.1' || ip === '::1') {
-    const coreEl = document.getElementById('add-node-core-url');
-    if (coreEl) coreEl.value = window.location.origin;
-  }
-}
-
-function syncIpInputBlur(el) {
-  if (!el) return;
-  el.classList.toggle('ip-blur-input', hasSensitivePublicIpv4(el.value));
-}
-
-function bindIpBlurInput(el) {
-  if (!el) return;
-  syncIpInputBlur(el);
-  if (!el.dataset.ipBlurBound) {
-    el.dataset.ipBlurBound = '1';
-    el.addEventListener('input', () => syncIpInputBlur(el));
   }
 }
 
@@ -337,16 +319,10 @@ export async function openAddNodeModal() {
   const nextNum = Math.max(2, (state.nodes || []).length + 1);
   if (labelEl) labelEl.value = `VPS-${nextNum}`;
   if (regionEl && !regionEl.value.trim()) regionEl.value = 'mumbai-IND';
-  if (targetIpEl) {
-    targetIpEl.value = '';
-    bindIpBlurInput(targetIpEl);
-  }
-  if (coreUrlEl) {
-    coreUrlEl.value = window.location.origin;
-    bindIpBlurInput(coreUrlEl);
-  }
-  if (sugEl) sugEl.innerHTML = '<span>Detecting panel IP...</span>';
-  if (outEl) outEl.style.display = 'none';
+  if (targetIpEl) targetIpEl.value = '';
+  if (coreUrlEl) coreUrlEl.value = window.location.origin;
+  if (sugEl) sugEl.innerHTML = '';
+  showAddNodeStep('form');
   openModal('modal-add-node');
 
   try {
@@ -357,7 +333,6 @@ export async function openAddNodeModal() {
     const openedViaDomain = host !== 'localhost' && !/^[\d.]+$/.test(host) && !host.includes(':');
     if (coreUrlEl) {
       coreUrlEl.value = openedViaDomain ? window.location.origin : (info.suggestedPanelUrl || window.location.origin);
-      syncIpInputBlur(coreUrlEl);
     }
     if (sugEl) {
       sugEl.innerHTML = '';
@@ -369,22 +344,61 @@ export async function openAddNodeModal() {
         btn.style.cssText = 'padding: 2px 8px; font-size: 10.5px; display: inline-flex; align-items: center; gap: 4px;';
         btn.innerHTML = labelHtml;
         btn.addEventListener('click', () => {
-          if (coreUrlEl) {
-            coreUrlEl.value = url;
-            syncIpInputBlur(coreUrlEl);
-          }
+          if (coreUrlEl) coreUrlEl.value = url;
         });
         sugEl.appendChild(btn);
       };
 
       const portSuffix = info.port ? `:${info.port}` : '';
       const proto = info.requestUrl && info.requestUrl.startsWith('https://') ? 'https' : 'http';
-      if (info.publicIp) addChip(`Public IP (${renderBlurredPublicIpText(info.publicIp)})`, `${proto}://${info.publicIp}${portSuffix}`);
+      if (info.publicIp) addChip(`Public IP (${escapeHtml(info.publicIp)})`, `${proto}://${info.publicIp}${portSuffix}`);
       if (info.lanIp && info.lanIp !== info.publicIp) addChip(`LAN IP (${escapeHtml(info.lanIp)})`, `${proto}://${info.lanIp}${portSuffix}`);
-      if (info.requestUrl) addChip(`Current Browser (${renderBlurredPublicIpText(info.requestUrl)})`, info.requestUrl);
+      if (info.requestUrl) addChip(`This browser (${escapeHtml(info.requestUrl)})`, info.requestUrl);
     }
   } catch (_) {
     if (sugEl) sugEl.innerHTML = '';
+  }
+}
+
+// The dialog has two steps: the details form, then (after generating) only the join command.
+function showAddNodeStep(step) {
+  const isResult = step === 'result';
+  const show = (id, visible) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = visible ? '' : 'none';
+  };
+  show('add-node-form', !isResult);
+  show('add-node-result-box', isResult);
+  show('generate-node-token-btn', !isResult);
+  show('add-node-another-btn', isResult);
+  setText('add-node-close-btn', isResult ? 'Done' : 'Cancel');
+}
+
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+export function addAnotherNode() {
+  void openAddNodeModal();
+}
+
+export async function deleteEnrollToken(tokenId, isActive) {
+  const ok = await showConfirmDialog({
+    title: isActive ? 'Revoke join token' : 'Delete join token',
+    message: isActive
+      ? 'Revoke this join token? Any join command made with it stops working right away.'
+      : 'Remove this token from the list? Nodes that already joined are not affected.',
+    confirmText: isActive ? 'Revoke' : 'Delete',
+    danger: isActive,
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/cluster/enroll-tokens/${tokenId}`, { method: 'DELETE' });
+    toast(isActive ? 'Join token revoked' : 'Join token removed', 'success');
+    await loadNodesView(true);
+  } catch (err) {
+    toast(`Could not remove token: ${err.message}`, 'error');
   }
 }
 
@@ -414,35 +428,27 @@ export async function generateNodeEnrollToken() {
         targetPublicIp: targetPublicIp || undefined,
       },
     });
-    const outEl = document.getElementById('add-node-result-box');
     const freshEl = document.getElementById('add-node-fresh-cmd');
     const svcEl = document.getElementById('add-node-service-cmd');
     const cmdEl = document.getElementById('add-node-join-cmd');
     const psEl = document.getElementById('add-node-ps-cmd');
     const tokEl = document.getElementById('add-node-raw-token');
-    if (freshEl) {
-      freshEl.value = res.freshVpsCommand || '';
-      syncIpInputBlur(freshEl);
-    }
-    if (svcEl) {
-      svcEl.value = res.serviceCommand || '';
-      syncIpInputBlur(svcEl);
-    }
-    if (cmdEl) {
-      cmdEl.value = res.joinCommand || '';
-      syncIpInputBlur(cmdEl);
-    }
+    if (freshEl) freshEl.value = res.freshVpsCommand || '';
+    if (svcEl) svcEl.value = res.serviceCommand || '';
+    if (cmdEl) cmdEl.value = res.joinCommand || '';
     if (psEl) {
       const idx = Math.max(2, (state.nodes || []).length + 1);
       const safeDir = `C:\\tmp\\webdep-node${idx}`;
       const port = 4690 + idx;
       const flags = (res.joinCommand || '').replace(/^webdep\s+/, '');
       psEl.value = `mkdir ${safeDir} -Force | Out-Null; cd ${safeDir}; Set-Content .env @("DATA_DIR=${safeDir}\\data", "PORT=${port}"); $env:WEBDEP_NODE_P2P_BIND="127.0.0.1"; $env:WEBDEP_NODE_P2P_PORT="0"; webdep.exe ${flags}`;
-      syncIpInputBlur(psEl);
     }
     if (tokEl) tokEl.textContent = res.token || '';
-    if (outEl) outEl.style.display = 'block';
-    toast('Complete VPS join command generated', 'success');
+    const ttlMin = Math.round(ttlSeconds / 60);
+    setText('add-node-result-title', `Join command for ${label}`);
+    setText('add-node-result-hint', `Run it on the new VPS as a sudo user. It works once and expires in ${ttlMin} minutes.`);
+    showAddNodeStep('result');
+    toast('Join command generated', 'success');
     await loadNodesView(true);
   } catch (err) {
     toast(`Failed generating join token: ${err.message}`, 'error');
@@ -470,10 +476,30 @@ export async function toggleNodeDrain(nodeId, drain) {
       method: 'POST',
       body: { draining: Boolean(drain) },
     });
-    toast(drain ? `Node #${nodeId} set to draining` : `Node #${nodeId} resumed`, 'success');
+    toast(drain ? `Node #${nodeId} frozen: no new deployments will be placed on it` : `Node #${nodeId} unfrozen: accepting new deployments`, 'success');
     await loadNodesView(true);
   } catch (err) {
     toast(`Failed updating node state: ${err.message}`, 'error');
+  }
+}
+
+export async function renameClusterNode(nodeId) {
+  const node = (state.nodes || []).find((n) => Number(n.id) === Number(nodeId));
+  if (!node) return;
+  const value = await showPromptDialog({
+    title: 'Rename node',
+    message: `Name shown for this node in the panel. Leave empty to use its own name (${node.name}). Letters, digits, spaces and - _ . ( ) # only, up to 48 characters.`,
+    placeholder: node.name,
+    defaultValue: node.displayName || '',
+    confirmText: 'Save',
+  });
+  if (value === null) return;
+  try {
+    await api(`/api/cluster/nodes/${nodeId}`, { method: 'PATCH', body: { displayName: value.trim() } });
+    toast(value.trim() ? `Node renamed to "${value.trim()}"` : `Node name reset to "${node.name}"`, 'success');
+    await loadNodesView(true);
+  } catch (err) {
+    toast(`Rename failed: ${err.message}`, 'error');
   }
 }
 
@@ -669,8 +695,8 @@ function renderShiftModalState(mig, historyList = [], opts = {}) {
       dnsCard.style.display = mig.status === 'awaiting_dns' ? 'block' : 'none';
     }
     if (dnsRecEl && mig.status === 'awaiting_dns') {
-      const fmtMigIp = (ip, label) => (isSensitivePublicIp(ip)
-        ? renderBlurPublicIpPill(ip, { label })
+      const fmtMigIp = (ip, label) => (isPublicIp(ip)
+        ? renderPublicIpPill(ip, { label })
         : `<code>${escapeHtml(ip || '--')}</code>`);
       const domRows = (mig.domains || []).map((d) =>
         `<div style="display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-bottom:4px;"><code>A</code> &bull; <strong>${escapeHtml(d)}</strong> &bull; ${fmtMigIp(mig.fromIp, 'From')} &rarr; ${fmtMigIp(mig.toIp, 'To')}</div>`
@@ -723,7 +749,7 @@ export async function openMoveToNodeModal(projectId) {
   const candidates = (state.nodes || []).filter((n) => n.status === 'online' && Number(n.id) !== Number(proj.node_id));
   if (sel) {
     sel.innerHTML = candidates.length
-      ? candidates.map((n) => `<option value="${n.id}">${escapeHtml(n.name)} (${escapeHtml(n.region || 'default')} &bull; ${escapeHtml(n.meshIp || 'Worker')})</option>`).join('')
+      ? candidates.map((n) => `<option value="${n.id}">${escapeHtml(nodeLabel(n))} (${escapeHtml(n.region || 'default')} &bull; ${escapeHtml(n.meshIp || 'Worker')})</option>`).join('')
       : '<option value="">No other healthy online nodes available</option>';
   }
 
@@ -934,8 +960,8 @@ export async function abortShiftMigration() {
 export async function evacuateClusterNode(nodeId, nodeName) {
   const ok = await showConfirmDialog({
     title: `Evacuate "${nodeName}"`,
-    message: `Drain "${nodeName}" and automatically shift all hosted applications to healthy online nodes?`,
-    confirmText: 'Drain & Evacuate',
+    message: `Freeze "${nodeName}" and move all its apps to other healthy online nodes?`,
+    confirmText: 'Freeze & Evacuate',
   });
   if (!ok) return;
   try {
@@ -976,12 +1002,13 @@ export async function triggerFleetUpdate() {
 window.loadNodes = loadNodes;
 window.loadNodesView = loadNodesView;
 window.renderNodesView = renderNodesView;
-window.setGlobalNodeFilter = setGlobalNodeFilter;
 window.openAddNodeModal = openAddNodeModal;
-window.setAddNodeTargetIp = setAddNodeTargetIp;
 window.generateNodeEnrollToken = generateNodeEnrollToken;
+window.deleteEnrollToken = deleteEnrollToken;
+window.addAnotherNode = addAnotherNode;
 window.copyNodeJoinCommand = copyNodeJoinCommand;
 window.toggleNodeDrain = toggleNodeDrain;
+window.renameClusterNode = renameClusterNode;
 window.evacuateClusterNode = evacuateClusterNode;
 window.removeClusterNode = removeClusterNode;
 window.triggerFleetUpdate = triggerFleetUpdate;

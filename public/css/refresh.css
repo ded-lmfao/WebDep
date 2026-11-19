@@ -147,6 +147,11 @@ select.form-control {
   flex-wrap: wrap;
 }
 
+.modules-not-installed {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .modules-node-meta {
   display: flex;
   align-items: center;
@@ -185,10 +190,6 @@ select.form-control {
 
 .modules-tile:hover {
   border-color: var(--border-medium);
-}
-
-.modules-tile.is-missing-req {
-  border-color: var(--warning-border, rgba(245, 158, 11, 0.32));
 }
 
 .modules-tile-top {
@@ -261,4 +262,289 @@ button.preset-chip { font-family: inherit; line-height: 1.5; }
   background: var(--accent-glow);
   border-color: var(--accent-border);
   color: var(--accent-light);
+}
+
+/* ==========================================================================
+   Phones & tablets
+   ========================================================================== */
+
+/* Grids of cards never grow wider than the screen: `1fr` alone lets a card's longest unbreakable
+   content (a URL, a command) push the column past the viewport. */
+@media (max-width: 900px) {
+  .settings-cards-grid,
+  .projects-grid,
+  .nodes-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .project-card,
+  .settings-card,
+  .node-card,
+  .card {
+    min-width: 0;
+  }
+}
+
+/* Tablet: two columns where a desktop page has three or more. */
+@media (min-width: 681px) and (max-width: 1080px) {
+  .settings-cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-cards-grid .settings-card-wide { grid-column: 1 / -1; }
+}
+
+/* Page headers: title on its own line, actions wrap underneath instead of squeezing the title. */
+@media (max-width: 680px) {
+  .view-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .view-header .view-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .view-header .view-actions > .btn {
+    flex: 1 1 auto;
+  }
+}
+
+/* Tables as cards (phones and portrait tablets). Each row becomes a card; the first cell is the card
+   title and every other cell shows its column name (td[data-label], filled in by js/table_cards.js). */
+@media (max-width: 900px) {
+  .table-responsive {
+    overflow-x: visible !important;
+    padding-bottom: 0 !important;
+  }
+  table.table,
+  table.table tbody {
+    display: block;
+    width: 100%;
+  }
+  table.table thead {
+    display: none;
+  }
+  table.table tr {
+    display: block;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  table.table tr:last-child {
+    border-bottom: none;
+  }
+  table.table tr:hover td {
+    background: transparent;
+  }
+  table.table td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0 !important;
+    border: none !important;
+    text-align: right !important;
+    min-width: 0;
+  }
+  table.table td::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    text-align: left;
+  }
+  table.table td[data-label=""]::before,
+  table.table td:not([data-label])::before {
+    content: none;
+  }
+  table.table td > * {
+    min-width: 0;
+    max-width: 70%;
+  }
+  /* Card title: the row's first cell, full width, no label. */
+  table.table td:first-child {
+    display: block;
+    text-align: left !important;
+    padding-bottom: 8px !important;
+  }
+  table.table td:first-child::before {
+    content: none;
+  }
+  table.table td:first-child > * {
+    max-width: 100%;
+  }
+  /* Empty/loading rows span the table: keep them centred blocks. */
+  table.table td[colspan] {
+    display: block;
+    text-align: center !important;
+  }
+  table.table td[colspan] > * {
+    max-width: 100%;
+  }
+  /* Row actions: a full-width button row at the bottom of the card. */
+  table.table td:last-child:has(.btn) {
+    justify-content: flex-end;
+    padding-top: 8px !important;
+  }
+  table.table td:last-child:has(.btn)::before {
+    content: none;
+  }
+  table.table td:last-child:has(.btn) > * {
+    max-width: 100%;
+  }
+  /* Editable rows (environment variables): inputs take the full card width. */
+  table.env-table td {
+    display: block;
+    text-align: left !important;
+  }
+  table.env-table td::before {
+    display: block;
+    margin-bottom: 4px;
+  }
+  table.env-table td > * {
+    max-width: 100%;
+  }
+  table.env-table input.form-control {
+    min-width: 0;
+    width: 100%;
+  }
+  /* Overview app list: a compact card instead of one labelled line per column.
+       name ........ status
+       CPU   RAM   Disk      (three mini meters side by side)
+       type  port ... action */
+  table.tbl-resource-breakdown tr:not(:has(td[colspan])) {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-areas:
+      "name name status"
+      "cpu mem disk"
+      "kind port action";
+    column-gap: 14px;
+    row-gap: 6px;
+    align-items: center;
+  }
+  table.tbl-resource-breakdown td::before {
+    content: none !important;
+  }
+  table.tbl-resource-breakdown td,
+  table.tbl-resource-breakdown td > * {
+    max-width: 100%;
+  }
+  table.tbl-resource-breakdown .res-col-name { grid-area: name; padding-bottom: 2px !important; }
+  table.tbl-resource-breakdown .res-col-status {
+    grid-area: status;
+    justify-content: flex-end;
+    gap: 0;
+    white-space: nowrap;
+  }
+  table.tbl-resource-breakdown .res-col-cpu { grid-area: cpu; }
+  table.tbl-resource-breakdown .res-col-mem { grid-area: mem; }
+  table.tbl-resource-breakdown .res-col-disk { grid-area: disk; }
+  table.tbl-resource-breakdown .res-col-metric {
+    display: block;
+    text-align: left !important;
+    padding: 8px 0 !important;
+  }
+  /* Small caption above each meter; the per-meter secondary figure is dropped to fit the column. */
+  table.tbl-resource-breakdown .res-col-metric::before {
+    display: block;
+    margin-bottom: 3px;
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    color: var(--text-dim);
+  }
+  table.tbl-resource-breakdown .res-col-cpu::before { content: "CPU" !important; }
+  table.tbl-resource-breakdown .res-col-mem::before { content: "RAM" !important; }
+  table.tbl-resource-breakdown .res-col-disk::before { content: "Disk" !important; }
+  table.tbl-resource-breakdown .res-metric-cell {
+    width: 100%;
+  }
+  table.tbl-resource-breakdown .res-metric-head {
+    font-size: 13px;
+  }
+  table.tbl-resource-breakdown .res-metric-head span:last-child {
+    display: none;
+  }
+  table.tbl-resource-breakdown .res-col-kind {
+    grid-area: kind;
+    justify-content: flex-start;
+  }
+  table.tbl-resource-breakdown .res-col-port {
+    grid-area: port;
+    justify-content: flex-start;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  table.tbl-resource-breakdown .res-col-port::before {
+    content: "Port" !important;
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+  table.tbl-resource-breakdown .res-col-action {
+    grid-area: action;
+    justify-content: flex-end;
+    padding-top: 4px !important;
+  }
+  table.tbl-resource-breakdown .res-col-action .btn {
+    white-space: nowrap;
+  }
+}
+
+/* Filter pill rows (All / Websites / Services...) scroll sideways inside their own row on phones
+   instead of widening the card. */
+@media (max-width: 680px) {
+  .card-header > div {
+    max-width: 100%;
+    min-width: 0;
+  }
+  .filter-pills {
+    max-width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .filter-pills::-webkit-scrollbar {
+    display: none;
+  }
+  .filter-pills .pill {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+}
+
+/* Overview usage summary: two per row on phones instead of four stacked lines. */
+@media (max-width: 680px) {
+  .resource-summary-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+    padding: 12px 14px;
+  }
+  .resource-summary-bar .res-summary-val {
+    font-size: 11.5px;
+  }
+}
+
+/* Portrait tablets: table cards two per row. */
+@media (min-width: 681px) and (max-width: 900px) {
+  /* Usage summary: one even row of four instead of three plus a stray fourth. */
+  .resource-summary-bar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  table.table tbody {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  table.table tr {
+    border-right: 1px solid var(--border-subtle);
+  }
+  table.table tr:nth-child(2n),
+  table.table tr:last-child {
+    border-right: none;
+  }
+  /* A lone empty/loading row still spans both columns. */
+  table.table tr:has(td[colspan]) {
+    grid-column: 1 / -1;
+    border-right: none;
+  }
 }

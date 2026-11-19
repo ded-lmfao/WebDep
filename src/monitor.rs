@@ -504,6 +504,8 @@ impl Monitor {
 }
 
 const NET_HISTORY_LIMIT: usize = 60;
+/// Longer than this between samples means the sampler was idle; see `sample_tracker`.
+const NET_SAMPLE_GAP: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -644,13 +646,20 @@ fn sample_tracker(tracker: &mut NetworkTracker) {
     let dt = elapsed.as_secs_f64().max(0.2);
     let (rx_d, tx_d, rx_total, tx_total, iface_count) = aggregate_network_stats(&tracker.networks);
 
-    let inbound_bps = ((rx_d as f64) / dt).round() as u64;
-    let outbound_bps = ((tx_d as f64) / dt).round() as u64;
-
     tracker.last_tick = std::time::Instant::now();
     tracker.total_rx_bytes = rx_total;
     tracker.total_tx_bytes = tx_total;
     tracker.interface_count = iface_count;
+
+    // After an idle stretch (nobody watching, sampler throttled) the byte delta spans the whole gap.
+    // Recording it would add one averaged point that charts join to older samples with a long
+    // straight line. Only move the baseline; the next regular tick records a real rate.
+    if elapsed > NET_SAMPLE_GAP {
+        return;
+    }
+
+    let inbound_bps = ((rx_d as f64) / dt).round() as u64;
+    let outbound_bps = ((tx_d as f64) / dt).round() as u64;
 
     if tracker.history.len() >= NET_HISTORY_LIMIT {
         tracker.history.pop_front();

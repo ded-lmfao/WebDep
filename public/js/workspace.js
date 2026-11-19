@@ -14,6 +14,7 @@ import {
   isProjectOnline,
   isProjectMaintenance,
   isDatabaseRunning,
+  nodeLabel,
 } from './state.js';
 import { prefetchWebsiteWorkspace, prefetchDatabaseWorkspace } from './api.js';
 import {
@@ -236,8 +237,8 @@ function updateBreadcrumbs() {
   } else if (state.currentView === 'overview' && state.overviewInspectNodeId) {
     const nodeList = Array.isArray(state.overview?.nodes) && state.overview.nodes.length ? state.overview.nodes : (state.nodes || []);
     const node = nodeList.find((n) => Number(n.id) === Number(state.overviewInspectNodeId));
-    const nodeLabel = node ? node.name : `VPS ${state.overviewInspectNodeId}`;
-    secEl.innerHTML = `<span style="cursor:pointer; color:var(--text-muted);" onclick="navigateTo('overview')">System Overview</span> &rsaquo; <strong style="color:var(--text-main);">${escapeHtml(nodeLabel)}</strong>`;
+    const inspectLabel = node ? nodeLabel(node) : `VPS ${state.overviewInspectNodeId}`;
+    secEl.innerHTML = `<span style="cursor:pointer; color:var(--text-muted);" onclick="navigateTo('overview')">System Overview</span> &rsaquo; <strong style="color:var(--text-main);">${escapeHtml(inspectLabel)}</strong>`;
   } else {
     const globalLabels = {
       overview: 'System Overview',

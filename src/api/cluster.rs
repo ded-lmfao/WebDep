@@ -145,6 +145,21 @@ fn redact_node_network_details(n: &mut ClusterNode) {
     n.wg_endpoint.clear();
 }
 
+pub(crate) async fn delete_enroll_token_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let admin = verify_main_admin(&state, &headers).await?;
+    state.cluster.delete_enroll_token(id).await.map_err(|e| {
+        let code = if e.contains("not found") { StatusCode::NOT_FOUND } else { StatusCode::INTERNAL_SERVER_ERROR };
+        (code, e)
+    })?;
+    let id_str = id.to_string();
+    log_audit_project(&state, None, &admin.username, "cluster.enroll_token.delete", Some(&id_str), Some("Revoked node join token")).await;
+    Ok(Json(serde_json::json!({ "ok": true, "deletedId": id })))
+}
+
 pub(crate) async fn list_enroll_tokens_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -457,6 +472,39 @@ pub(crate) async fn delete_cluster_node_handler(
     )
     .await;
     Ok(Json(serde_json::json!({ "ok": true, "deletedId": id })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UpdateNodePayload {
+    pub display_name: String,
+}
+
+/// Renames a node in the panel (display name only). An empty name restores the node's own name.
+pub(crate) async fn update_cluster_node_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+    Json(payload): Json<UpdateNodePayload>,
+) -> Result<Json<crate::cluster::models::ClusterNode>, (StatusCode, String)> {
+    let admin = verify_main_admin(&state, &headers).await?;
+    let node = state
+        .cluster
+        .set_node_display_name(id, &payload.display_name)
+        .await
+        .map_err(|e| {
+            let code = if e.contains("not found") { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+            (code, e)
+        })?;
+
+    let id_str = id.to_string();
+    let detail = if node.display_name.is_empty() {
+        format!("Cleared display name of Web-Node '{}' (#{})", node.name, id)
+    } else {
+        format!("Renamed Web-Node '{}' (#{}) to '{}'", node.name, id, node.display_name)
+    };
+    log_audit_project(&state, None, &admin.username, "cluster.node.rename", Some(&id_str), Some(&detail)).await;
+    Ok(Json(node))
 }
 
 #[derive(Deserialize, Default)]

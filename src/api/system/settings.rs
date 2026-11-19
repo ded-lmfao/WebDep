@@ -320,6 +320,11 @@ const ALLOWED_THEME_IDS: &[&str] = &[
     "crimson-ember",
     "daylight-crisp",
     "paper-espresso",
+    "sage-mist",
+    "lavender-dusk",
+    "harbor-slate",
+    "cocoa-ember",
+    "soft-linen",
 ];
 
 pub(crate) fn normalize_theme_id(raw: &str) -> &'static str {
@@ -442,7 +447,7 @@ mod tests {
 
     #[test]
     fn test_normalize_theme_id_and_asset_parity() {
-        assert_eq!(ALLOWED_THEME_IDS.len(), 10);
+        assert_eq!(ALLOWED_THEME_IDS.len(), 15);
         assert_eq!(normalize_theme_id("nordic-frost"), "nordic-frost");
         assert_eq!(normalize_theme_id(" DAYLIGHT-CRISP "), "daylight-crisp");
         assert_eq!(normalize_theme_id("unknown-theme"), "midnight-ink");

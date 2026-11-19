@@ -29,7 +29,8 @@ const SELECT_NODE_COLUMNS: &str = "
     n.public_ip, n.mesh_ip, n.wg_pubkey, n.wg_endpoint, n.node_version,
     n.capabilities_json, n.metrics_json, n.last_seen_at, n.created_at, n.updated_at,
     (SELECT COUNT(*) FROM projects p WHERE p.node_id = n.id) AS project_count,
-    (SELECT COUNT(*) FROM databases d WHERE d.node_id = n.id) AS database_count
+    (SELECT COUNT(*) FROM databases d WHERE d.node_id = n.id) AS database_count,
+    n.display_name
 ";
 
 fn now_secs() -> i64 {
@@ -37,6 +38,27 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+pub const NODE_DISPLAY_NAME_MAX_CHARS: usize = 48;
+
+/// Trims a requested display name and checks its length and characters. Only letters, digits,
+/// spaces and `- _ . ( ) #` are allowed: the panel places node names inside HTML attributes and
+/// inline handlers, so quotes, `<`, `>`, `&` and backslashes are refused outright.
+pub fn normalize_node_display_name(raw: &str) -> Result<String, String> {
+    let label = raw.trim();
+    if label.chars().count() > NODE_DISPLAY_NAME_MAX_CHARS {
+        return Err(format!("Display name must be at most {NODE_DISPLAY_NAME_MAX_CHARS} characters"));
+    }
+    if let Some(bad) = label
+        .chars()
+        .find(|c| !(c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')' | '#')))
+    {
+        return Err(format!(
+            "Display name cannot contain '{bad}'. Use letters, digits, spaces and - _ . ( ) #"
+        ));
+    }
+    Ok(label.to_string())
 }
 
 pub fn hash_token(raw: &str) -> String {
@@ -218,6 +240,20 @@ impl ClusterManager {
             service_command,
             fresh_vps_command,
         })
+    }
+
+    /// Deletes a join token. An unused token stops working at once; a used one only leaves the list
+    /// (the node it enrolled keeps its own credentials).
+    pub async fn delete_enroll_token(&self, token_id: i64) -> Result<(), String> {
+        let res = sqlx::query("DELETE FROM node_enroll_tokens WHERE id = $1")
+            .bind(token_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("Failed deleting enrollment token: {e}"))?;
+        if res.rows_affected() == 0 {
+            return Err(format!("Join token #{token_id} not found"));
+        }
+        Ok(())
     }
 
     pub async fn list_enroll_tokens(&self) -> Result<Vec<NodeEnrollTokenView>, String> {
@@ -680,6 +716,25 @@ impl ClusterManager {
         .await
         .map_err(|e| format!("Failed marking node #{node_id} offline: {e}"))?;
         Ok(())
+    }
+
+    /// Sets the operator-chosen label shown in the panel. An empty string clears it, so the node's
+    /// own `name` is shown again. `name` itself never changes: it identifies the node.
+    pub async fn set_node_display_name(&self, node_id: i64, display_name: &str) -> Result<ClusterNode, String> {
+        let label = normalize_node_display_name(display_name)?;
+        let res = sqlx::query("UPDATE nodes SET display_name = $2, updated_at = $3 WHERE id = $1")
+            .bind(node_id)
+            .bind(&label)
+            .bind(now_secs())
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("Failed updating node display name: {e}"))?;
+        if res.rows_affected() == 0 {
+            return Err(format!("Node #{node_id} not found"));
+        }
+        self.get_node(node_id)
+            .await?
+            .ok_or_else(|| format!("Node #{node_id} not found"))
     }
 
     pub async fn set_node_status(&self, node_id: i64, status: &str) -> Result<ClusterNode, String> {
@@ -1437,6 +1492,18 @@ impl ClusterManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_display_name_is_trimmed_and_limited_to_safe_characters() {
+        assert_eq!(normalize_node_display_name("  Mumbai Web (1)  ").unwrap(), "Mumbai Web (1)");
+        assert_eq!(normalize_node_display_name("").unwrap(), "");
+        assert_eq!(normalize_node_display_name("db-node_2.#3").unwrap(), "db-node_2.#3");
+        for bad in ["a'b", "a\"b", "<b>", "a&b", "a\\b", "x\ny"] {
+            assert!(normalize_node_display_name(bad).is_err(), "{bad:?} should be rejected");
+        }
+        let too_long = "x".repeat(NODE_DISPLAY_NAME_MAX_CHARS + 1);
+        assert!(normalize_node_display_name(&too_long).is_err());
+    }
     use crate::pg_control::test_db;
 
     #[tokio::test]

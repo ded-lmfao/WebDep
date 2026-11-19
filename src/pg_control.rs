@@ -47,6 +47,13 @@ fn build_migrator() -> sqlx::migrate::Migrator {
                 Cow::Borrowed(include_str!("../migrations/0004_migrations_and_backups.sql")),
                 false,
             ),
+            Migration::new(
+                5,
+                Cow::Borrowed("node_display_name"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../migrations/0005_node_display_name.sql")),
+                false,
+            ),
         ]),
         ignore_missing: false,
         locking: true,
@@ -144,6 +151,92 @@ pub async fn ensure_control_pg_pool(
     }
 
     ensure_local_pg_with_port(data_dir, None).await
+}
+
+/// Starts the control cluster unless a healthy server is already listening on `port`.
+async fn start_control_pg_if_needed(
+    bins: &PgBinaries,
+    port: u16,
+    control_dir: &Path,
+    pgdata_dir: &Path,
+    log_file: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let already_running = read_pg_pid(pgdata_dir)
+        .map(is_process_alive)
+        .unwrap_or(false)
+        && tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok();
+
+    if !already_running {
+        let pid_file = pgdata_dir.join("postmaster.pid");
+        if pid_file.exists() {
+            let stale = read_pg_pid(pgdata_dir).map(|p| !is_process_alive(p)).unwrap_or(true);
+            if stale {
+                let _ = tokio::fs::remove_file(&pid_file).await;
+            }
+        }
+        ensure_tcp_only_pg_conf(pgdata_dir).await;
+        ensure_pg_permissions(control_dir, Some(pgdata_dir));
+        let data_arg = to_clean_path_str(pgdata_dir);
+        let log_arg = to_clean_path_str(log_file);
+        let mut start_cmd = make_pg_server_command(
+            &bins.pg_ctl,
+            &["-D", &data_arg, "-l", &log_arg, "-W", "start"],
+        );
+        start_cmd.stdin(std::process::Stdio::null());
+        start_cmd.stdout(std::process::Stdio::null());
+        start_cmd.stderr(std::process::Stdio::null());
+        let _ = tokio::time::timeout(Duration::from_secs(5), start_cmd.status()).await;
+
+        if wait_for_pg_ready(port, pgdata_dir, 15_000).await.is_none() {
+            let log_tail = tokio::fs::read_to_string(log_file).await.unwrap_or_default();
+            let pid = read_pg_pid(pgdata_dir);
+            let alive = pid.map(is_process_alive).unwrap_or(false);
+            let tcp_ok = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok();
+            return Err(format!(
+                "control-pg did not become ready on 127.0.0.1:{} (pid={:?}, alive={}, tcp={}) | {}",
+                port, pid, alive, tcp_ok, log_tail
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Creates the application database if needed, through the `postgres` maintenance database.
+async fn ensure_app_database(cfg: &ControlPgConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let admin_opts = make_pg_connect_options("127.0.0.1", cfg.port, &cfg.user, &cfg.password, "postgres");
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect_with(admin_opts)
+        .await?;
+    let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM pg_database WHERE datname = $1")
+        .bind(&cfg.database)
+        .fetch_optional(&admin_pool)
+        .await?;
+    if exists.is_none() {
+        let safe_db = cfg.database.replace('"', "");
+        sqlx::query(&format!("CREATE DATABASE \"{}\"", safe_db))
+            .execute(&admin_pool)
+            .await?;
+    }
+    admin_pool.close().await;
+    Ok(())
+}
+
+/// Waits (up to `max_wait_ms`) until no server is accepting connections on `port` for `pgdata_dir`.
+async fn wait_for_pg_exit(port: u16, pgdata_dir: &Path, max_wait_ms: u64) {
+    let start = std::time::Instant::now();
+    while start.elapsed().as_millis() < max_wait_ms as u128 {
+        let alive = read_pg_pid(pgdata_dir).map(is_process_alive).unwrap_or(false);
+        if !alive || tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 pub async fn ensure_local_pg_with_port(
@@ -245,66 +338,15 @@ pub async fn ensure_local_pg_with_port(
         info!("Initialized zero-config control PostgreSQL cluster at {} (port {})", pgdata_dir.display(), cfg.port);
     }
 
-    let already_running = read_pg_pid(&pgdata_dir)
-        .map(is_process_alive)
-        .unwrap_or(false)
-        && tokio::net::TcpStream::connect(("127.0.0.1", cfg.port)).await.is_ok();
+    start_control_pg_if_needed(&bins, cfg.port, &control_dir, &pgdata_dir, &log_file).await?;
 
-    if !already_running {
-        let pid_file = pgdata_dir.join("postmaster.pid");
-        if pid_file.exists() {
-            let stale = read_pg_pid(&pgdata_dir).map(|p| !is_process_alive(p)).unwrap_or(true);
-            if stale {
-                let _ = tokio::fs::remove_file(&pid_file).await;
-            }
-        }
-        ensure_tcp_only_pg_conf(&pgdata_dir).await;
-        ensure_pg_permissions(&control_dir, Some(&pgdata_dir));
-        let data_arg = to_clean_path_str(&pgdata_dir);
-        let log_arg = to_clean_path_str(&log_file);
-        let mut start_cmd = make_pg_server_command(
-            &bins.pg_ctl,
-            &["-D", &data_arg, "-l", &log_arg, "-W", "start"],
-        );
-        start_cmd.stdin(std::process::Stdio::null());
-        start_cmd.stdout(std::process::Stdio::null());
-        start_cmd.stderr(std::process::Stdio::null());
-        let _ = tokio::time::timeout(Duration::from_secs(5), start_cmd.status()).await;
-
-        if wait_for_pg_ready(cfg.port, &pgdata_dir, 15_000).await.is_none() {
-            let log_tail = tokio::fs::read_to_string(&log_file).await.unwrap_or_default();
-            let pid = read_pg_pid(&pgdata_dir);
-            let alive = pid.map(is_process_alive).unwrap_or(false);
-            let tcp_ok = tokio::net::TcpStream::connect(("127.0.0.1", cfg.port))
-                .await
-                .is_ok();
-            return Err(format!(
-                "control-pg did not become ready on 127.0.0.1:{} (pid={:?}, alive={}, tcp={}) | {}",
-                cfg.port, pid, alive, tcp_ok, log_tail
-            )
-            .into());
-        }
-    }
-
-    // Ensure the application database exists
-    {
-        let admin_opts = make_pg_connect_options("127.0.0.1", cfg.port, &cfg.user, &cfg.password, "postgres");
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect_with(admin_opts)
-            .await?;
-        let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM pg_database WHERE datname = $1")
-            .bind(&cfg.database)
-            .fetch_optional(&admin_pool)
-            .await?;
-        if exists.is_none() {
-            let safe_db = cfg.database.replace('"', "");
-            sqlx::query(&format!("CREATE DATABASE \"{}\"", safe_db))
-                .execute(&admin_pool)
-                .await?;
-        }
-        admin_pool.close().await;
+    // A server left running by an earlier WebDep process can accept the TCP connection and then
+    // shut down while serving it. Start it again once instead of failing the whole boot.
+    if let Err(first_err) = ensure_app_database(&cfg).await {
+        tracing::warn!("control-pg connection failed ({first_err}); restarting the control cluster once");
+        wait_for_pg_exit(cfg.port, &pgdata_dir, 3_000).await;
+        start_control_pg_if_needed(&bins, cfg.port, &control_dir, &pgdata_dir, &log_file).await?;
+        ensure_app_database(&cfg).await?;
     }
 
     let app_opts = make_pg_connect_options("127.0.0.1", cfg.port, &cfg.user, &cfg.password, &cfg.database);

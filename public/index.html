@@ -26,6 +26,7 @@
     try {
       var savedTheme = localStorage.getItem('webdep.theme');
       if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+      if (localStorage.getItem('webdep.sidebarCollapsed') === '1') document.documentElement.classList.add('sidebar-collapsed');
     } catch (_) {}
   </script>
   <link rel="stylesheet" href="/style.css?v=3.27.0">
@@ -194,6 +195,12 @@
         <div class="brand-name">
           WebDep
         </div>
+        <button type="button" class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-label="Collapse sidebar" aria-expanded="true" title="Collapse sidebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <line x1="9" y1="4" x2="9" y2="20"></line>
+          </svg>
+        </button>
       </div>
 
       <nav class="nav-menu">
@@ -256,7 +263,6 @@
             <line x1="12" y1="22.08" x2="12" y2="12"></line>
           </svg>
           <span>VPS Modules</span>
-          <span class="nav-badge" id="badge-modules-missing" style="display: none;">0</span>
         </a>
 
         <div class="nav-section-title">Administration</div>
@@ -272,7 +278,7 @@
       </nav>
 
       <div class="sidebar-footer" style="flex-direction: column; align-items: stretch; gap: 8px;">
-        <div style="display: flex; align-items: center; justify-content: space-between;">
+        <div class="sidebar-user-row" style="display: flex; align-items: center; justify-content: space-between;">
           <div class="user-snippet" id="user-profile-snippet" style="cursor: pointer;"
             title="Open Account Security (Password & 2FA)">
             <div class="user-avatar" id="current-user-avatar">AD</div>
@@ -291,7 +297,7 @@
             </button>
           </div>
         </div>
-        <div
+        <div class="sidebar-credit"
           style="text-align: center; font-size: 11px; color: var(--text-dim); padding-top: 8px; border-top: 1px solid var(--border-subtle);">
           Built by <strong style="color: var(--text-muted); font-weight: 500;">Just nixx</strong>
         </div>
@@ -482,9 +488,6 @@
               <div class="stat-meta" id="stat-disk-meta">-- total</div>
             </div>
           </div>
-
-          <!-- Per-VPS Separate Capacity Cards (shown automatically in multi-node clusters) -->
-          <div id="overview-nodes-strip" class="overview-nodes-strip" style="display: none;"></div>
 
           <!-- Active Deployment Pipeline (Only visible when a deployment is active) -->
           <div id="overview-active-deployment-box" style="display: none;" class="card">
@@ -1708,8 +1711,114 @@
               </div>
             </div>
 
+            <!-- 3. Platform Version & 1-Click Self-Update Card -->
+            <div class="project-card settings-card" id="settings-update-card">
+              <div class="project-card-header"
+                style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
+                <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
+                  <div class="project-card-icon" style="color: var(--text-main);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                      stroke-linejoin="round">
+                      <polyline points="23 4 23 10 17 10"></polyline>
+                      <polyline points="1 20 1 14 7 14"></polyline>
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                    </svg>
+                  </div>
+                  <div style="min-width: 0;">
+                    <div class="project-info-title" style="font-size: 15px; font-weight: 500;">
+                      <span>Platform Update</span>
+                    </div>
+                    <div
+                      style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
+                      Version &bull; GitHub Release
+                    </div>
+                  </div>
+                </div>
+                <span class="badge badge-neutral" id="platform-version-badge"
+                  style="font-family: var(--font-mono); font-size: 10.5px; flex-shrink: 0;">Checking</span>
+              </div>
+
+              <div class="settings-card-inset">
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                  <div
+                    style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-family: var(--font-mono);">
+                    <span style="font-weight: 500; color: var(--text-main);">Installed: <span
+                        id="platform-branch-name">--</span></span>
+                    <code id="platform-commit-hash" style="color: var(--text-muted); font-size: 12px;">--</code>
+                  </div>
+                </div>
+                <div id="platform-commit-msg"
+                  style="font-size: 11.5px; color: var(--text-dim); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                  Checking for releases...
+                </div>
+              </div>
+
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <input type="text" class="form-control" id="platform-update-repo-input"
+                  placeholder="owner/repo or https://github.com/owner/repo.git"
+                  style="flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11.5px;"
+                  aria-label="Platform update repository">
+                <button type="button" class="btn btn-secondary btn-sm" id="save-platform-repo-btn"
+                  onclick="savePlatformUpdateRepo()" style="flex-shrink: 0;">
+                  Save Repo
+                </button>
+              </div>
+
+              <div class="project-card-actions" style="justify-content: space-between;">
+                <span class="badge badge-neutral" style="font-size: 10.5px; gap: 4px;" title="Preserves data/ and .env"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Safe (data/ &amp; .env)</span>
+                <div style="display: flex; align-items: center; gap: 6px; margin-left: auto;">
+                  <button type="button" class="btn btn-secondary btn-sm" id="check-platform-update-btn"
+                    onclick="checkPlatformUpdates(true)">
+                    Check
+                  </button>
+                  <button type="button" class="btn btn-primary btn-sm" id="trigger-platform-update-btn"
+                    onclick="startPlatformUpdate()">
+                    Update
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 4. Server Controls Card -->
+            <div class="project-card settings-card" id="settings-panel-card">
+              <div class="project-card-header"
+                style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
+                <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
+                  <div class="project-card-icon" style="color: var(--text-main);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                      stroke-linejoin="round">
+                      <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                      <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                      <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                      <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                    </svg>
+                  </div>
+                  <div style="min-width: 0;">
+                    <div class="project-info-title" style="font-size: 15px; font-weight: 500;">
+                      <span>Server Controls</span>
+                    </div>
+                    <div
+                      style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
+                      Daemon &bull; Cache Engine
+                    </div>
+                  </div>
+                </div>
+                <span class="badge badge-success" style="flex-shrink: 0;">Online</span>
+              </div>
+
+              <div class="settings-card-inset"
+                style="font-size: 12px; color: var(--text-dim); line-height: 1.5;">
+                Restart the panel without stopping your running apps, or clear its caches.
+              </div>
+
+              <div class="project-card-actions" style="justify-content: flex-start;">
+                <button type="button" class="btn btn-secondary btn-sm" id="restart-panel-btn">Restart Panel</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="clear-cache-btn">Clear Cache</button>
+              </div>
+            </div>
+
             <!-- 2. GitHub Tokens & Deploy Defaults Card -->
-            <div class="project-card settings-card" id="settings-global-config-card">
+            <div class="project-card settings-card settings-card-wide" id="settings-global-config-card">
               <div class="project-card-header"
                 style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
                 <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
@@ -1774,113 +1883,6 @@
                   <button type="submit" class="btn btn-primary btn-sm">Save Settings</button>
                 </div>
               </form>
-            </div>
-
-            <!-- 3. Platform Version & 1-Click Self-Update Card -->
-            <div class="project-card settings-card" id="settings-update-card">
-              <div class="project-card-header"
-                style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
-                <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
-                  <div class="project-card-icon" style="color: var(--text-main);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                      stroke-linejoin="round">
-                      <polyline points="23 4 23 10 17 10"></polyline>
-                      <polyline points="1 20 1 14 7 14"></polyline>
-                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                    </svg>
-                  </div>
-                  <div style="min-width: 0;">
-                    <div class="project-info-title" style="font-size: 15px; font-weight: 500;">
-                      <span>Platform Update</span>
-                    </div>
-                    <div
-                      style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
-                      Version &bull; GitHub Release
-                    </div>
-                  </div>
-                </div>
-                <span class="badge badge-neutral" id="platform-version-badge"
-                  style="font-family: var(--font-mono); font-size: 10.5px; flex-shrink: 0;">Checking</span>
-              </div>
-
-              <div class="settings-card-inset">
-                <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
-                  <div
-                    style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-family: var(--font-mono);">
-                    <span style="font-weight: 500; color: var(--text-main);">Instance: <span
-                        id="platform-branch-name">main</span></span>
-                    <span style="color: var(--text-dim);">&bull;</span>
-                    <code id="platform-commit-hash" style="color: var(--text-muted); font-size: 12px;">--</code>
-                  </div>
-                </div>
-                <div id="platform-commit-msg"
-                  style="font-size: 11.5px; color: var(--text-dim); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                  Fetching commit details
-                </div>
-              </div>
-
-              <div style="display: flex; align-items: center; gap: 8px;">
-                <input type="text" class="form-control" id="platform-update-repo-input"
-                  placeholder="owner/repo or https://github.com/owner/repo.git"
-                  style="flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11.5px;"
-                  aria-label="Platform update repository">
-                <button type="button" class="btn btn-secondary btn-sm" id="save-platform-repo-btn"
-                  onclick="savePlatformUpdateRepo()" style="flex-shrink: 0;">
-                  Save Repo
-                </button>
-              </div>
-
-              <div class="project-card-actions" style="justify-content: space-between;">
-                <span class="badge badge-neutral" style="font-size: 10.5px; gap: 4px;" title="Preserves data/ and .env"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Safe (data/ &amp; .env)</span>
-                <div style="display: flex; align-items: center; gap: 6px; margin-left: auto;">
-                  <button type="button" class="btn btn-secondary btn-sm" id="check-platform-update-btn"
-                    onclick="checkPlatformUpdates(true)">
-                    Check
-                  </button>
-                  <button type="button" class="btn btn-primary btn-sm" id="trigger-platform-update-btn"
-                    onclick="startPlatformUpdate()">
-                    Update
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!-- 4. Server Controls Card -->
-            <div class="project-card settings-card" id="settings-panel-card">
-              <div class="project-card-header"
-                style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
-                <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
-                  <div class="project-card-icon" style="color: var(--text-main);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                      stroke-linejoin="round">
-                      <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
-                      <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
-                      <line x1="6" y1="6" x2="6.01" y2="6"></line>
-                      <line x1="6" y1="18" x2="6.01" y2="18"></line>
-                    </svg>
-                  </div>
-                  <div style="min-width: 0;">
-                    <div class="project-info-title" style="font-size: 15px; font-weight: 500;">
-                      <span>Server Controls</span>
-                    </div>
-                    <div
-                      style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
-                      Daemon &bull; Cache Engine
-                    </div>
-                  </div>
-                </div>
-                <span class="badge badge-success" style="flex-shrink: 0;">Online</span>
-              </div>
-
-              <div class="settings-card-inset"
-                style="font-size: 11.5px; color: var(--text-dim); font-family: var(--font-mono); line-height: 1.5;">
-                Restart the WebDep panel daemon safely without stopping running workloads, or clear caches.
-              </div>
-
-              <div class="project-card-actions" style="justify-content: flex-start;">
-                <button type="button" class="btn btn-secondary btn-sm" id="restart-panel-btn">Restart Panel</button>
-                <button type="button" class="btn btn-secondary btn-sm" id="clear-cache-btn">Clear Cache</button>
-              </div>
             </div>
 
             <!-- 5. Platform Appearance & Predefined Themes Card -->
@@ -1987,7 +1989,7 @@
             </div>
           </div>
 
-          <div class="stats-grid" style="margin-bottom: 16px;">
+          <div class="stats-grid nodes-stats-grid" style="margin-bottom: 16px;">
             <div class="stat-card">
               <div class="stat-label">Cluster Nodes</div>
               <div class="stat-value" id="nodes-stat-total">0</div>
@@ -2004,9 +2006,19 @@
               <div class="stat-meta">Apps, services &amp; databases</div>
             </div>
             <div class="stat-card">
+              <div class="stat-label">Cluster CPU</div>
+              <div class="stat-value" id="nodes-stat-cores">--</div>
+              <div class="stat-meta">Total cores across nodes</div>
+            </div>
+            <div class="stat-card">
               <div class="stat-label">Cluster RAM</div>
               <div class="stat-value" id="nodes-stat-ram">--</div>
-              <div class="stat-meta">Aggregate reported memory</div>
+              <div class="stat-meta">Total memory across nodes</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Cluster Storage</div>
+              <div class="stat-value" id="nodes-stat-storage">--</div>
+              <div class="stat-meta" id="nodes-stat-storage-meta">Total disk across nodes</div>
             </div>
           </div>
 
@@ -2015,8 +2027,8 @@
           <div class="card">
             <div class="card-header">
               <div>
-                <h2 class="card-title">Single-Use Join Tokens</h2>
-                <div class="form-hint" style="margin-top: 2px;">15-minute SHA-256 hashed enrollment secrets (one node per token)</div>
+                <h2 class="card-title">Join tokens</h2>
+                <div class="form-hint" style="margin-top: 2px;">Each token adds one node. Revoke a token to stop its command working.</div>
               </div>
               <button class="btn btn-secondary btn-sm" id="nodes-generate-token-btn" onclick="openAddNodeModal()" style="display: none;">+ Generate Token</button>
             </div>
@@ -2028,68 +2040,19 @@
         <section id="view-modules" class="view-section">
           <div class="view-header">
             <div class="view-title-group">
-              <h1>VPS Modules &amp; Language Readiness</h1>
-              <p>Inspect required packages (<code>unrar</code>, <code>git</code>) and language runners (Node.js, Python, Java, Go, Rust, PHP, Ruby, .NET) across every VPS.</p>
+              <h1>VPS Modules</h1>
+              <p>Install the languages and tools you need on each VPS.</p>
             </div>
             <div class="view-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
-              <button class="btn btn-secondary btn-sm" onclick="window.loadModulesView && window.loadModulesView(true)">Refresh All VPS</button>
-              <button class="btn btn-primary btn-sm" id="modules-install-all-req-btn" onclick="window.installFleetModules([], 'Install missing required modules across all VPS')" style="display: none;">Install All Missing Required</button>
+              <button class="btn btn-secondary btn-sm" onclick="window.loadModulesView && window.loadModulesView(true)">Rescan</button>
             </div>
           </div>
 
-          <div class="stats-grid" style="margin-bottom: 16px;">
-            <div class="stat-card">
-              <div class="stat-label">Online VPS Fleet</div>
-              <div class="stat-value" id="modules-stat-fleet">0 / 0</div>
-              <div class="stat-meta">Reachable execution nodes</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-label">VPS Required Ready</div>
-              <div class="stat-value" id="modules-stat-ready">0 / 0</div>
-              <div class="stat-meta">Nodes with unrar, git, node &amp; python</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-label">Missing Required</div>
-              <div class="stat-value" id="modules-stat-missing">0</div>
-              <div class="stat-meta">Packages needed across online nodes</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-label">Runtime Catalog</div>
-              <div class="stat-value" id="modules-stat-catalog">0</div>
-              <div class="stat-meta">Languages &amp; system tools</div>
-            </div>
-          </div>
+          <div id="modules-matrix-container"></div>
 
-          <div class="card" style="margin-bottom: 16px;">
-            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
-              <div>
-                <h2 class="card-title">VPS &times; Module Readiness Matrix</h2>
-                <div class="form-hint" style="margin-top: 2px;">See exactly which module is installed or needs installation on each VPS</div>
-              </div>
-              <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-                <div class="filter-pills" id="modules-category-filters">
-                  <button type="button" class="pill active" data-mod-filter="all" onclick="window.setModulesFilter('all')">All</button>
-                  <button type="button" class="pill" data-mod-filter="required" onclick="window.setModulesFilter('required')">Required</button>
-                  <button type="button" class="pill" data-mod-filter="language" onclick="window.setModulesFilter('language')">Languages</button>
-                  <button type="button" class="pill" data-mod-filter="archive" onclick="window.setModulesFilter('archive')">Archives &amp; Tools</button>
-                </div>
-                <input type="text" class="form-control" style="width: 190px;" placeholder="Filter module or language..." oninput="window.onModulesSearchInput(this.value)" aria-label="Filter VPS modules">
-              </div>
-            </div>
-            <div class="card-body" style="padding: 0;" id="modules-matrix-container"></div>
-          </div>
-
-          <div style="margin-bottom: 16px;">
-            <h2 style="font-size: 15px; font-weight: 600; margin-bottom: 10px; color: var(--text-main);">Supported Languages &amp; Required Tools</h2>
-            <div id="modules-catalog-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px;"></div>
-          </div>
-
-          <div class="card">
+          <div class="card" id="modules-install-log-card" style="display: none; margin-top: 16px;">
             <div class="card-header">
-              <div>
-                <h2 class="card-title">Module Installation Output</h2>
-                <div class="form-hint" style="margin-top: 2px;">Live package manager verification and install output across your VPS fleet</div>
-              </div>
+              <h2 class="card-title">Install log</h2>
             </div>
             <div class="card-body">
               <pre id="modules-install-console" style="margin: 0; max-height: 240px; overflow-y: auto; background: var(--bg-terminal); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 12px; font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; color: var(--text-normal); white-space: pre-wrap; word-break: break-word;">No module installations run in this session yet.</pre>
@@ -3330,91 +3293,87 @@
     <div class="modal-container" style="max-width: 560px;">
       <div class="modal-header">
         <div>
-          <h3 class="modal-title">Add Worker Web-Node</h3>
-          <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
-            Enter your target VPS details to generate a ready-to-paste setup command
-          </div>
+          <h3 class="modal-title">Add a node</h3>
+          <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">Get a one-line command to run on the new VPS.</div>
         </div>
         <button class="modal-close" data-close-modal>&times;</button>
       </div>
       <div class="modal-body">
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label" for="add-node-label">VPS / Node Name</label>
-            <input type="text" class="form-control" id="add-node-label" value="VPS-2" placeholder="e.g. VPS-2">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="add-node-region">Region</label>
-            <input type="text" class="form-control" id="add-node-region" value="mumbai-IND" placeholder="e.g. mumbai-IND / eu-central">
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label" for="add-node-target-ip">Target VPS 2 Public IP</label>
-            <input type="text" class="form-control" id="add-node-target-ip" placeholder="e.g. 203.0.113.25 (or 127.0.0.1 for local test)">
-            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 5px; font-size: 11px; color: var(--text-dim);">
-              <span>Used for P2P mesh &amp; DNS cards.</span>
-              <button type="button" class="btn btn-secondary btn-sm" style="padding: 1px 7px; font-size: 10.5px;" onclick="setAddNodeTargetIp('127.0.0.1')">Use 127.0.0.1 (Local)</button>
+        <div id="add-node-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="add-node-label">Name</label>
+              <input type="text" class="form-control" id="add-node-label" value="VPS-2" placeholder="e.g. VPS-2">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="add-node-region">Region</label>
+              <input type="text" class="form-control" id="add-node-region" value="mumbai-IND" placeholder="e.g. mumbai-IND">
             </div>
           </div>
-          <div class="form-group">
-            <label class="form-label" for="add-node-ttl">Token Expiration</label>
-            <select class="form-control" id="add-node-ttl">
-              <option value="900" selected>15 minutes (recommended)</option>
-              <option value="1800">30 minutes</option>
-              <option value="3600">1 hour</option>
-            </select>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="add-node-target-ip">New VPS public IP <span style="color: var(--text-dim); font-weight: 400;">(optional)</span></label>
+              <input type="text" class="form-control" id="add-node-target-ip" placeholder="e.g. 203.0.113.25">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="add-node-ttl">Command expires in</label>
+              <select class="form-control" id="add-node-ttl">
+                <option value="900" selected>15 minutes</option>
+                <option value="1800">30 minutes</option>
+                <option value="3600">1 hour</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 0;">
+            <label class="form-label" for="add-node-core-url">This panel's address <span style="color: var(--text-dim); font-weight: 400;">(the new VPS must reach it)</span></label>
+            <input type="text" class="form-control" id="add-node-core-url" style="font-family: var(--font-mono); font-size: 12px;">
+            <div id="add-node-ip-suggestions" style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 6px;"></div>
           </div>
         </div>
 
-        <div class="form-group">
-          <label class="form-label" for="add-node-core-url">Current Web-Core Panel URL (auto-detected)</label>
-          <input type="text" class="form-control" id="add-node-core-url" placeholder="Detecting panel IP..." style="font-family: var(--font-mono); font-size: 12px;">
-          <div id="add-node-ip-suggestions" style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 6px; font-size: 11px; color: var(--text-dim);"></div>
-        </div>
-
-        <div id="add-node-result-box" style="display: none; margin-top: 14px; padding: 14px; background: var(--bg-input); border-radius: var(--radius-md); border: 1px solid var(--border-subtle);">
-          <div style="font-size: 12px; font-weight: 600; color: var(--text-main); margin-bottom: 6px;">
-            1. Fresh Linux VPS 2 — paste this one line into SSH as any sudo user (installs everything &amp; joins):
-          </div>
-          <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-            <input type="text" class="form-control" id="add-node-fresh-cmd" aria-label="Fresh VPS install and join command" readonly style="font-family: var(--font-mono); font-size: 11.5px;">
+        <div id="add-node-result-box" style="display: none;">
+          <div style="font-size: 14px; font-weight: 600; color: var(--text-main);" id="add-node-result-title">Join command</div>
+          <div style="font-size: 12px; color: var(--text-dim); margin: 4px 0 10px;" id="add-node-result-hint"></div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <input type="text" class="form-control" id="add-node-fresh-cmd" aria-label="Join command for a fresh Linux VPS" readonly style="font-family: var(--font-mono); font-size: 11.5px;">
             <button type="button" class="btn btn-primary btn-sm" onclick="copyNodeJoinCommand('add-node-fresh-cmd')">Copy</button>
           </div>
 
-          <div style="font-size: 11.5px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px;">
-            2. Already Cloned on Linux VPS 2 (Bash <code>./start.sh --service</code>):
-          </div>
-          <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-            <input type="text" class="form-control" id="add-node-service-cmd" aria-label="start.sh join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
-            <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-service-cmd')">Copy</button>
-          </div>
-
-          <div style="font-size: 11.5px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px;">
-            3. Direct Binary Flags (<code>webdep --node</code>):
-          </div>
-          <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-            <input type="text" class="form-control" id="add-node-join-cmd" aria-label="webdep --node join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
-            <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-join-cmd')">Copy</button>
-          </div>
-
-          <div style="font-size: 11.5px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px;">
-            4. Windows PowerShell (Same-PC Local Test):
-          </div>
-          <div style="display: flex; gap: 8px; align-items: center;">
-            <input type="text" class="form-control" id="add-node-ps-cmd" aria-label="Windows PowerShell join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
-            <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-ps-cmd')">Copy</button>
-          </div>
-
-          <div style="font-size: 11px; color: var(--text-dim); margin-top: 8px;">
-            Raw Token (shown once): <code id="add-node-raw-token" style="word-break: break-all;"></code>
-          </div>
+          <details style="margin-top: 14px;">
+            <summary style="cursor: pointer; font-size: 12px; color: var(--text-muted);">Other ways to join</summary>
+            <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 10px;">
+              <div>
+                <div style="font-size: 11.5px; color: var(--text-dim); margin-bottom: 4px;">WebDep already cloned on the VPS (<code>./start.sh</code>)</div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input type="text" class="form-control" id="add-node-service-cmd" aria-label="start.sh join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-service-cmd')">Copy</button>
+                </div>
+              </div>
+              <div>
+                <div style="font-size: 11.5px; color: var(--text-dim); margin-bottom: 4px;">WebDep binary only (<code>webdep --node</code>)</div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input type="text" class="form-control" id="add-node-join-cmd" aria-label="webdep --node join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-join-cmd')">Copy</button>
+                </div>
+              </div>
+              <div>
+                <div style="font-size: 11.5px; color: var(--text-dim); margin-bottom: 4px;">Windows PowerShell (test on this PC)</div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                  <input type="text" class="form-control" id="add-node-ps-cmd" aria-label="Windows PowerShell join command" readonly style="font-family: var(--font-mono); font-size: 11px;">
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="copyNodeJoinCommand('add-node-ps-cmd')">Copy</button>
+                </div>
+              </div>
+              <div style="font-size: 11px; color: var(--text-dim);">Token (shown once): <code id="add-node-raw-token" style="word-break: break-all;"></code></div>
+            </div>
+          </details>
         </div>
       </div>
       <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
-        <button type="button" class="btn btn-secondary" data-close-modal>Close</button>
-        <button type="button" class="btn btn-primary" id="generate-node-token-btn" onclick="generateNodeEnrollToken()">Generate Join Command</button>
+        <button type="button" class="btn btn-secondary" id="add-node-close-btn" data-close-modal>Cancel</button>
+        <button type="button" class="btn btn-secondary" id="add-node-another-btn" style="display: none;" onclick="addAnotherNode()">Add another</button>
+        <button type="button" class="btn btn-primary" id="generate-node-token-btn" onclick="generateNodeEnrollToken()">Generate command</button>
       </div>
     </div>
   </div>

@@ -4,6 +4,7 @@
  */
 
 import { animateModalOpen, animateModalClose } from './motion_ui.js';
+import { icon } from './icons.js';
 
 // ============================================================================
 // State Management
@@ -707,10 +708,30 @@ function matchesNodeFilter(item) {
   return String(itemNodeId) === filter;
 }
 
+// The name to show for a node: the operator's display name when set, otherwise the node's own name.
+function nodeLabel(node) {
+  if (!node) return '';
+  return String(node.displayName || '').trim() || node.name || `Node #${node.id}`;
+}
+
 function getNodeDisplayName(nodeId) {
   if (nodeId === null || nodeId === undefined) return '';
   const found = (state.nodes || []).find((n) => String(n.id) === String(nodeId));
-  return found ? found.name : `Node #${nodeId}`;
+  return found ? nodeLabel(found) : `Node #${nodeId}`;
+}
+
+// Node label for an app or database. A missing node id means it runs on the control (local) node.
+function getAppNodeLabel(nodeId) {
+  if (nodeId !== null && nodeId !== undefined && nodeId !== '') return getNodeDisplayName(nodeId);
+  const local = (state.nodes || []).find((n) => n.isLocal);
+  return local ? nodeLabel(local) : '';
+}
+
+// Badge naming the node an app or database runs on; empty until the node list has loaded.
+function appNodeBadgeHtml(nodeId) {
+  const label = getAppNodeLabel(nodeId);
+  if (!label) return '';
+  return `<span class="badge badge-neutral app-node-tag" title="Runs on node ${escapeHtml(label)}">${icon('server', { size: 10 })} ${escapeHtml(label)}</span>`;
 }
 
 function isPrivateOrLocalIp(ip) {
@@ -728,7 +749,7 @@ function isPrivateOrLocalIp(ip) {
   return false;
 }
 
-function isSensitivePublicIp(val) {
+function isPublicIp(val) {
   const s = String(val || '').trim().replace(/^\[|\]$/g, '');
   if (!s) return false;
   if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(s)) {
@@ -740,33 +761,23 @@ function isSensitivePublicIp(val) {
   return false;
 }
 
-function hasSensitivePublicIpv4(text) {
-  const raw = String(text || '');
-  const re = /\b(\d{1,3}(?:\.\d{1,3}){3})\b/g;
-  let match;
-  while ((match = re.exec(raw)) !== null) {
-    if (!isPrivateOrLocalIp(match[1])) return true;
-  }
-  return false;
-}
-
 function getNodeEffectivePublicIp(node) {
   const raw = String(node?.publicIp || '').trim();
-  if (isSensitivePublicIp(raw)) return raw;
+  if (isPublicIp(raw)) return raw;
   if (node?.isLocal) {
     const host = String(window.location.hostname || '').trim();
-    if (isSensitivePublicIp(host)) return host;
+    if (isPublicIp(host)) return host;
   }
   return '';
 }
 
-async function copyBlurIpButton(btnEl) {
+async function copyIpChip(btnEl) {
   const ip = btnEl?.getAttribute('data-copy-ip') || '';
   if (!ip) return;
   await copyTextToClipboard(ip, 'Public IP copied to clipboard');
   if (btnEl) {
     btnEl.classList.add('copied');
-    const actionEl = btnEl.querySelector('.ip-blur-action');
+    const actionEl = btnEl.querySelector('.ip-chip-action');
     if (actionEl) actionEl.textContent = 'Copied';
     clearTimeout(btnEl._copyResetTimer);
     btnEl._copyResetTimer = setTimeout(() => {
@@ -776,29 +787,14 @@ async function copyBlurIpButton(btnEl) {
   }
 }
 
-function renderBlurPublicIpPill(ip, opts = {}) {
+function renderPublicIpPill(ip, opts = {}) {
   const clean = String(ip || '').trim();
   if (!clean) return '';
   const label = opts.label || 'IP';
-  return `<button type="button" class="ip-blur-copy" data-copy-ip="${escapeHtml(clean)}" onclick="window.copyBlurIpButton(this)" aria-label="Copy VPS public IP"><span class="ip-blur-label">${escapeHtml(label)}</span><span class="ip-blur-text">${escapeHtml(clean)}</span><span class="ip-blur-action">Copy</span></button>`;
+  return `<button type="button" class="ip-chip" data-copy-ip="${escapeHtml(clean)}" onclick="window.copyIpChip(this)" aria-label="Copy VPS public IP"><span class="ip-chip-label">${escapeHtml(label)}</span><span class="ip-chip-text">${escapeHtml(clean)}</span><span class="ip-chip-action">Copy</span></button>`;
 }
 
-function renderBlurredPublicIpText(text) {
-  const raw = String(text || '');
-  if (!raw) return '';
-  const re = /(\b\d{1,3}(?:\.\d{1,3}){3}\b)/g;
-  return raw
-    .split(re)
-    .map((part) => {
-      if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(part) && !isPrivateOrLocalIp(part)) {
-        return `<span class="ip-blur-inline">${escapeHtml(part)}</span>`;
-      }
-      return escapeHtml(part);
-    })
-    .join('');
-}
-
-window.copyBlurIpButton = copyBlurIpButton;
+window.copyIpChip = copyIpChip;
 
 export {
   PAGE_SIZE,
@@ -806,13 +802,14 @@ export {
   setHtmlIfChanged,
   matchesNodeFilter,
   getNodeDisplayName,
+  nodeLabel,
+  getAppNodeLabel,
+  appNodeBadgeHtml,
   isPrivateOrLocalIp,
-  isSensitivePublicIp,
-  hasSensitivePublicIpv4,
+  isPublicIp,
   getNodeEffectivePublicIp,
-  copyBlurIpButton,
-  renderBlurPublicIpPill,
-  renderBlurredPublicIpText,
+  copyIpChip,
+  renderPublicIpPill,
   paginateAndRender,
   goToTablePage,
   PIPELINE_STAGES,

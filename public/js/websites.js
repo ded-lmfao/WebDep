@@ -19,6 +19,8 @@ import {
   syncOverviewResourceStatus,
   WEBSITE_WORKSPACE_TABS,
   PRESETS,
+  nodeLabel,
+  appNodeBadgeHtml,
 } from './state.js';
 import { api, toast } from './api.js';
 import { cleanDomainList } from './settings.js';
@@ -216,6 +218,7 @@ function renderProjectsList() {
 
         <!-- Badges & Telemetry Row -->
         <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px;">
+          ${appNodeBadgeHtml(p.node_id)}
           ${(!p.repo_url || p.repo_url === 'local')
             ? `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px;" title="Files are uploaded in the Files tab">${icon('folder', { size: 10 })} Manual upload</span>`
             : `<span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">
@@ -307,7 +310,7 @@ async function populateTargetNodeSelect(selectId, groupId, selectedNodeId = null
     .map((n) => {
       const roleTag = n.isLocal ? 'Local Core' : (n.meshIp || n.region || 'Remote Node');
       const statusTag = n.status && n.status !== 'online' ? ` · ${n.status}` : '';
-      return `<option value="${escapeHtml(String(n.id))}">${escapeHtml(n.name)} (${escapeHtml(roleTag)}${escapeHtml(statusTag)})</option>`;
+      return `<option value="${escapeHtml(String(n.id))}">${escapeHtml(nodeLabel(n))} (${escapeHtml(roleTag)}${escapeHtml(statusTag)})</option>`;
     })
     .join('');
 
