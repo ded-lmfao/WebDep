@@ -4,12 +4,12 @@ import { ArrowUpRight } from "lucide-react";
 import { CommandLine } from "@/components/CopyButton";
 import { LinuxIcon, WindowsIcon } from "@/components/OsIcons";
 import Reveal, { SectionHeading } from "@/components/Reveal";
-import { GITHUB_REPO_URL, INSTALL_PLATFORMS, detectInstallOs, type InstallOs } from "@/data/site";
+import { GITHUB_REPO_URL, INSTALL_PLATFORMS, type InstallOs } from "@/data/site";
 
 const OS_LIST: InstallOs[] = ["linux", "windows"];
 
 export default function Install() {
-  const [os, setOs] = useState<InstallOs>(detectInstallOs);
+  const [os, setOs] = useState<InstallOs>("linux");
   const [roleId, setRoleId] = useState("both");
   const platform = INSTALL_PLATFORMS[os];
   const role = platform.roles.find((r) => r.id === roleId) ?? platform.roles[0];

@@ -173,13 +173,6 @@ export const INSTALL_PLATFORMS: Record<InstallOs, InstallPlatform> = {
   },
 };
 
-/** Best guess of the visitor's OS for the default install tab. */
-export function detectInstallOs(): InstallOs {
-  if (typeof navigator === "undefined") return "linux";
-  const ua = `${navigator.userAgent} ${(navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? ""}`;
-  return /windows/i.test(ua) ? "windows" : "linux";
-}
-
 export const STATS = [
   { value: "~20 MB", label: "RAM for the control plane" },
   { value: "1", label: "static binary, no Docker" },
