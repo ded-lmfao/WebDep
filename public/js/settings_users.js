@@ -56,11 +56,11 @@ export function setUserPowerPreset(preset) {
 /** Which preset the ticked permissions match exactly, or 'custom'. */
 function currentUserRole() {
   const checks = Array.from(document.querySelectorAll('.user-power-check'));
-  const on = checks.filter((cb) => cb.checked).map((cb) => cb.value).sort();
-  if (checks.length && on.length === checks.length) return 'all';
+  const on = new Set(checks.filter((cb) => cb.checked).map((cb) => cb.value));
+  if (checks.length && on.size === checks.length) return 'all';
   for (const key of ['defaults', 'readonly']) {
-    const list = [...POWER_PRESETS[key]].sort();
-    if (list.length === on.length && list.every((v, i) => v === on[i])) return key;
+    const list = POWER_PRESETS[key];
+    if (list.length === on.size && list.every((v) => on.has(v))) return key;
   }
   return 'custom';
 }
