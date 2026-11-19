@@ -1,5 +1,6 @@
 
 pub mod user;
+pub mod grants;
 pub mod session;
 pub mod password;
 pub mod totp;

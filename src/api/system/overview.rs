@@ -379,12 +379,13 @@ async fn compute_overview_bytes(
     let mut projs = state.projects.list().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     projs.retain(|p| !user.disabled && user.can_access_project(p.id));
 
-    let raw_dbs = if !user.disabled && user.has_any_power(&["databases", "databases_manage"]) {
+    let raw_dbs = if state.auth.can_list_databases_for_user(user).await {
         let mut list = state.databases.list_overview_summaries().await.unwrap_or_default();
         list.retain(|db| {
             crate::auth::Auth::user_has_database_power(
                 user,
                 &["databases", "databases_manage"],
+                db.id,
                 db.linked_project_id,
             )
         });

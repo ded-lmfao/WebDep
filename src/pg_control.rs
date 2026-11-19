@@ -54,6 +54,13 @@ fn build_migrator() -> sqlx::migrate::Migrator {
                 Cow::Borrowed(include_str!("../migrations/0005_node_display_name.sql")),
                 false,
             ),
+            Migration::new(
+                6,
+                Cow::Borrowed("user_management"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../migrations/0006_user_management.sql")),
+                false,
+            ),
         ]),
         ignore_missing: false,
         locking: true,

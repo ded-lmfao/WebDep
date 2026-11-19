@@ -349,7 +349,7 @@ pub(crate) async fn get_deployment_handler(
             "Access denied: You are not assigned to this website.".to_string(),
         ));
     }
-    let logs = if user.has_power("logs") {
+    let logs = if user.has_project_power(dep.project_id, &["logs"]) {
         state.logs.list(None, Some(id), None, None, 1000).await
     } else {
         Vec::new()

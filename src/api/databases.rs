@@ -158,12 +158,13 @@ pub(crate) async fn list_databases_handler(
                     crate::auth::Auth::user_has_database_power(
                         &user,
                         &["databases", "databases_manage"],
+                        db.id,
                         db.linked_project_id,
                     )
                 })
                 .map(|mut db| {
                     let can_creds =
-                        crate::auth::Auth::user_can_view_db_credentials(&user, db.linked_project_id);
+                        crate::auth::Auth::user_can_view_db_credentials(&user, db.id, db.linked_project_id);
                     if !can_creds {
                         db.db_password = None;
                     }
@@ -229,7 +230,7 @@ where
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
     let user = verify_db_access(state, headers, &["databases", "databases_manage"], &db).await?;
-    let can_creds = user.has_any_power(&["databases_manage", "env"]);
+    let can_creds = crate::auth::Auth::user_can_view_db_credentials(&user, db.id, db.linked_project_id);
     f.await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");

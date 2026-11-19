@@ -193,6 +193,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     auth_mgr.force_secure_cookies = config.force_secure_cookies;
     let auth = Arc::new(auth_mgr);
     auth.ensure_admin().await;
+    match crate::auth::grants::migrate_legacy_once(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Converted legacy permissions of {} user(s) into access grants", n),
+        // Fail closed but keep serving: non-admin users get no access until the next
+        // successful boot retries the conversion; the main admin is unaffected.
+        Err(e) => tracing::error!("Failed to convert legacy permissions into access grants (will retry next start): {e}"),
+    }
     auth.start_revocation_listener();
     let projects = Arc::new(Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(Logs::new(db.clone()));

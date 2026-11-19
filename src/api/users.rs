@@ -114,6 +114,10 @@ pub(crate) async fn create_user_handler(
     .await
     .map_err(|e| (StatusCode::BAD_REQUEST, format!("Could not create user: {}", e)))?;
 
+    crate::auth::grants::replace_from_legacy_json(&state.db, id, &perms_json, &allowed_json, Some(actor.id))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save user access: {}", e)))?;
+
     log_audit(&state, &actor.username, "user.create", Some(&uname), Some(&format!("perms={}", perms_json))).await;
 
     Ok(Json(User::from_db(
@@ -172,6 +176,8 @@ pub(crate) async fn update_user_handler(
     }
 
     if !existing.is_main_admin {
+        let access_changed =
+            payload.permissions.is_some() || payload.all_projects.is_some() || payload.allowed_projects.is_some();
         if let Some(d_val) = payload.disabled {
             let is_disabled = match d_val {
                 serde_json::Value::Bool(b) => b,
@@ -212,6 +218,9 @@ pub(crate) async fn update_user_handler(
                 .execute(&state.db)
                 .await;
         }
+        if access_changed {
+            sync_grants_from_legacy_columns(&state, id, actor.id).await?;
+        }
         state
             .auth
             .notify_revocation(crate::auth::manager::AccessRevocationEvent {
@@ -234,6 +243,25 @@ pub(crate) async fn update_user_handler(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     Ok(Json(updated))
+}
+
+/// Rebuilds a user's access grants from the legacy permission columns the current user
+/// editor writes.
+async fn sync_grants_from_legacy_columns(
+    state: &AppState,
+    user_id: i64,
+    actor_id: i64,
+) -> Result<(), (StatusCode, String)> {
+    let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not save user access: {}", e));
+    let (perms, allowed): (String, String) =
+        sqlx::query_as("SELECT permissions, allowed_projects FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(db_err)?;
+    crate::auth::grants::replace_from_legacy_json(&state.db, user_id, &perms, &allowed, Some(actor_id))
+        .await
+        .map_err(db_err)
 }
 
 pub(crate) async fn delete_user_handler(

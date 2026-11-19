@@ -270,13 +270,16 @@ pub(crate) async fn audit_handler(
         let (user, db) = crate::api::databases::get_authorized_database(
             &state,
             &headers,
-            &["databases", "databases_manage", "audit"],
+            &["databases", "databases_manage", "audit", "activity"],
             db_id,
         )
         .await?;
         (user, Some(db))
     } else {
-        (verify_power(&state, &headers, "audit", q.project_id).await?, None)
+        // Per-app activity: the app's `activity` power (or legacy `audit`); the panel-wide
+        // feed still needs panel-level `audit`.
+        let powers: &[&str] = if q.project_id.is_some() { &["activity", "audit"] } else { &["audit"] };
+        (verify_any_power(&state, &headers, powers, q.project_id).await?, None)
     };
     let max_limit = q.limit.unwrap_or(500).min(1000);
     let cache_key = format!(

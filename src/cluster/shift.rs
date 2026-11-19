@@ -1526,14 +1526,10 @@ mod tests {
         .fetch_one(&state.db)
         .await
         .unwrap();
-        let dev_user = state
-            .auth
-            .list_users()
+        crate::auth::grants::replace_from_legacy_json(&state.db, dev_id, r#"["deploy","projects_manage"]"#, "[]", None)
             .await
-            .unwrap()
-            .into_iter()
-            .find(|u| u.id == dev_id)
             .unwrap();
+        let dev_user = state.auth.get_user_by_id(dev_id).await.unwrap();
         let rbac_err = verify_cross_node_shift_rbac(&state, &dev_user, proj.id, good_target_id)
             .await
             .unwrap_err();
@@ -1546,14 +1542,16 @@ mod tests {
             .execute(&state.db)
             .await
             .unwrap();
-        let dev_user_allowed = state
-            .auth
-            .list_users()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|u| u.id == dev_id)
-            .unwrap();
+        crate::auth::grants::replace_from_legacy_json(
+            &state.db,
+            dev_id,
+            r#"["deploy","projects_manage"]"#,
+            &format!("[{}]", proj.id),
+            None,
+        )
+        .await
+        .unwrap();
+        let dev_user_allowed = state.auth.get_user_by_id(dev_id).await.unwrap();
         verify_cross_node_shift_rbac(&state, &dev_user_allowed, proj.id, good_target_id)
             .await
             .unwrap();

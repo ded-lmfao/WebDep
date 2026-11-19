@@ -1490,6 +1490,9 @@ mod tests {
         .fetch_one(&state.db)
         .await
         .unwrap();
+        crate::auth::grants::replace_from_legacy_json(&state.db, file_user_id, r#"["files","files_write"]"#, r#"["*"]"#, None)
+            .await
+            .unwrap();
         let file_sess = state.auth.create_session(file_user_id).await.unwrap();
 
         // 1. Enroll remote node

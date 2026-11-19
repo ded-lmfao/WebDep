@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::grants::{parse_legacy_permissions, parse_legacy_projects, Grants};
+
 fn default_presence() -> String {
     "offline".to_string()
 }
@@ -21,6 +23,10 @@ pub struct User {
     #[serde(default = "default_presence")]
     pub presence: String,
     pub created_at: i64,
+    /// Authorization source of truth, loaded from `access_grants` for session users.
+    /// Users loaded for display (lists, lookups) carry no grants.
+    #[serde(skip)]
+    pub grants: Grants,
 }
 
 impl User {
@@ -33,33 +39,16 @@ impl User {
         totp_enabled_int: i64,
         created_at: i64,
     ) -> Self {
-        let is_main_admin = id == 1 || username.eq_ignore_ascii_case("admin");
+        let is_main_admin = Self::is_main_admin_identity(id, &username);
         let disabled = !is_main_admin && disabled_int != 0;
 
-        let mut permissions: Vec<String> = serde_json::from_str(&perms_json).unwrap_or_default();
-        if is_main_admin {
-            permissions = vec!["*".to_string()];
-        }
-
-        let mut all_projects = is_main_admin;
-        let mut allowed_projects = Vec::new();
-        if !is_main_admin {
-            if let Ok(vals) = serde_json::from_str::<Vec<serde_json::Value>>(&proj_json) {
-                for v in vals {
-                    if v.as_str() == Some("*") {
-                        all_projects = true;
-                    } else if let Some(pid) = v.as_i64() {
-                        allowed_projects.push(pid);
-                    } else if let Some(s) = v.as_str() {
-                        if let Ok(pid) = s.parse::<i64>() {
-                            allowed_projects.push(pid);
-                        }
-                    }
-                }
-            } else {
-                all_projects = true;
-            }
-        }
+        // Legacy columns are kept only for display in the current user editor.
+        let (permissions, all_projects, allowed_projects) = if is_main_admin {
+            (vec!["*".to_string()], true, Vec::new())
+        } else {
+            let (all, ids) = parse_legacy_projects(&proj_json);
+            (parse_legacy_permissions(&perms_json), all, ids)
+        };
 
         Self {
             id,
@@ -72,6 +61,7 @@ impl User {
             totp_enabled: totp_enabled_int != 0,
             presence: default_presence(),
             created_at,
+            grants: Grants::default(),
         }
     }
 
@@ -90,25 +80,40 @@ impl User {
         ))
     }
 
-    pub fn has_power(&self, power: &str) -> bool {
-        if self.is_main_admin {
-            return true;
-        }
-        self.permissions.iter().any(|p| p == "*" || p == power)
+    pub fn is_main_admin_identity(id: i64, username: &str) -> bool {
+        id == 1 || username.eq_ignore_ascii_case("admin")
     }
 
+    #[cfg(test)]
+    pub fn with_grants(mut self, grants: Grants) -> Self {
+        self.grants = grants;
+        self
+    }
+
+    /// Panel-level power (not tied to one app).
+    pub fn has_power(&self, power: &str) -> bool {
+        self.has_any_power(&[power])
+    }
+
+    /// Panel-level powers (not tied to one app).
     pub fn has_any_power(&self, powers: &[&str]) -> bool {
-        if self.is_main_admin {
-            return true;
-        }
-        powers.iter().any(|p| self.has_power(p))
+        self.is_main_admin || self.grants.panel_has_any(powers)
     }
 
     pub fn can_access_project(&self, project_id: i64) -> bool {
-        if self.is_main_admin || self.all_projects {
-            return true;
-        }
-        self.allowed_projects.contains(&project_id)
+        self.is_main_admin || self.grants.can_access_project(project_id)
+    }
+
+    pub fn has_project_power(&self, project_id: i64, powers: &[&str]) -> bool {
+        self.is_main_admin || self.grants.project_has_any(project_id, powers)
+    }
+
+    /// Database powers come from a grant on the database itself or, for a database linked
+    /// to a website/service, from the user's grant on that project.
+    pub fn has_database_power(&self, database_id: i64, linked_project_id: Option<i64>, powers: &[&str]) -> bool {
+        self.is_main_admin
+            || self.grants.database_has_any(database_id, powers)
+            || linked_project_id.is_some_and(|pid| self.grants.project_has_any(pid, powers))
     }
 }
 
@@ -117,6 +122,8 @@ mod tests {
     use super::User;
 
     fn sample_user(id: i64, username: &str, perms_json: &str, proj_json: &str) -> User {
+        let perms = crate::auth::grants::parse_legacy_permissions(perms_json);
+        let (all, ids) = crate::auth::grants::parse_legacy_projects(proj_json);
         User::from_db(
             id,
             username.to_string(),
@@ -126,6 +133,7 @@ mod tests {
             0,
             1_700_000_000,
         )
+        .with_grants(crate::auth::grants::Grants::from_legacy(&perms, all, &ids))
     }
 
     #[test]
@@ -151,6 +159,15 @@ mod tests {
         assert!(!dev.has_any_power(&["databases", "databases_manage"]));
         assert!(dev.can_access_project(10));
         assert!(!dev.can_access_project(30));
+        assert!(dev.has_project_power(10, &["deploy"]));
+        assert!(!dev.has_project_power(30, &["deploy"]));
+    }
+
+    #[test]
+    fn test_users_without_loaded_grants_have_no_access() {
+        let u = User::from_db(5, "viewer".into(), 0, r#"["*"]"#.into(), r#"["*"]"#.into(), 0, 0);
+        assert!(!u.has_power("deploy"));
+        assert!(!u.can_access_project(1));
     }
 }
 

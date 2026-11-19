@@ -646,6 +646,12 @@ pub async fn import_sqlite_into_postgres(
     .execute(&mut *tx)
     .await?;
 
+    // Imported users carry legacy permission columns only: let the next boot convert
+    // them into access grants.
+    sqlx::query("DELETE FROM _meta WHERE key = 'legacy_grants_migrated_at'")
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
 
     info!(

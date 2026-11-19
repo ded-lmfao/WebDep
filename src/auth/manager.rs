@@ -365,12 +365,28 @@ impl Auth {
         .flatten()?;
 
         let mut u = User::from_pg_row(&row).ok()?;
+        u.grants = self.load_grants(&u).await?;
         u.presence = if u.disabled {
             "offline".to_string()
         } else {
             self.presence_for_user(u.id)
         };
         Some(u)
+    }
+
+    /// Main admin needs no grant rows. A load failure denies (returns None) rather than
+    /// silently authorizing with empty grants.
+    async fn load_grants(&self, user: &User) -> Option<super::grants::Grants> {
+        if user.is_main_admin {
+            return Some(Default::default());
+        }
+        match super::grants::load(&self.db, user.id).await {
+            Ok(g) => Some(g),
+            Err(e) => {
+                tracing::warn!("Failed to load access grants for user {}: {}", user.id, e);
+                None
+            }
+        }
     }
 
     pub async fn list_users(&self) -> Result<Vec<User>, sqlx::Error> {
@@ -468,6 +484,7 @@ impl Auth {
     pub async fn get_session_with_touch(&self, session_id: &str, touch_activity: bool) -> Option<(Session, User)> {
         let now_s = Self::now_secs();
 
+        #[allow(clippy::large_enum_variant)]
         enum CacheCheck {
             Miss,
             Expired,
@@ -545,6 +562,10 @@ impl Auth {
             row.try_get(10).ok()?,
         );
 
+        let mut user = user;
+        if !user.disabled {
+            user.grants = self.load_grants(&user).await?;
+        }
         let mut valid = (!user.disabled).then_some((session, user))?;
         if self.is_idle_expired(valid.0.last_active_at, now_s) {
             self.delete_session(session_id).await;
@@ -675,6 +696,8 @@ impl Auth {
             .await
     }
 
+    /// `project` / `database` with an id check that app's grants; anything else (or no id)
+    /// checks panel-level powers.
     pub async fn has_any_power_for_scope(
         &self,
         user: &User,
@@ -685,52 +708,45 @@ impl Auth {
         if user.disabled {
             return false;
         }
-        if user.is_main_admin {
-            return true;
+        match (scope_type, scope_id) {
+            (super::grants::SCOPE_PROJECT, Some(pid)) => user.has_project_power(pid, powers),
+            (super::grants::SCOPE_DATABASE, Some(db_id)) => user.has_database_power(db_id, None, powers),
+            _ => user.has_any_power(powers),
         }
-        if scope_type == "project" {
-            if let Some(pid) = scope_id {
-                if !user.can_access_project(pid) {
-                    return false;
-                }
-            }
-        }
-        user.has_any_power(powers)
     }
 
     pub fn user_has_database_power(
         user: &User,
         powers: &[&str],
+        db_id: i64,
         linked_project_id: Option<i64>,
     ) -> bool {
-        if user.disabled {
-            return false;
-        }
-        if user.is_main_admin {
-            return true;
-        }
-        if let Some(pid) = linked_project_id {
-            return user.can_access_project(pid) && user.has_any_power(powers);
-        }
-        user.has_any_power(powers) && (user.all_projects || user.has_power("databases_manage"))
+        !user.disabled && user.has_database_power(db_id, linked_project_id, powers)
     }
 
-    pub fn user_can_view_db_credentials(user: &User, linked_project_id: Option<i64>) -> bool {
-        Self::user_has_database_power(user, &["databases_manage", "env"], linked_project_id)
+    pub fn user_can_view_db_credentials(user: &User, db_id: i64, linked_project_id: Option<i64>) -> bool {
+        Self::user_has_database_power(user, &["databases_manage", "env"], db_id, linked_project_id)
     }
 
     pub async fn has_database_power_for_user(
         &self,
         user: &User,
         powers: &[&str],
-        _db_id: i64,
+        db_id: i64,
         linked_project_id: Option<i64>,
     ) -> bool {
-        Self::user_has_database_power(user, powers, linked_project_id)
+        Self::user_has_database_power(user, powers, db_id, linked_project_id)
     }
 
+    /// True when the user holds a database power at panel level, on any database, or on
+    /// any project they can reach.
     pub async fn can_list_databases_for_user(&self, user: &User) -> bool {
-        !user.disabled && user.has_any_power(&["databases", "databases_manage"])
+        const DB_POWERS: [&str; 2] = ["databases", "databases_manage"];
+        !user.disabled
+            && (user.has_any_power(&DB_POWERS)
+                || user.grants.databases.values().chain(user.grants.projects.values()).any(|set| {
+                    set.contains(super::grants::ALL_POWERS) || DB_POWERS.iter().any(|p| set.contains(*p))
+                }))
     }
 
     pub async fn can_view_db_credentials_for_user(
@@ -739,8 +755,7 @@ impl Auth {
         db_id: i64,
         linked_project_id: Option<i64>,
     ) -> bool {
-        let _ = db_id;
-        Self::user_can_view_db_credentials(user, linked_project_id)
+        Self::user_can_view_db_credentials(user, db_id, linked_project_id)
     }
 
     pub async fn count_active_sessions(&self, user_id: i64) -> usize {
