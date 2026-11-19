@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +37,24 @@ pub struct ModuleInstallResult {
     pub output: String,
 }
 
+impl ModuleInstallResult {
+    fn new(
+        module_id: String,
+        success: bool,
+        already_installed: bool,
+        message: impl Into<String>,
+        output: String,
+    ) -> Self {
+        Self {
+            module_id,
+            success,
+            already_installed,
+            message: message.into(),
+            output,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeModulesSnapshot {
@@ -45,117 +63,100 @@ pub struct NodeModulesSnapshot {
 }
 
 pub fn module_catalog() -> Vec<ModuleCatalogEntry> {
-    vec![
-        ModuleCatalogEntry {
-            id: "unrar".to_string(),
-            name: "UnRAR Extractor".to_string(),
-            category: "archive".to_string(),
-            required: true,
-            description: "Required on every VPS to extract .rar transfer and backup archives (unrar / unar)."
-                .to_string(),
-            languages: vec![
-                "Archives".to_string(),
-                "App Shift".to_string(),
-                "Backups".to_string(),
-            ],
-        },
-        ModuleCatalogEntry {
-            id: "git".to_string(),
-            name: "Git CLI".to_string(),
-            category: "system".to_string(),
-            required: true,
-            description: "Required to clone, fetch, and deploy GitHub repositories on the VPS."
-                .to_string(),
-            languages: vec!["Git Deployments".to_string()],
-        },
-        ModuleCatalogEntry {
-            id: "node".to_string(),
-            name: "Node.js & npm".to_string(),
-            category: "language".to_string(),
-            required: true,
-            description: "JavaScript & TypeScript runtime plus npm for web apps, APIs, and bots."
-                .to_string(),
-            languages: vec![
-                "Node.js".to_string(),
-                "Next.js".to_string(),
-                "React/Vite".to_string(),
-                "NestJS".to_string(),
-            ],
-        },
-        ModuleCatalogEntry {
-            id: "python".to_string(),
-            name: "Python 3 + pip & venv".to_string(),
-            category: "language".to_string(),
-            required: true,
-            description: "Python 3 runtime, pip package manager, and venv virtual environment support."
-                .to_string(),
-            languages: vec![
-                "Python".to_string(),
-                "FastAPI".to_string(),
-                "Django".to_string(),
-                "Flask".to_string(),
-            ],
-        },
-        ModuleCatalogEntry {
-            id: "java".to_string(),
-            name: "Java JDK / JRE".to_string(),
-            category: "language".to_string(),
-            required: false,
-            description: "OpenJDK runtime and compiler for Java backends, Lavalink, and JVM services."
-                .to_string(),
-            languages: vec![
-                "Java".to_string(),
-                "Spring Boot".to_string(),
-                "Lavalink".to_string(),
-                "Kotlin".to_string(),
-            ],
-        },
-        ModuleCatalogEntry {
-            id: "go".to_string(),
-            name: "Go Toolchain".to_string(),
-            category: "language".to_string(),
-            required: false,
-            description: "Go compiler and module toolchain for Go web servers and worker binaries."
-                .to_string(),
-            languages: vec!["Go".to_string(), "Gin".to_string(), "Fiber".to_string()],
-        },
-        ModuleCatalogEntry {
-            id: "rust".to_string(),
-            name: "Rust (rustc & cargo)".to_string(),
-            category: "language".to_string(),
-            required: false,
-            description: "Rust compiler and Cargo package manager for building native Rust services."
-                .to_string(),
-            languages: vec!["Rust".to_string(), "Axum".to_string(), "Actix".to_string()],
-        },
-        ModuleCatalogEntry {
-            id: "php".to_string(),
-            name: "PHP & Composer".to_string(),
-            category: "language".to_string(),
-            required: false,
-            description: "PHP CLI/FPM runtime for PHP sites, Laravel apps, and Composer workflows."
-                .to_string(),
-            languages: vec!["PHP".to_string(), "Laravel".to_string()],
-        },
-        ModuleCatalogEntry {
-            id: "ruby".to_string(),
-            name: "Ruby Runtime".to_string(),
-            category: "language".to_string(),
-            required: false,
-            description: "Ruby interpreter and Bundler tooling for Ruby, Sinatra, and Rails apps."
-                .to_string(),
-            languages: vec!["Ruby".to_string(), "Rails".to_string()],
-        },
-        ModuleCatalogEntry {
-            id: "dotnet".to_string(),
-            name: ".NET SDK / Runtime".to_string(),
-            category: "language".to_string(),
-            required: false,
-            description: ".NET CLI for running C#, F#, and ASP.NET Core applications."
-                .to_string(),
-            languages: vec!["C#".to_string(), ".NET".to_string(), "ASP.NET".to_string()],
-        },
-    ]
+    // (id, name, category, required, description, languages)
+    type Row = (&'static str, &'static str, &'static str, bool, &'static str, &'static [&'static str]);
+    const ROWS: &[Row] = &[
+        (
+            "unrar",
+            "UnRAR Extractor",
+            "archive",
+            true,
+            "Required on every VPS to extract .rar transfer and backup archives (unrar / unar).",
+            &["Archives", "App Shift", "Backups"],
+        ),
+        (
+            "git",
+            "Git CLI",
+            "system",
+            true,
+            "Required to clone, fetch, and deploy GitHub repositories on the VPS.",
+            &["Git Deployments"],
+        ),
+        (
+            "node",
+            "Node.js & npm",
+            "language",
+            true,
+            "JavaScript & TypeScript runtime plus npm for web apps, APIs, and bots.",
+            &["Node.js", "Next.js", "React/Vite", "NestJS"],
+        ),
+        (
+            "python",
+            "Python 3 + pip & venv",
+            "language",
+            true,
+            "Python 3 runtime, pip package manager, and venv virtual environment support.",
+            &["Python", "FastAPI", "Django", "Flask"],
+        ),
+        (
+            "java",
+            "Java JDK / JRE",
+            "language",
+            false,
+            "OpenJDK runtime and compiler for Java backends, Lavalink, and JVM services.",
+            &["Java", "Spring Boot", "Lavalink", "Kotlin"],
+        ),
+        (
+            "go",
+            "Go Toolchain",
+            "language",
+            false,
+            "Go compiler and module toolchain for Go web servers and worker binaries.",
+            &["Go", "Gin", "Fiber"],
+        ),
+        (
+            "rust",
+            "Rust (rustc & cargo)",
+            "language",
+            false,
+            "Rust compiler and Cargo package manager for building native Rust services.",
+            &["Rust", "Axum", "Actix"],
+        ),
+        (
+            "php",
+            "PHP & Composer",
+            "language",
+            false,
+            "PHP CLI/FPM runtime for PHP sites, Laravel apps, and Composer workflows.",
+            &["PHP", "Laravel"],
+        ),
+        (
+            "ruby",
+            "Ruby Runtime",
+            "language",
+            false,
+            "Ruby interpreter and Bundler tooling for Ruby, Sinatra, and Rails apps.",
+            &["Ruby", "Rails"],
+        ),
+        (
+            "dotnet",
+            ".NET SDK / Runtime",
+            "language",
+            false,
+            ".NET CLI for running C#, F#, and ASP.NET Core applications.",
+            &["C#", ".NET", "ASP.NET"],
+        ),
+    ];
+    ROWS.iter()
+        .map(|&(id, name, category, required, description, languages)| ModuleCatalogEntry {
+            id: id.to_string(),
+            name: name.to_string(),
+            category: category.to_string(),
+            required,
+            description: description.to_string(),
+            languages: languages.iter().map(|l| l.to_string()).collect(),
+        })
+        .collect()
 }
 
 fn find_command_path(bin: &str) -> Option<PathBuf> {
@@ -269,6 +270,29 @@ pub fn detect_package_manager() -> String {
     }
 }
 
+impl NodeModuleStatus {
+    /// A module whose main binary was found at `path`.
+    fn at(id: &str, installed: bool, path: &Path, version: String, details: String) -> Self {
+        Self {
+            id: id.to_string(),
+            installed,
+            version,
+            binary_path: path.to_string_lossy().to_string(),
+            details,
+        }
+    }
+
+    /// A module that is not installed.
+    fn missing(id: &str, details: impl Into<String>) -> Self {
+        Self {
+            id: id.to_string(),
+            installed: false,
+            details: details.into(),
+            ..Default::default()
+        }
+    }
+}
+
 fn check_single_module(id: &str) -> NodeModuleStatus {
     match id {
         "unrar" => {
@@ -276,27 +300,27 @@ fn check_single_module(id: &str) -> NodeModuleStatus {
                 let ver = run_version_line(&p, &["-idq"])
                     .or_else(|| run_version_line(&p, &[]))
                     .unwrap_or_else(|| "unrar installed".to_string());
-                NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: true,
-                    version: if ver.is_empty() {
+                NodeModuleStatus::at(
+                    id,
+                    true,
+                    &p,
+                    if ver.is_empty() {
                         "unrar ready".to_string()
                     } else {
                         ver
                     },
-                    binary_path: p.to_string_lossy().to_string(),
-                    details: "Using native unrar CLI".to_string(),
-                }
+                    "Using native unrar CLI".to_string(),
+                )
             } else if let Some(p) = find_command_path("unar") {
                 let ver = run_version_line(&p, &["--version"])
                     .unwrap_or_else(|| "unar installed".to_string());
-                NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: true,
-                    version: ver,
-                    binary_path: p.to_string_lossy().to_string(),
-                    details: "Using unar (.rar compatible)".to_string(),
-                }
+                NodeModuleStatus::at(
+                    id,
+                    true,
+                    &p,
+                    ver,
+                    "Using unar (.rar compatible)".to_string(),
+                )
             } else {
                 NodeModuleStatus {
                     id: id.to_string(),
@@ -308,19 +332,14 @@ fn check_single_module(id: &str) -> NodeModuleStatus {
             }
         }
         "git" => match find_command_path("git") {
-            Some(p) => NodeModuleStatus {
-                id: id.to_string(),
-                installed: true,
-                version: run_version_line(&p, &["--version"]).unwrap_or_default(),
-                binary_path: p.to_string_lossy().to_string(),
-                details: String::new(),
-            },
-            None => NodeModuleStatus {
-                id: id.to_string(),
-                installed: false,
-                details: "git binary not found".to_string(),
-                ..Default::default()
-            },
+            Some(p) => NodeModuleStatus::at(
+                id,
+                true,
+                &p,
+                run_version_line(&p, &["--version"]).unwrap_or_default(),
+                String::new(),
+            ),
+            None => NodeModuleStatus::missing(id, "git binary not found".to_string()),
         },
         "node" => {
             let node_p = find_command_path("node");
@@ -329,31 +348,26 @@ fn check_single_module(id: &str) -> NodeModuleStatus {
                 (Some(np), Some(npm)) => {
                     let nv = run_version_line(&np, &["--version"]).unwrap_or_default();
                     let npmv = run_version_line(&npm, &["--version"]).unwrap_or_default();
-                    NodeModuleStatus {
-                        id: id.to_string(),
-                        installed: true,
-                        version: nv,
-                        binary_path: np.to_string_lossy().to_string(),
-                        details: if npmv.is_empty() {
+                    NodeModuleStatus::at(
+                        id,
+                        true,
+                        &np,
+                        nv,
+                        if npmv.is_empty() {
                             String::new()
                         } else {
                             format!("npm {npmv}")
                         },
-                    }
+                    )
                 }
-                (Some(np), None) => NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: false,
-                    version: run_version_line(&np, &["--version"]).unwrap_or_default(),
-                    binary_path: np.to_string_lossy().to_string(),
-                    details: "Node.js found, but npm is missing".to_string(),
-                },
-                _ => NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: false,
-                    details: "node & npm not found".to_string(),
-                    ..Default::default()
-                },
+                (Some(np), None) => NodeModuleStatus::at(
+                    id,
+                    false,
+                    &np,
+                    run_version_line(&np, &["--version"]).unwrap_or_default(),
+                    "Node.js found, but npm is missing".to_string(),
+                ),
+                _ => NodeModuleStatus::missing(id, "node & npm not found".to_string()),
             }
         }
         "python" => {
@@ -402,138 +416,98 @@ fn check_single_module(id: &str) -> NodeModuleStatus {
                     },
                 }
             } else {
-                NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: false,
-                    details: "python3 / pip / venv not found".to_string(),
-                    ..Default::default()
-                }
+                NodeModuleStatus::missing(id, "python3 / pip / venv not found".to_string())
             }
         }
         "java" => {
             if let Some(p) = find_command_path("java") {
                 let ver = run_version_line(&p, &["-version"]).unwrap_or_default();
                 let has_javac = find_command_path("javac").is_some();
-                NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: true,
-                    version: ver,
-                    binary_path: p.to_string_lossy().to_string(),
-                    details: if has_javac {
+                NodeModuleStatus::at(
+                    id,
+                    true,
+                    &p,
+                    ver,
+                    if has_javac {
                         "JDK (java + javac)".to_string()
                     } else {
                         "JRE only (no javac)".to_string()
                     },
-                }
+                )
             } else {
-                NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: false,
-                    details: "java runtime not found".to_string(),
-                    ..Default::default()
-                }
+                NodeModuleStatus::missing(id, "java runtime not found".to_string())
             }
         }
         "go" => match find_command_path("go") {
-            Some(p) => NodeModuleStatus {
-                id: id.to_string(),
-                installed: true,
-                version: run_version_line(&p, &["version"]).unwrap_or_default(),
-                binary_path: p.to_string_lossy().to_string(),
-                details: String::new(),
-            },
-            None => NodeModuleStatus {
-                id: id.to_string(),
-                installed: false,
-                details: "go toolchain not found".to_string(),
-                ..Default::default()
-            },
+            Some(p) => NodeModuleStatus::at(
+                id,
+                true,
+                &p,
+                run_version_line(&p, &["version"]).unwrap_or_default(),
+                String::new(),
+            ),
+            None => NodeModuleStatus::missing(id, "go toolchain not found".to_string()),
         },
         "rust" => {
             let rustc_p = find_command_path("rustc");
             let cargo_p = find_command_path("cargo");
             match (rustc_p, cargo_p) {
-                (Some(rp), Some(_)) => NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: true,
-                    version: run_version_line(&rp, &["--version"]).unwrap_or_default(),
-                    binary_path: rp.to_string_lossy().to_string(),
-                    details: "rustc + cargo ready".to_string(),
-                },
-                (Some(rp), None) => NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: false,
-                    version: run_version_line(&rp, &["--version"]).unwrap_or_default(),
-                    binary_path: rp.to_string_lossy().to_string(),
-                    details: "rustc found, cargo missing".to_string(),
-                },
-                _ => NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: false,
-                    details: "rustc & cargo not found".to_string(),
-                    ..Default::default()
-                },
+                (Some(rp), Some(_)) => NodeModuleStatus::at(
+                    id,
+                    true,
+                    &rp,
+                    run_version_line(&rp, &["--version"]).unwrap_or_default(),
+                    "rustc + cargo ready".to_string(),
+                ),
+                (Some(rp), None) => NodeModuleStatus::at(
+                    id,
+                    false,
+                    &rp,
+                    run_version_line(&rp, &["--version"]).unwrap_or_default(),
+                    "rustc found, cargo missing".to_string(),
+                ),
+                _ => NodeModuleStatus::missing(id, "rustc & cargo not found".to_string()),
             }
         }
         "php" => match find_command_path("php") {
             Some(p) => {
                 let ver = run_version_line(&p, &["-v"]).unwrap_or_default();
                 let has_composer = find_command_path("composer").is_some();
-                NodeModuleStatus {
-                    id: id.to_string(),
-                    installed: true,
-                    version: first_nonempty_line(&ver),
-                    binary_path: p.to_string_lossy().to_string(),
-                    details: if has_composer {
+                NodeModuleStatus::at(
+                    id,
+                    true,
+                    &p,
+                    first_nonempty_line(&ver),
+                    if has_composer {
                         "php + composer ready".to_string()
                     } else {
                         "php ready (composer optional)".to_string()
                     },
-                }
+                )
             }
-            None => NodeModuleStatus {
-                id: id.to_string(),
-                installed: false,
-                details: "php runtime not found".to_string(),
-                ..Default::default()
-            },
+            None => NodeModuleStatus::missing(id, "php runtime not found".to_string()),
         },
         "ruby" => match find_command_path("ruby") {
-            Some(p) => NodeModuleStatus {
-                id: id.to_string(),
-                installed: true,
-                version: run_version_line(&p, &["-v"]).unwrap_or_default(),
-                binary_path: p.to_string_lossy().to_string(),
-                details: String::new(),
-            },
-            None => NodeModuleStatus {
-                id: id.to_string(),
-                installed: false,
-                details: "ruby runtime not found".to_string(),
-                ..Default::default()
-            },
+            Some(p) => NodeModuleStatus::at(
+                id,
+                true,
+                &p,
+                run_version_line(&p, &["-v"]).unwrap_or_default(),
+                String::new(),
+            ),
+            None => NodeModuleStatus::missing(id, "ruby runtime not found".to_string()),
         },
         "dotnet" => match find_command_path("dotnet") {
-            Some(p) => NodeModuleStatus {
-                id: id.to_string(),
-                installed: true,
-                version: run_version_line(&p, &["--version"]).unwrap_or_default(),
-                binary_path: p.to_string_lossy().to_string(),
-                details: ".NET CLI ready".to_string(),
-            },
-            None => NodeModuleStatus {
-                id: id.to_string(),
-                installed: false,
-                details: "dotnet CLI not found".to_string(),
-                ..Default::default()
-            },
+            Some(p) => NodeModuleStatus::at(
+                id,
+                true,
+                &p,
+                run_version_line(&p, &["--version"]).unwrap_or_default(),
+                ".NET CLI ready".to_string(),
+            ),
+            None => NodeModuleStatus::missing(id, "dotnet CLI not found".to_string()),
         },
-        _ => NodeModuleStatus {
-            id: id.to_string(),
-            installed: false,
-            details: "Unknown module".to_string(),
-            ..Default::default()
-        },
+        _ => NodeModuleStatus::missing(id, "Unknown module".to_string()),
     }
 }
 
@@ -666,6 +640,49 @@ fn package_candidates(pm: &str, module_id: &str) -> Vec<Vec<&'static str>> {
     }
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum PkgOp {
+    Install,
+    Remove,
+}
+
+/// Installs or removes `pkgs` with the detected package manager (non-interactive flags).
+#[cfg(unix)]
+fn run_pkg_manager(use_sudo: bool, pm: &str, op: PkgOp, pkgs: &[&str]) -> Result<String, String> {
+    const APT_INSTALL: &[&str] = &[
+        "-o",
+        "DPkg::Lock::Timeout=120",
+        "-o",
+        "Dpkg::Options::=--force-confdef",
+        "-o",
+        "Dpkg::Options::=--force-confold",
+        "install",
+        "-y",
+        "--no-install-recommends",
+    ];
+    const APT_REMOVE: &[&str] = &["-o", "DPkg::Lock::Timeout=120", "remove", "-y"];
+    let base: &[&str] = match (pm, op) {
+        ("apt-get", PkgOp::Install) => APT_INSTALL,
+        ("apt-get", PkgOp::Remove) => APT_REMOVE,
+        ("dnf" | "yum", PkgOp::Install) => &["install", "-y"],
+        ("dnf" | "yum", PkgOp::Remove) => &["remove", "-y"],
+        ("apk", PkgOp::Install) => &["add", "--no-cache"],
+        ("apk", PkgOp::Remove) => &["del"],
+        ("pacman", PkgOp::Install) => &["-S", "--noconfirm", "--needed"],
+        ("pacman", PkgOp::Remove) => &["-R", "--noconfirm"],
+        _ => return Err("Unsupported package manager".to_string()),
+    };
+    let mut args = base.to_vec();
+    args.extend_from_slice(pkgs);
+    let envs: &[(&str, &str)] = if pm == "apt-get" {
+        &[("DEBIAN_FRONTEND", "noninteractive")]
+    } else {
+        &[]
+    };
+    run_pkg_cmd(use_sudo, pm, &args, envs)
+}
+
 pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallResult>, NodeModulesSnapshot) {
     let catalog = module_catalog();
     #[cfg_attr(not(unix), allow(unused_variables))]
@@ -677,36 +694,36 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
         for raw_id in module_ids {
             let id = raw_id.trim().to_ascii_lowercase();
             if !catalog.iter().any(|c| c.id == id) {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: false,
-                    already_installed: false,
-                    message: "Unknown module id".to_string(),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id,
+                    false,
+                    false,
+                    "Unknown module id".to_string(),
+                    String::new(),
+                ));
                 continue;
             }
             let st = check_single_module(&id);
             if st.installed {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: true,
-                    already_installed: true,
-                    message: format!("Already installed ({})", st.version),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id,
+                    true,
+                    true,
+                    format!("Already installed ({})", st.version),
+                    String::new(),
+                ));
             } else {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: false,
-                    already_installed: false,
-                    message: "Automatic package installation is supported on Linux VPS nodes (apt/dnf/yum/apk/pacman); install manually on Windows dev hosts."
+                results.push(ModuleInstallResult::new(
+                    id,
+                    false,
+                    false,
+                    "Automatic package installation is supported on Linux VPS nodes (apt/dnf/yum/apk/pacman); install manually on Windows dev hosts."
                         .to_string(),
-                    output: String::new(),
-                });
+                    String::new(),
+                ));
             }
         }
-        return (results, detect_node_modules_sync());
+        (results, detect_node_modules_sync())
     }
 
     #[cfg(unix)]
@@ -717,37 +734,37 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
         for raw_id in module_ids {
             let id = raw_id.trim().to_ascii_lowercase();
             if !catalog.iter().any(|c| c.id == id) {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: false,
-                    already_installed: false,
-                    message: "Unknown module id".to_string(),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id,
+                    false,
+                    false,
+                    "Unknown module id".to_string(),
+                    String::new(),
+                ));
                 continue;
             }
 
             let current = check_single_module(&id);
             if current.installed {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: true,
-                    already_installed: true,
-                    message: format!("Already installed ({})", current.version),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id,
+                    true,
+                    true,
+                    format!("Already installed ({})", current.version),
+                    String::new(),
+                ));
                 continue;
             }
 
             if pm == "none" {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: false,
-                    already_installed: false,
-                    message: "No supported Linux package manager found (apt-get/dnf/yum/apk/pacman)."
+                results.push(ModuleInstallResult::new(
+                    id,
+                    false,
+                    false,
+                    "No supported Linux package manager found (apt-get/dnf/yum/apk/pacman)."
                         .to_string(),
-                    output: String::new(),
-                });
+                    String::new(),
+                ));
                 continue;
             }
 
@@ -788,49 +805,7 @@ pub fn install_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallRes
             let mut installed_ok = false;
             let mut last_out = String::new();
             for pkgs in candidates {
-                let res = match pm.as_str() {
-                    "apt-get" => {
-                        let mut args = vec![
-                            "-o",
-                            "DPkg::Lock::Timeout=120",
-                            "-o",
-                            "Dpkg::Options::=--force-confdef",
-                            "-o",
-                            "Dpkg::Options::=--force-confold",
-                            "install",
-                            "-y",
-                            "--no-install-recommends",
-                        ];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(
-                            use_sudo,
-                            "apt-get",
-                            &args,
-                            &[("DEBIAN_FRONTEND", "noninteractive")],
-                        )
-                    }
-                    "dnf" => {
-                        let mut args = vec!["install", "-y"];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(use_sudo, "dnf", &args, &[])
-                    }
-                    "yum" => {
-                        let mut args = vec!["install", "-y"];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(use_sudo, "yum", &args, &[])
-                    }
-                    "apk" => {
-                        let mut args = vec!["add", "--no-cache"];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(use_sudo, "apk", &args, &[])
-                    }
-                    "pacman" => {
-                        let mut args = vec!["-S", "--noconfirm", "--needed"];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(use_sudo, "pacman", &args, &[])
-                    }
-                    _ => Err("Unsupported package manager".to_string()),
-                };
+                let res = run_pkg_manager(use_sudo, &pm, PkgOp::Install, &pkgs);
                 match res {
                     Ok(out) => {
                         last_out = out;
@@ -886,36 +861,36 @@ pub fn uninstall_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallR
         for raw_id in module_ids {
             let id = raw_id.trim().to_ascii_lowercase();
             if !catalog.iter().any(|c| c.id == id) {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: false,
-                    already_installed: false,
-                    message: "Unknown module id".to_string(),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id,
+                    false,
+                    false,
+                    "Unknown module id".to_string(),
+                    String::new(),
+                ));
                 continue;
             }
             let st = check_single_module(&id);
             if !st.installed {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: true,
-                    already_installed: false,
-                    message: "Not installed".to_string(),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id,
+                    true,
+                    false,
+                    "Not installed".to_string(),
+                    String::new(),
+                ));
             } else {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: false,
-                    already_installed: true,
-                    message: "Automatic package uninstallation is supported on Linux VPS nodes (apt/dnf/yum/apk/pacman); uninstall manually on Windows dev hosts."
+                results.push(ModuleInstallResult::new(
+                    id,
+                    false,
+                    true,
+                    "Automatic package uninstallation is supported on Linux VPS nodes (apt/dnf/yum/apk/pacman); uninstall manually on Windows dev hosts."
                         .to_string(),
-                    output: String::new(),
-                });
+                    String::new(),
+                ));
             }
         }
-        return (results, detect_node_modules_sync());
+        (results, detect_node_modules_sync())
     }
 
     #[cfg(unix)]
@@ -925,93 +900,56 @@ pub fn uninstall_node_modules_sync(module_ids: &[String]) -> (Vec<ModuleInstallR
         for raw_id in module_ids {
             let id = raw_id.trim().to_ascii_lowercase();
             if !catalog.iter().any(|c| c.id == id) {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: false,
-                    already_installed: false,
-                    message: "Unknown module id".to_string(),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id,
+                    false,
+                    false,
+                    "Unknown module id".to_string(),
+                    String::new(),
+                ));
                 continue;
             }
 
             let current = check_single_module(&id);
             if !current.installed {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: true,
-                    already_installed: false,
-                    message: "Already not installed".to_string(),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id,
+                    true,
+                    false,
+                    "Already not installed".to_string(),
+                    String::new(),
+                ));
                 continue;
             }
 
             if pm == "none" {
-                results.push(ModuleInstallResult {
-                    module_id: id,
-                    success: false,
-                    already_installed: true,
-                    message: "No supported Linux package manager found (apt-get/dnf/yum/apk/pacman)."
+                results.push(ModuleInstallResult::new(
+                    id,
+                    false,
+                    true,
+                    "No supported Linux package manager found (apt-get/dnf/yum/apk/pacman)."
                         .to_string(),
-                    output: String::new(),
-                });
+                    String::new(),
+                ));
                 continue;
             }
 
             let candidates = package_candidates(&pm, &id);
             if candidates.is_empty() {
-                results.push(ModuleInstallResult {
-                    module_id: id.clone(),
-                    success: false,
-                    already_installed: true,
-                    message: format!("No package mapping for '{id}' on '{pm}'"),
-                    output: String::new(),
-                });
+                results.push(ModuleInstallResult::new(
+                    id.clone(),
+                    false,
+                    true,
+                    format!("No package mapping for '{id}' on '{pm}'"),
+                    String::new(),
+                ));
                 continue;
             }
 
             let mut outputs = Vec::new();
             let mut cmd_ok = false;
             for pkgs in candidates {
-                let res = match pm.as_str() {
-                    "apt-get" => {
-                        let mut args = vec![
-                            "-o",
-                            "DPkg::Lock::Timeout=120",
-                            "remove",
-                            "-y",
-                        ];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(
-                            use_sudo,
-                            "apt-get",
-                            &args,
-                            &[("DEBIAN_FRONTEND", "noninteractive")],
-                        )
-                    }
-                    "dnf" => {
-                        let mut args = vec!["remove", "-y"];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(use_sudo, "dnf", &args, &[])
-                    }
-                    "yum" => {
-                        let mut args = vec!["remove", "-y"];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(use_sudo, "yum", &args, &[])
-                    }
-                    "apk" => {
-                        let mut args = vec!["del"];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(use_sudo, "apk", &args, &[])
-                    }
-                    "pacman" => {
-                        let mut args = vec!["-R", "--noconfirm"];
-                        args.extend_from_slice(&pkgs);
-                        run_pkg_cmd(use_sudo, "pacman", &args, &[])
-                    }
-                    _ => Err("Unsupported package manager".to_string()),
-                };
+                let res = run_pkg_manager(use_sudo, &pm, PkgOp::Remove, &pkgs);
                 match res {
                     Ok(out) => {
                         outputs.push(out);

@@ -226,13 +226,13 @@ impl Monitor {
                 let idle_ms = epoch_ms().saturating_sub(mon.last_queried_ms.load(Ordering::Relaxed));
                 let is_active = idle_ms < 18_000;
 
-                if !is_active && tick_count % 60 != 0 {
+                if !is_active && !tick_count.is_multiple_of(60) {
                     continue;
                 }
 
                 let m = mon.clone();
-                let should_refresh_host = tick_count % 4 == 0 || !is_active;
-                let refresh_disks = tick_count % 32 == 0;
+                let should_refresh_host = tick_count.is_multiple_of(4) || !is_active;
+                let refresh_disks = tick_count.is_multiple_of(32);
                 let _ = tokio::task::spawn_blocking(move || {
                     if is_active {
                         crate::monitor::record_network_sample();
@@ -244,7 +244,7 @@ impl Monitor {
                 })
                 .await;
 
-                if tick_count % 60 == 0 {
+                if tick_count.is_multiple_of(60) {
                     crate::trim_process_heap();
                 }
             }

@@ -837,10 +837,7 @@ fn compute_overview_bytes_sync(
     let total_vps_mem = monitor.memory.total.max(1);
     let total_vps_disk = monitor.disk.as_ref().map(|d| d.total).unwrap_or(1).max(1);
     let num_cores = monitor.cpu.cores.max(1) as f32;
-    let local_cores = scope
-        .include_local
-        .then_some(num_cores)
-        .unwrap_or(num_cores);
+    let local_cores = num_cores;
     let total_vps_cpu = monitor.cpu.pct as f32;
     let cwd = cached_cwd();
 
@@ -1377,8 +1374,8 @@ mod tests {
         assert_eq!(succ.get(&id1).and_then(|d| d.sha.as_deref()), Some("sha2"));
         assert_eq!(succ.get(&id1).and_then(|d| d.project_name.as_deref()), Some("Site One"));
         assert_eq!(act.get(&id1).and_then(|d| d.sha.as_deref()), Some("sha3"));
-        assert!(succ.get(&id2).is_none());
-        assert!(act.get(&id2).is_none());
+        assert!(!succ.contains_key(&id2));
+        assert!(!act.contains_key(&id2));
 
         std::fs::remove_dir_all(&dir).ok();
     }

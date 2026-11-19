@@ -22,7 +22,7 @@ impl Vault {
             let mut key = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut key);
             fs::create_dir_all(data_dir)?;
-            fs::write(&key_path, hex::encode(&key))?;
+            fs::write(&key_path, hex::encode(key))?;
             key.to_vec()
         };
 

@@ -181,6 +181,9 @@ export function renderDatabasesList() {
     if (did != null) resByDbId.set(did, r);
   }
 
+  // Cards already on screen (return visit, background refresh) must not be faded in again:
+  // the view itself fades in on navigation, and re-animating them looked like a second load.
+  const hadCards = Boolean(container.querySelector('.project-card'));
   setHtmlIfChanged(container, filtered.map((d) => {
     const isRunning = d.status === 'running';
     const isStarting = d.status === 'starting';
@@ -289,7 +292,7 @@ export function renderDatabasesList() {
     `;
   }).join(''));
 
-  if (consumePendingViewStagger('databases')) {
+  if (consumePendingViewStagger('databases') && !hadCards) {
     staggerElements(container.querySelectorAll('.project-card'), { y: 12 });
   }
 }

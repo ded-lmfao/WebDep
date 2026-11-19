@@ -18,7 +18,6 @@ import {
 import { api } from './api.js';
 import {
   consumePendingViewStagger,
-  animateOverviewReveal,
   animateNumberValue,
   animateProgressBar,
   animateTableRowsStagger,
@@ -427,14 +426,6 @@ function getOverviewDomEls() {
   return els;
 }
 
-function formatOverviewMemMbOrGb(bytes) {
-  const b = Number(bytes || 0);
-  if (!Number.isFinite(b) || b <= 0) return '0 MB';
-  const gb = b / 1073741824;
-  if (gb >= 1) return `${gb.toFixed(1)} GB`;
-  return `${Math.round(b / 1048576)} MB`;
-}
-
 function getEffectiveOverviewNodeId() {
   const inspectId = Number(state.overviewInspectNodeId);
   return Number.isInteger(inspectId) && inspectId > 0 ? inspectId : null;
@@ -459,14 +450,6 @@ function renderHostedPillsInnerHtml(node) {
     <span class="overview-hosted-pill ${services > 0 ? 'has-items' : ''}"><span class="overview-hosted-pill-dot svc"></span>${services} Service${services === 1 ? '' : 's'}</span>
     <span class="overview-hosted-pill ${dbs > 0 ? 'has-items' : ''}"><span class="overview-hosted-pill-dot db"></span>${dbs} Database${dbs === 1 ? '' : 's'}</span>
   `;
-}
-
-function inspectOverviewNode(nodeId) {
-  const id = Number(nodeId);
-  if (!Number.isInteger(id) || id <= 0) return;
-  if (typeof window.navigateTo === 'function') {
-    window.navigateTo('overview', `vps${id}`);
-  }
 }
 
 function renderInspectNodeTopbar(nodes) {
@@ -795,7 +778,15 @@ async function loadOverview() {
 
     // Render per-VPS separate capacity comparison cards or single-VPS inspect view
     renderInspectNodeTopbar(data.nodes);
+    // The view itself fades in on navigation (animateViewEnter). Only rows that appear for the
+    // first time (table still showing its placeholder) get their own entrance; re-animating rows
+    // that are already on screen made the Overview look like it loaded twice.
+    const resTbody = document.getElementById('resource-breakdown-table');
+    const hadRows = Boolean(resTbody?.querySelector('tr:not(:has(td[colspan]))'));
     renderResourceBreakdown(data.resources);
+    if (consumePendingViewStagger('overview') && !hadRows) {
+      animateTableRowsStagger(resTbody);
+    }
     if (typeof window.updateBreadcrumbs === 'function') {
       window.updateBreadcrumbs();
     }
@@ -832,10 +823,6 @@ async function loadOverview() {
       actBox.style.display = 'none';
     }
 
-    if (consumePendingViewStagger('overview')) {
-      animateOverviewReveal();
-    }
-
   } catch (err) {
     console.error('Overview load error:', err);
   }
@@ -848,7 +835,6 @@ window.renderResourceBreakdown = renderResourceBreakdown;
 window.filterResourceBreakdown = filterResourceBreakdown;
 window.stopOverviewNetPoller = stopOverviewNetPoller;
 window.resetOverviewNetGraph = resetOverviewNetGraph;
-window.inspectOverviewNode = inspectOverviewNode;
 
 export {
   loadOverview,
@@ -857,5 +843,4 @@ export {
   updateOverviewNetwork,
   stopOverviewNetPoller,
   resetOverviewNetGraph,
-  inspectOverviewNode,
 };

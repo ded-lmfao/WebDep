@@ -276,7 +276,7 @@ pub(crate) async fn get_settings_handler(
         .collect();
 
     if tok_list.is_empty() {
-        for part in current_tok.split(|c| c == ',' || c == '\n' || c == ';') {
+        for part in current_tok.split([',', '\n', ';']) {
             let trimmed = part.trim();
             if !trimmed.is_empty() {
                 tok_list.push(crate::git::StoredGithubToken {
@@ -466,7 +466,7 @@ mod tests {
                 id
             );
             assert!(
-                js.contains(&format!("id: '{}'", id)),
+                js.contains(&format!("['{}', ", id)),
                 "Missing JS preset definition for theme '{}'",
                 id
             );

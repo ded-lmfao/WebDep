@@ -40,7 +40,7 @@ pub fn generate_pg_hba(access_mode: &str, allowed_ips: &str) -> String {
         hba.push_str("host    all             all             0.0.0.0/0               scram-sha-256\n");
         hba.push_str("host    all             all             ::/0                    scram-sha-256\n");
     } else if access_mode == "allowlist" {
-        for raw in allowed_ips.split(|c| c == ',' || c == '\n' || c == ';') {
+        for raw in allowed_ips.split([',', '\n', ';']) {
             if let Some(cidr) = parse_valid_ip_or_cidr(raw) {
                 hba.push_str(&format!("host    all             all             {:<23} scram-sha-256\n", cidr));
             }

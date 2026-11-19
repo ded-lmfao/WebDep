@@ -71,7 +71,7 @@ pub(crate) fn service_root(p: &crate::projects::Project) -> Result<std::path::Pa
 /// Join a user supplied relative path onto the root, rejecting anything that could escape it.
 pub(crate) fn safe_join(root: &std::path::Path, rel: &str) -> Result<std::path::PathBuf, (StatusCode, String)> {
     let mut out = root.to_path_buf();
-    for part in rel.split(|c| c == '/' || c == '\\') {
+    for part in rel.split(['/', '\\']) {
         match part {
             "" | "." => {}
             ".." => return Err((StatusCode::BAD_REQUEST, "Invalid path".into())),
@@ -133,7 +133,7 @@ pub(crate) async fn ensure_ancestor_within_root(
 }
 
 pub(crate) fn touches_dotenv_file(rel: &str) -> bool {
-    rel.split(|c| c == '/' || c == '\\').any(|part| {
+    rel.split(['/', '\\']).any(|part| {
         let lower = part.trim().to_ascii_lowercase();
         lower == ".env" || lower.starts_with(".env.")
     })
@@ -468,6 +468,33 @@ pub(crate) async fn files_list_handler(
     list_entries_in_root(&root, &q.path).await
 }
 
+/// Runs a file operation on the project's remote node, after the same path check as local access.
+/// Returns `None` when the project lives on this node.
+async fn proxy_file_op(
+    state: &AppState,
+    actor: &User,
+    p: &Project,
+    paths: &[&str],
+    op: &str,
+    params: serde_json::Value,
+    timeout_secs: u64,
+) -> Result<Option<serde_json::Value>, (StatusCode, String)> {
+    let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    else {
+        return Ok(None);
+    };
+    ensure_file_env_access(actor, paths)?;
+    state
+        .cluster
+        .call_node(nid, op, params, std::time::Duration::from_secs(timeout_secs))
+        .await
+        .map(Some)
+}
+
 pub(crate) async fn files_read_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -475,22 +502,17 @@ pub(crate) async fn files_read_handler(
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id).await?;
-    if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    if let Some(res) = proxy_file_op(
+        &state,
+        &actor,
+        &p,
+        &[&q.path],
+        "files.read",
+        serde_json::json!({ "project": &p, "path": &q.path }),
+        20,
+    )
+    .await?
     {
-        ensure_file_env_access(&actor, &[&q.path])?;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "files.read",
-                serde_json::json!({ "project": &p, "path": &q.path }),
-                std::time::Duration::from_secs(20),
-            )
-            .await?;
         return Ok(Json(res));
     }
     let root = service_root(&p)?;
@@ -504,22 +526,17 @@ pub(crate) async fn files_write_handler(
     Json(payload): Json<FileWritePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
-    if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    if let Some(res) = proxy_file_op(
+        &state,
+        &actor,
+        &p,
+        &[&payload.path],
+        "files.write",
+        serde_json::json!({ "project": &p, "path": &payload.path, "content": &payload.content }),
+        20,
+    )
+    .await?
     {
-        ensure_file_env_access(&actor, &[&payload.path])?;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "files.write",
-                serde_json::json!({ "project": &p, "path": &payload.path, "content": &payload.content }),
-                std::time::Duration::from_secs(20),
-            )
-            .await?;
         log_audit_project(
             &state,
             Some(id),
@@ -542,22 +559,17 @@ pub(crate) async fn files_mkdir_handler(
     Json(payload): Json<FileMkdirPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
-    if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    if let Some(res) = proxy_file_op(
+        &state,
+        &actor,
+        &p,
+        &[&payload.path],
+        "files.mkdir",
+        serde_json::json!({ "project": &p, "path": &payload.path }),
+        20,
+    )
+    .await?
     {
-        ensure_file_env_access(&actor, &[&payload.path])?;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "files.mkdir",
-                serde_json::json!({ "project": &p, "path": &payload.path }),
-                std::time::Duration::from_secs(20),
-            )
-            .await?;
         return Ok(Json(res));
     }
     let root = service_root(&p)?;
@@ -571,22 +583,17 @@ pub(crate) async fn files_delete_handler(
     Query(q): Query<FilesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
-    if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    if let Some(res) = proxy_file_op(
+        &state,
+        &actor,
+        &p,
+        &[&q.path],
+        "files.delete",
+        serde_json::json!({ "project": &p, "path": &q.path }),
+        20,
+    )
+    .await?
     {
-        ensure_file_env_access(&actor, &[&q.path])?;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "files.delete",
-                serde_json::json!({ "project": &p, "path": &q.path }),
-                std::time::Duration::from_secs(20),
-            )
-            .await?;
         log_audit_project(
             &state,
             Some(id),
@@ -666,22 +673,17 @@ pub(crate) async fn files_download_handler(
     Query(q): Query<FilesQuery>,
 ) -> Result<Response, (StatusCode, String)> {
     let (actor, p) = get_authorized_project_any(&state, &headers, &["files", "files_write"], id).await?;
-    if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    if let Some(res) = proxy_file_op(
+        &state,
+        &actor,
+        &p,
+        &[&q.path],
+        "files.download",
+        serde_json::json!({ "project": &p, "path": &q.path }),
+        60,
+    )
+    .await?
     {
-        ensure_file_env_access(&actor, &[&q.path])?;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "files.download",
-                serde_json::json!({ "project": &p, "path": &q.path }),
-                std::time::Duration::from_secs(60),
-            )
-            .await?;
         let file_name = res["fileName"].as_str().unwrap_or("download");
         let b64 = res["contentBase64"].as_str().unwrap_or("");
         let bytes = base64::engine::general_purpose::STANDARD
@@ -711,22 +713,17 @@ pub(crate) async fn files_rename_handler(
     Json(payload): Json<FileRenamePayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "files_write", id).await?;
-    if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    if let Some(res) = proxy_file_op(
+        &state,
+        &actor,
+        &p,
+        &[&payload.old_path, &payload.new_path],
+        "files.rename",
+        serde_json::json!({ "project": &p, "oldPath": &payload.old_path, "newPath": &payload.new_path }),
+        20,
+    )
+    .await?
     {
-        ensure_file_env_access(&actor, &[&payload.old_path, &payload.new_path])?;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "files.rename",
-                serde_json::json!({ "project": &p, "oldPath": &payload.old_path, "newPath": &payload.new_path }),
-                std::time::Duration::from_secs(20),
-            )
-            .await?;
         log_audit_project(
             &state,
             Some(id),

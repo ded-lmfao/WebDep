@@ -132,6 +132,9 @@ function renderProjectsList() {
     return;
   }
 
+  // Cards already on screen (return visit, background refresh) must not be faded in again:
+  // the view itself fades in on navigation, and re-animating them looked like a second load.
+  const hadCards = Boolean(container.querySelector('.project-card'));
   setHtmlIfChanged(container, filtered.map((p) => {
     const resItem = resByProjId.get(p.id);
     const isOnline = isProjectOnline(p, resItem);
@@ -253,7 +256,7 @@ function renderProjectsList() {
     `;
   }).join(''));
 
-  if (consumePendingViewStagger('projects')) {
+  if (consumePendingViewStagger('projects') && !hadCards) {
     staggerElements(container.querySelectorAll('.project-card'), { y: 12 });
   }
 }

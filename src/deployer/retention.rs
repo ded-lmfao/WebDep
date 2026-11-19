@@ -336,11 +336,10 @@ pub async fn prune_project_deployments(db: &DbPool, project_id: i64, keep: usize
         if !seen.insert(cand.clone()) {
             continue;
         }
-        if is_safe_prunable_release_dir(&cand, &releases_root, &protected_paths) {
-            if safe_remove_release_dir(&cand) {
+        if is_safe_prunable_release_dir(&cand, &releases_root, &protected_paths)
+            && safe_remove_release_dir(&cand) {
                 removed_any_dir = true;
             }
-        }
     }
 
     if removed_any_dir {

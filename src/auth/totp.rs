@@ -196,7 +196,7 @@ fn query_ntp_unix_secs(host: &str) -> Option<u64> {
 
 fn parse_http_date_secs(line: &str) -> Option<u64> {
     // Format: "Date: Sun, 08 Nov 2026 06:58:12 GMT"
-    let val = line.splitn(2, ':').nth(1)?.trim();
+    let val = line.split_once(':')?.1.trim();
     let parts: Vec<&str> = val.split_whitespace().collect();
     if parts.len() < 5 {
         return None;

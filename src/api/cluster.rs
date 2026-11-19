@@ -932,49 +932,50 @@ async fn refresh_single_node_caps(
     Ok(updated_caps)
 }
 
-async fn run_install_on_single_node(
+#[derive(Clone, Copy)]
+enum ModuleAction {
+    Install,
+    Uninstall,
+}
+
+impl ModuleAction {
+    fn verb(self) -> &'static str {
+        match self {
+            ModuleAction::Install => "install",
+            ModuleAction::Uninstall => "uninstall",
+        }
+    }
+
+    fn rpc_method(self) -> &'static str {
+        match self {
+            ModuleAction::Install => "modules.install",
+            ModuleAction::Uninstall => "modules.uninstall",
+        }
+    }
+
+    fn run_local(self, ids: &[String]) -> Vec<crate::cluster::modules::ModuleInstallResult> {
+        match self {
+            ModuleAction::Install => crate::cluster::modules::install_node_modules_sync(ids).0,
+            ModuleAction::Uninstall => crate::cluster::modules::uninstall_node_modules_sync(ids).0,
+        }
+    }
+}
+
+/// Runs a module install/uninstall on one node (locally or over RPC), stores the refreshed
+/// capabilities, writes the audit line and returns the node's updated module view.
+async fn apply_modules_action(
     state: &AppState,
     actor_username: &str,
     node: &ClusterNode,
     catalog: &[crate::cluster::modules::ModuleCatalogEntry],
-    requested_ids: &[String],
+    target_ids: &[String],
+    action: ModuleAction,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    let mut target_ids: Vec<String> = requested_ids
-        .iter()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if target_ids.is_empty() {
-        let aligned = align_node_modules(catalog, &node.capabilities.modules);
-        target_ids = catalog
-            .iter()
-            .filter(|entry| {
-                entry.required
-                    && !aligned
-                        .iter()
-                        .find(|m| m.id == entry.id)
-                        .map(|m| m.installed)
-                        .unwrap_or(false)
-            })
-            .map(|e| e.id.clone())
-            .collect();
-    }
-    if target_ids.is_empty() {
-        return Ok(serde_json::json!({
-            "ok": true,
-            "nodeId": node.id,
-            "nodeName": node.name,
-            "skipped": true,
-            "results": [],
-            "node": build_node_modules_view(node, catalog),
-        }));
-    }
-
     let (results, updated_caps) = if node.is_local {
-        let ids_c = target_ids.clone();
+        let ids_c = target_ids.to_vec();
         let p2p_port = node.capabilities.p2p_port;
         tokio::task::spawn_blocking(move || {
-            let (results, _) = crate::cluster::modules::install_node_modules_sync(&ids_c);
+            let results = action.run_local(&ids_c);
             let caps = crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port);
             (results, caps)
         })
@@ -985,7 +986,7 @@ async fn run_install_on_single_node(
             .cluster
             .call_node(
                 node.id,
-                "modules.install",
+                action.rpc_method(),
                 serde_json::json!({ "moduleIds": target_ids }),
                 std::time::Duration::from_secs(600),
             )
@@ -1024,7 +1025,8 @@ async fn run_install_on_single_node(
         "system",
         if all_ok { "info" } else { "warn" },
         &format!(
-            "VPS module install on '{}' [{}] by {}: {}",
+            "VPS module {} on '{}' [{}] by {}: {}",
+            action.verb(),
             node.name,
             target_ids.join(", "),
             actor_username,
@@ -1040,6 +1042,47 @@ async fn run_install_on_single_node(
         "results": results,
         "node": build_node_modules_view(&refreshed_node, catalog),
     }))
+}
+
+async fn run_install_on_single_node(
+    state: &AppState,
+    actor_username: &str,
+    node: &ClusterNode,
+    catalog: &[crate::cluster::modules::ModuleCatalogEntry],
+    requested_ids: &[String],
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let mut target_ids: Vec<String> = requested_ids
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if target_ids.is_empty() {
+        let aligned = align_node_modules(catalog, &node.capabilities.modules);
+        target_ids = catalog
+            .iter()
+            .filter(|entry| {
+                entry.required
+                    && !aligned
+                        .iter()
+                        .find(|m| m.id == entry.id)
+                        .map(|m| m.installed)
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id.clone())
+            .collect();
+    }
+    if target_ids.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "nodeId": node.id,
+            "nodeName": node.name,
+            "skipped": true,
+            "results": [],
+            "node": build_node_modules_view(node, catalog),
+        }));
+    }
+
+    apply_modules_action(state, actor_username, node, catalog, &target_ids, ModuleAction::Install).await
 }
 
 pub(crate) async fn list_cluster_modules_handler(
@@ -1096,13 +1139,8 @@ pub(crate) async fn refresh_node_modules_handler(
     })))
 }
 
-pub(crate) async fn install_node_modules_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxPath(node_id): AxPath<i64>,
-    Json(input): Json<InstallModulesInput>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers).await?;
+/// Loads a node for a module action, refusing remote nodes that are not online.
+async fn reachable_node(state: &AppState, node_id: i64) -> Result<ClusterNode, (StatusCode, String)> {
     let node = state
         .cluster
         .get_node(node_id)
@@ -1115,6 +1153,17 @@ pub(crate) async fn install_node_modules_handler(
             format!("Node '{}' is currently '{}'", node.name, node.status),
         ));
     }
+    Ok(node)
+}
+
+pub(crate) async fn install_node_modules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(node_id): AxPath<i64>,
+    Json(input): Json<InstallModulesInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_main_admin(&state, &headers).await?;
+    let node = reachable_node(&state, node_id).await?;
     let catalog = crate::cluster::modules::module_catalog();
     let res =
         run_install_on_single_node(&state, &actor.username, &node, &catalog, &input.module_ids)
@@ -1138,76 +1187,7 @@ async fn run_uninstall_on_single_node(
         return Err((StatusCode::BAD_REQUEST, "No moduleIds specified for uninstall".to_string()));
     }
 
-    let (results, updated_caps) = if node.is_local {
-        let ids_c = target_ids.clone();
-        let p2p_port = node.capabilities.p2p_port;
-        tokio::task::spawn_blocking(move || {
-            let (results, _) = crate::cluster::modules::uninstall_node_modules_sync(&ids_c);
-            let caps = crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port);
-            (results, caps)
-        })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    } else {
-        let rpc_res = state
-            .cluster
-            .call_node(
-                node.id,
-                "modules.uninstall",
-                serde_json::json!({ "moduleIds": target_ids }),
-                std::time::Duration::from_secs(600),
-            )
-            .await?;
-        let results: Vec<crate::cluster::modules::ModuleInstallResult> =
-            serde_json::from_value(rpc_res["results"].clone()).unwrap_or_default();
-        let caps = serde_json::from_value::<crate::cluster::models::NodeCapabilities>(
-            rpc_res["capabilities"].clone(),
-        )
-        .unwrap_or_else(|_| {
-            let mut c = node.capabilities.clone();
-            if let Some(pm) = rpc_res["packageManager"].as_str() {
-                c.package_manager = pm.to_string();
-            }
-            if let Ok(mods) = serde_json::from_value(rpc_res["modules"].clone()) {
-                c.modules = mods;
-            }
-            c
-        });
-        (results, caps)
-    };
-
-    state
-        .cluster
-        .update_node_capabilities(node.id, &updated_caps)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let mut refreshed_node = node.clone();
-    refreshed_node.capabilities = updated_caps;
-
-    let all_ok = results.iter().all(|r| r.success);
-    state.logs.add(
-        None,
-        None,
-        "system",
-        if all_ok { "info" } else { "warn" },
-        &format!(
-            "VPS module uninstall on '{}' [{}] by {}: {}",
-            node.name,
-            target_ids.join(", "),
-            actor_username,
-            if all_ok { "completed" } else { "partial/failed" }
-        ),
-    );
-
-    Ok(serde_json::json!({
-        "ok": all_ok,
-        "nodeId": node.id,
-        "nodeName": node.name,
-        "skipped": false,
-        "results": results,
-        "node": build_node_modules_view(&refreshed_node, catalog),
-    }))
+    apply_modules_action(state, actor_username, node, catalog, &target_ids, ModuleAction::Uninstall).await
 }
 
 pub(crate) async fn uninstall_node_modules_handler(
@@ -1217,18 +1197,7 @@ pub(crate) async fn uninstall_node_modules_handler(
     Json(input): Json<InstallModulesInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let actor = verify_main_admin(&state, &headers).await?;
-    let node = state
-        .cluster
-        .get_node(node_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Node #{node_id} not found")))?;
-    if !node.is_local && !matches!(node.status.as_str(), "online" | "draining") {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Node '{}' is currently '{}'", node.name, node.status),
-        ));
-    }
+    let node = reachable_node(&state, node_id).await?;
     let catalog = crate::cluster::modules::module_catalog();
     let res =
         run_uninstall_on_single_node(&state, &actor.username, &node, &catalog, &input.module_ids)

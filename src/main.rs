@@ -301,7 +301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .await
                 .unwrap_or_default();
             if let Ok(list) = resume_projects.list().await {
-                for p in list.into_iter().filter(|p| p.node_id.map_or(true, |n| local_node_ids.contains(&n))) {
+                for p in list.into_iter().filter(|p| p.node_id.is_none_or(|n| local_node_ids.contains(&n))) {
                     let _ = resume_runtime.ensure_container(&p).await;
                     if p.app_status == "running" {
                         // Check if the workload is ALREADY running from before the panel restart

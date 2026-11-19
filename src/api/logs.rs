@@ -186,7 +186,7 @@ pub(crate) async fn logs_sse_handler(
         },
     );
 
-    let combined = futures_util::stream::iter(initial_event.into_iter()).chain(live_stream);
+    let combined = futures_util::stream::iter(initial_event).chain(live_stream);
     Ok(Sse::new(combined).keep_alive(KeepAlive::default()))
 }
 

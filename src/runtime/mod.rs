@@ -1,4 +1,3 @@
-#![allow(unused_imports)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -14,7 +13,6 @@ pub mod tree;
 pub mod maintenance;
 pub mod supervisor;
 
-pub use container::WebsiteContainer;
 pub use tree::{detect_java_exe, is_pid_alive};
 
 pub struct Runtime {

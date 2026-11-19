@@ -1,19 +1,11 @@
 use sqlx::PgPool;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::pg_control::{self, ControlPgHandle, DEFAULT_CONTROL_PG_PORT};
 
 pub type DbPool = PgPool;
-
-static ACTIVE_DATA_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
-
-#[allow(dead_code)]
-pub fn active_data_dir() -> Option<PathBuf> {
-    ACTIVE_DATA_DIR.read().ok().and_then(|g| g.clone())
-}
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -29,9 +21,6 @@ pub async fn open_db(
     data_dir: &Path,
 ) -> Result<(DbPool, Option<ControlPgHandle>), Box<dyn std::error::Error + Send + Sync>> {
     tokio::fs::create_dir_all(data_dir).await?;
-    if let Ok(mut guard) = ACTIVE_DATA_DIR.write() {
-        *guard = Some(data_dir.to_path_buf());
-    }
 
     let (pool, handle) = pg_control::ensure_control_pg_pool(data_dir).await?;
 

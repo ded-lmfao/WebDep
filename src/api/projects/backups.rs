@@ -340,6 +340,44 @@ pub(crate) struct RestoreBackupPayload {
     pub target_node_id: Option<i64>,
 }
 
+/// Asks a remote node to roll `p` back to release `target_rel` as deployment `dep_id`.
+async fn rollback_on_remote_node(
+    state: &AppState,
+    nid: i64,
+    p: &Project,
+    dep_id: i64,
+    target_rel: i64,
+) -> Result<(), (StatusCode, String)> {
+    let rel_info: Option<(String, String)> = sqlx::query_as(
+        "SELECT COALESCE(release_dir, ''), COALESCE(sha, '') FROM releases WHERE id = $1 AND project_id = $2",
+    )
+    .bind(target_rel)
+    .bind(p.id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let (rel_dir, rel_sha) = rel_info.unwrap_or_default();
+    let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+    state
+        .cluster
+        .call_node(
+            nid,
+            "project.rollback",
+            serde_json::json!({
+                "project": p,
+                "deploymentId": dep_id,
+                "releaseId": target_rel,
+                "releaseDir": rel_dir,
+                "sha": rel_sha,
+                "context": ctx,
+            }),
+            std::time::Duration::from_secs(15),
+        )
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn restore_backup_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -587,33 +625,7 @@ pub(crate) async fn restore_backup_handler(
             }
             if let Some(target_rel) = rel_id {
                 let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore").await;
-                let rel_info: Option<(String, String)> = sqlx::query_as(
-                    "SELECT COALESCE(release_dir, ''), COALESCE(sha, '') FROM releases WHERE id = $1 AND project_id = $2",
-                )
-                .bind(target_rel)
-                .bind(id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-                let (rel_dir, rel_sha) = rel_info.unwrap_or_default();
-                let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
-                state
-                    .cluster
-                    .call_node(
-                        nid,
-                        "project.rollback",
-                        serde_json::json!({
-                            "project": &p,
-                            "deploymentId": dep_id,
-                            "releaseId": target_rel,
-                            "releaseDir": rel_dir,
-                            "sha": rel_sha,
-                            "context": ctx,
-                        }),
-                        std::time::Duration::from_secs(15),
-                    )
-                    .await?;
+                rollback_on_remote_node(&state, nid, &p, dep_id, target_rel).await?;
             } else {
                 let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
                 let _ = state
@@ -666,33 +678,7 @@ pub(crate) async fn restore_backup_handler(
         let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore").await;
         let target_rel = payload.backup_id;
         if let Some(nid) = remote_node_id {
-            let rel_info: Option<(String, String)> = sqlx::query_as(
-                "SELECT COALESCE(release_dir, ''), COALESCE(sha, '') FROM releases WHERE id = $1 AND project_id = $2",
-            )
-            .bind(target_rel)
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
-            let (rel_dir, rel_sha) = rel_info.unwrap_or_default();
-            let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
-            state
-                .cluster
-                .call_node(
-                    nid,
-                    "project.rollback",
-                    serde_json::json!({
-                        "project": &p,
-                        "deploymentId": dep_id,
-                        "releaseId": target_rel,
-                        "releaseDir": rel_dir,
-                        "sha": rel_sha,
-                        "context": ctx,
-                    }),
-                    std::time::Duration::from_secs(15),
-                )
-                .await?;
+            rollback_on_remote_node(&state, nid, &p, dep_id, target_rel).await?;
         } else {
             let deployer = state.deployer.clone();
             tokio::spawn(async move {

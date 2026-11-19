@@ -105,6 +105,35 @@ pub(crate) struct CheckGitResponse {
     pub deployed_sha: Option<String>,
 }
 
+/// Runs a git RPC (`git.check`, `git.fetch`, ...) on the project's remote node with its current
+/// context. Returns `None` when the project lives on this node.
+async fn proxy_git_op(
+    state: &AppState,
+    p: &Project,
+    op: &str,
+    timeout_secs: u64,
+) -> Result<Option<serde_json::Value>, (StatusCode, String)> {
+    let Some(nid) = state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+    else {
+        return Ok(None);
+    };
+    let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+    state
+        .cluster
+        .call_node(
+            nid,
+            op,
+            serde_json::json!({ "project": p, "context": ctx }),
+            std::time::Duration::from_secs(timeout_secs),
+        )
+        .await
+        .map(Some)
+}
+
 pub(crate) async fn project_check_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -113,22 +142,7 @@ pub(crate) async fn project_check_handler(
     let _actor = verify_project_access(&state, &headers, id).await?;
     let p = fetch_project(&state.projects, id).await?;
 
-    if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-    {
-        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "git.check",
-                serde_json::json!({ "project": &p, "context": ctx }),
-                std::time::Duration::from_secs(60),
-            )
-            .await?;
+    if let Some(res) = proxy_git_op(&state, &p, "git.check", 60).await? {
         let head = res["head"].as_str().unwrap_or("").to_string();
         let needs_deploy = !head.is_empty() && p.deployed_sha.as_deref() != Some(&head);
         return Ok(Json(CheckGitResponse {
@@ -181,22 +195,7 @@ pub(crate) async fn project_fetch_handler(
     let actor = verify_power(&state, &headers, "deploy", Some(id)).await?.username;
     let p = fetch_project(&state.projects, id).await?;
 
-    let (sha, has_new_commits) = if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-    {
-        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "git.fetch",
-                serde_json::json!({ "project": &p, "context": ctx }),
-                std::time::Duration::from_secs(90),
-            )
-            .await?;
+    let (sha, has_new_commits) = if let Some(res) = proxy_git_op(&state, &p, "git.fetch", 90).await? {
         let head = res["head"].as_str().unwrap_or("").to_string();
         let has_new = !head.is_empty() && p.deployed_sha.as_deref() != Some(&head);
         (head, has_new)
@@ -277,22 +276,7 @@ pub(crate) async fn detect_project_handler(
     .await?;
     let p = fetch_project(&state.projects, id).await?;
 
-    if let Some(nid) = state
-        .cluster
-        .should_proxy_to_node(p.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-    {
-        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
-        let res = state
-            .cluster
-            .call_node(
-                nid,
-                "git.detect",
-                serde_json::json!({ "project": &p, "context": ctx }),
-                std::time::Duration::from_secs(90),
-            )
-            .await?;
+    if let Some(res) = proxy_git_op(&state, &p, "git.detect", 90).await? {
         return Ok(Json(DetectProjectResponse {
             project_type: res["type"].as_str().unwrap_or(&p.project_type).to_string(),
             install: res["install"].as_str().unwrap_or(&p.install_cmd).to_string(),

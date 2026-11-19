@@ -22,7 +22,6 @@ import {
   animateWorkspaceBanner,
   markViewStaggerPending,
   consumePendingViewStagger,
-  staggerElements,
 } from './motion_ui.js';
 
 let lastBannerEntityKey = null;
@@ -775,31 +774,6 @@ function centerActiveWebsiteTab(smooth = true) {
 }
 window.addEventListener('resize', () => centerActiveWebsiteTab(false));
 
-function syncProjectSelectors() {
-  renderWebsiteWorkspaceHeader();
-}
-
-// Which kind of item the global "Add" button should create for the current view (null = hide it)
-function getGlobalAddKind() {
-  const v = state.currentView;
-  if (v === 'databases') return 'database';
-  if (v === 'services') return 'service';
-  if (v === 'projects') return 'website';
-  if (WEBSITE_WORKSPACE_TABS.has(v)) {
-    if (state.selectedEntityKind === 'database') return 'database';
-    const cur = getSelectedProject();
-    return cur && cur.project_kind === 'service' ? 'service' : 'website';
-  }
-  return null;
-}
-
-function globalAddAction() {
-  const kind = getGlobalAddKind();
-  if (kind === 'database') openCreateDatabaseModal();
-  else if (kind === 'service') openAddServiceModal();
-  else openAddWebsiteModal();
-}
-window.globalAddAction = globalAddAction;
 
 function renderCurrentView() {
   updateBreadcrumbs();
@@ -867,15 +841,10 @@ function renderCurrentView() {
     case 'files': void loadFilesView(); break;
     case 'monitor': void loadMonitorView(); break;
     case 'settings':
+      // Settings content is static: the view fade is its only entrance (a second card stagger on
+      // top of it made the page jitter).
+      consumePendingViewStagger('settings');
       void loadSettingsView();
-      if (consumePendingViewStagger('settings')) {
-        requestAnimationFrame(() => {
-          staggerElements(
-            document.querySelectorAll('#view-settings .settings-card, #view-settings .overview-section, #settings-theme-grid .theme-swatch-card'),
-            { y: 10 },
-          );
-        });
-      }
       break;
     case 'audit': void loadAuditView(); break;
     case 'nodes': if (window.loadNodesView) void window.loadNodesView(); break;
@@ -887,8 +856,6 @@ function renderCurrentView() {
 window.renderWebsiteWorkspaceHeader = renderWebsiteWorkspaceHeader;
 window.updateBreadcrumbs = updateBreadcrumbs;
 window.centerActiveWebsiteTab = centerActiveWebsiteTab;
-window.syncProjectSelectors = syncProjectSelectors;
-window.getGlobalAddKind = getGlobalAddKind;
 window.renderCurrentView = renderCurrentView;
 
 export {
@@ -900,8 +867,5 @@ export {
   updateBreadcrumbs,
   renderWebsiteWorkspaceHeader,
   centerActiveWebsiteTab,
-  syncProjectSelectors,
-  getGlobalAddKind,
-  globalAddAction,
   renderCurrentView,
 };

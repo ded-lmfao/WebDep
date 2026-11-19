@@ -25,7 +25,7 @@ pub fn b64url_decode(input: &str) -> Option<Vec<u8>> {
         .decode(&norm)
         .ok()
         .or_else(|| {
-            while norm.len() % 4 != 0 {
+            while !norm.len().is_multiple_of(4) {
                 norm.push('=');
             }
             base64::engine::general_purpose::URL_SAFE.decode(&norm).ok()

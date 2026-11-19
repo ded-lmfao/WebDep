@@ -63,8 +63,6 @@ pub struct GitVersionInfo {
 
 #[derive(Deserialize)]
 pub struct TriggerUpdatePayload {
-    #[allow(dead_code)]
-    pub branch: Option<String>,
     pub tag: Option<String>,
 }
 
@@ -499,7 +497,7 @@ impl Updater {
                     Some(rel.tag_name.clone()),
                     sha,
                     Some(rel.tag_name.clone()),
-                    rel.name.or_else(|| Some(rel.tag_name)),
+                    rel.name.or(Some(rel.tag_name)),
                     Some(rel.html_url),
                     fallback_asset.map(|a| a.name.clone()),
                     fallback_asset.map(|a| a.size),

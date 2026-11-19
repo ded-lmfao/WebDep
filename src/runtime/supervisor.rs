@@ -103,7 +103,7 @@ impl Runtime {
                 }
 
                 // Every 6s (every 3rd tick), also check preserved local workloads from previous panel instances
-                if tick % 3 == 0 {
+                if tick.is_multiple_of(3) {
                     let external_running: Vec<(i64, u32)> = sqlx::query_as::<_, (i64, Option<i64>)>(
                         "SELECT id, app_pid FROM projects
                          WHERE app_status = 'running'

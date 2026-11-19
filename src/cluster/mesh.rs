@@ -11,8 +11,7 @@ pub const DEFAULT_WG_PORT: u16 = 51820;
 pub fn next_available_mesh_ip(existing: &[String]) -> String {
     let used: HashSet<&str> = existing.iter().map(|s| s.trim()).collect();
     for hi in 0..=254u16 {
-        let start_lo = if hi == 0 { 1 } else { 1 };
-        for lo in start_lo..=254u16 {
+        for lo in 1..=254u16 {
             let candidate = format!("10.200.{hi}.{lo}");
             if !used.contains(candidate.as_str()) {
                 return candidate;
@@ -497,7 +496,7 @@ pub async fn reconcile_mesh_network(manifest: &NodeStateManifest, data_dir: &Pat
         }
     }
 
-    let _ = update_managed_pg_hba_files(&data_dir.join("databases"), &manifest.peers);
+    update_managed_pg_hba_files(&data_dir.join("databases"), &manifest.peers);
 }
 
 fn update_managed_pg_hba_files(dbs_dir: &Path, peers: &[PeerConfig]) {

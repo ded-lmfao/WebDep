@@ -82,7 +82,6 @@ pub(crate) async fn deploy_project_handler(
 #[derive(Deserialize)]
 pub(crate) struct RollbackPayload {
     #[serde(rename = "releaseId")]
-    #[allow(dead_code)]
     release_id: i64,
 }
 

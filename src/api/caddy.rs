@@ -60,7 +60,7 @@ pub(crate) async fn apply_caddy_handler(
                 let cleaned: Vec<String> = raw_domains
                     .into_iter()
                     .flat_map(|s| {
-                        s.split(|c| c == ',' || c == '\n' || c == ';')
+                        s.split([',', '\n', ';'])
                             .map(|part| part.to_string())
                             .collect::<Vec<String>>()
                     })

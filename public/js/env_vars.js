@@ -12,7 +12,6 @@ import {
   copyTextToClipboard,
   setBtnLoading,
 } from './state.js';
-import { syncProjectSelectors } from './workspace.js';
 import { api, toast } from './api.js';
 
 const envUiState = {
@@ -667,16 +666,6 @@ function handleEnvFileUpload(event) {
   event.target.value = '';
 }
 
-function onEnvProjectChange(projectId) {
-  state.selectedProjectId = Number(projectId);
-  const globalSel = document.getElementById('global-project-select');
-  if (globalSel) globalSel.value = String(projectId);
-  syncProjectSelectors();
-  if (typeof window.renderCurrentView === 'function') {
-    window.renderCurrentView();
-  }
-}
-
 function restartCurrentProject() {
   const p = getSelectedProject();
   if (p && typeof window.restartProject === 'function') {
@@ -692,15 +681,6 @@ function switchEnvModalTab(tab) {
   const bulkSec = document.getElementById('env-section-bulk');
   if (singleSec) singleSec.style.display = tab === 'single' ? 'block' : 'none';
   if (bulkSec) bulkSec.style.display = tab === 'bulk' ? 'block' : 'none';
-}
-
-function openAddEnvModal() {
-  setEnvViewMode('list');
-  document.getElementById('env-quick-key-input')?.focus();
-}
-
-function openBulkEnvModal() {
-  setEnvViewMode('raw');
 }
 
 async function loadCurrentEnv() {
@@ -773,10 +753,6 @@ async function deleteEnvVar(key) {
   }
 }
 
-function promptRevealEnv(key) {
-  toggleRevealSingleEnv(key);
-}
-
 // Global window bindings for inline HTML handlers
 window.loadEnvView = loadEnvView;
 window.setEnvViewMode = setEnvViewMode;
@@ -801,16 +777,12 @@ window.saveMultiEditEnv = saveMultiEditEnv;
 window.saveInlineRawEnv = saveInlineRawEnv;
 window.copyRawEnvToClipboard = copyRawEnvToClipboard;
 window.handleEnvFileUpload = handleEnvFileUpload;
-window.onEnvProjectChange = onEnvProjectChange;
 window.restartCurrentProject = restartCurrentProject;
 window.switchEnvModalTab = switchEnvModalTab;
-window.openAddEnvModal = openAddEnvModal;
-window.openBulkEnvModal = openBulkEnvModal;
 window.loadCurrentEnv = loadCurrentEnv;
 window.exportEnvFile = exportEnvFile;
 window.handleSaveEnv = handleSaveEnv;
 window.deleteEnvVar = deleteEnvVar;
-window.promptRevealEnv = promptRevealEnv;
 
 export {
   loadEnvView,
@@ -835,15 +807,11 @@ export {
   saveInlineRawEnv,
   copyRawEnvToClipboard,
   handleEnvFileUpload,
-  onEnvProjectChange,
   restartCurrentProject,
   switchEnvModalTab,
-  openAddEnvModal,
-  openBulkEnvModal,
   loadCurrentEnv,
   exportEnvFile,
   handleSaveEnv,
   deleteEnvVar,
-  promptRevealEnv,
 };
 

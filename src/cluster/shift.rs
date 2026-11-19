@@ -440,7 +440,6 @@ pub async fn start_project_shift(
                 proj.id,
                 proj.slug.clone(),
                 proj.project_kind.clone(),
-                target_port,
                 8 * 1024 * 1024 * 1024,
                 900,
             )

@@ -15,8 +15,6 @@ import {
   formatRelativeTime,
   setHtmlIfChanged,
   openModal,
-  showConfirmDialog,
-  showCopyDialog,
   hasCachedApi,
   isPublicIp,
   renderPublicIpPill,
@@ -88,39 +86,6 @@ async function loadGithubView() {
     });
   } catch (err) {
     tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--danger); padding: 24px;">${escapeHtml(err.message)}</td></tr>`;
-  }
-}
-
-async function generateDeployKey(projectId) {
-  try {
-    const res = await api(`/api/projects/${projectId}/deploy-key`, { method: 'POST' });
-    await showCopyDialog({
-      title: 'SSH Deploy Key',
-      message: 'Add this public key to your GitHub repository under Settings -> Deploy Keys (allow read access):',
-      value: res.publicKey,
-    });
-  } catch (err) {
-    toast(`Failed to generate deploy key: ${err.message}`, 'error');
-  }
-}
-
-async function rotateWebhookSecret(projectId) {
-  const ok = await showConfirmDialog({
-    title: 'Rotate GitHub Webhook Secret',
-    message: 'Rotate the GitHub webhook secret for this website? You will need to update the secret in your GitHub repository webhook settings.',
-    confirmText: 'Rotate Secret',
-  });
-  if (!ok) return;
-  try {
-    const res = await api(`/api/projects/${projectId}/webhook-secret/rotate`, { method: 'POST' });
-    toast('Webhook secret rotated and saved.', 'success');
-    await showCopyDialog({
-      title: 'New GitHub Webhook Secret',
-      message: 'Paste this secret into your GitHub repository Webhook Secret field:',
-      value: res.webhookSecret,
-    });
-  } catch (err) {
-    toast(`Failed to rotate secret: ${err.message}`, 'error');
   }
 }
 
@@ -543,8 +508,6 @@ async function openDeploymentDetails(depId) {
 
 // Window bindings
 window.loadGithubView = loadGithubView;
-window.generateDeployKey = generateDeployKey;
-window.rotateWebhookSecret = rotateWebhookSecret;
 window.fetchProjectUpdates = fetchProjectUpdates;
 window.loadDeploymentsView = loadDeploymentsView;
 window.renderDeploymentRow = renderDeploymentRow;
@@ -553,8 +516,6 @@ window.openDeploymentDetails = openDeploymentDetails;
 
 export {
   loadGithubView,
-  generateDeployKey,
-  rotateWebhookSecret,
   fetchProjectUpdates,
   loadDeploymentsView,
   renderDeploymentRow,

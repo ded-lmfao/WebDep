@@ -425,10 +425,7 @@ fn parse_http_response(raw: &[u8]) -> Result<(u16, String), String> {
 
 fn decode_chunked_body(mut bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    loop {
-        let Some(pos) = bytes.windows(2).position(|w| w == b"\r\n") else {
-            break;
-        };
+    while let Some(pos) = bytes.windows(2).position(|w| w == b"\r\n") {
         let len_line = std::str::from_utf8(&bytes[..pos])
             .map_err(|_| "Invalid chunked UTF-8".to_string())?
             .split(';')

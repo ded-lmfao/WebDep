@@ -1042,22 +1042,6 @@ fn append_dir_to_zip(
     Ok(())
 }
 
-/// Packs a single directory's contents at archive root into a standard `.zip` file.
-#[allow(dead_code)]
-pub fn pack_dir_to_zip(
-    src_dir: &Path,
-    dest_zip: &Path,
-    extra_skip: &[&str],
-) -> Result<(u64, u64), String> {
-    let mut writer = ZipArchiveWriter::create(dest_zip)?;
-    let mut skips: Vec<&str> = vec![".git"];
-    skips.extend_from_slice(extra_skip);
-    if src_dir.exists() {
-        append_dir_to_zip(&mut writer, src_dir, "", src_dir, &skips)?;
-    }
-    writer.finish()
-}
-
 /// Packs all project application files (`current`, `app`, `releases`, `backups`, plus any custom
 /// top-level files/dirs in `deploy_dir` except `repo` and `tmp`) AND the project's persistent
 /// container storage (`db/`, `storage/`, `home/` under `__webdep_container__/`) into a `.zip` file

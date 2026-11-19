@@ -235,9 +235,9 @@ pub(crate) fn extract_session_id(headers: &HeaderMap) -> Option<String> {
         .ok()?
         .split(';')
         .find_map(|part| {
-            let mut it = part.trim().splitn(2, '=');
-            let key = it.next()?;
-            let val = it.next()?;
+            let (key, val) = part.trim().split_once('=')?;
+            
+            
             if key == "nd_session" {
                 Some(val.to_string())
             } else {

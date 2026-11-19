@@ -424,8 +424,10 @@ let updatePollTimer = null;
 
 // "v3.0.1-7bdfc49" / "3.0.1" -> "v3.0.1"; anything without a version number -> ''.
 function releaseVersionLabel(tag) {
-  const m = String(tag || '').match(/\d+\.\d+\.\d+/);
-  return m ? `v${m[0]}` : '';
+  const [major, minor, patch = ''] = String(tag || '').replace(/^\D+/, '').split('.');
+  const patchDigits = patch.slice(0, patch.search(/\D|$/));
+  const isNum = (v) => v !== '' && [...v].every((c) => c >= '0' && c <= '9');
+  return isNum(major) && isNum(minor) && isNum(patchDigits) ? `v${major}.${minor}.${patchDigits}` : '';
 }
 
 export async function loadSystemVersionInfo(quiet = false, forceRefresh = false) {
@@ -634,40 +636,6 @@ export async function startPlatformUpdate() {
   }, 900);
 }
 
-export async function executePostUpdateRestart() {
-  const ok = await showConfirmDialog({
-    title: 'Restart WebDep Panel',
-    message: 'Restart the WebDep panel now to activate the new version? The dashboard will reconnect in about 3 seconds.',
-    confirmText: 'Restart Now',
-    danger: false,
-  });
-  if (!ok) return;
-
-  const stepText = document.getElementById('update-step-text');
-  const bannerMsg = document.getElementById('update-banner-msg');
-  const statusBanner = document.getElementById('update-status-banner');
-  const spinner = document.getElementById('update-active-spinner');
-  const dismissBtn = document.getElementById('update-dismiss-btn');
-  const closeBtn = document.getElementById('modal-platform-update-close');
-
-  openModal('modal-platform-update');
-  if (statusBanner) statusBanner.style.display = 'flex';
-  if (spinner) spinner.style.display = 'block';
-  if (stepText) stepText.textContent = 'Restarting WebDep service';
-  if (bannerMsg) bannerMsg.textContent = 'Triggering service restart. Waiting for WebDep to come back online';
-  if (dismissBtn) dismissBtn.disabled = true;
-  if (closeBtn) closeBtn.style.display = 'none';
-
-  const initialHealth = await probeHealthBoot();
-  try {
-    await api('/api/system/restart', { method: 'POST' });
-  } catch (err) {
-    toast(`Restart trigger returned: ${err.message}`, 'info');
-  }
-
-  void pollReconnectionAfterUpdate(initialHealth.boot);
-}
-
 export function copyUpdateLogs() {
   const el = document.getElementById('update-console-logs');
   if (!el) return;
@@ -776,6 +744,5 @@ window.loadSystemVersionInfo = loadSystemVersionInfo;
 window.savePlatformUpdateRepo = savePlatformUpdateRepo;
 window.checkPlatformUpdates = checkPlatformUpdates;
 window.startPlatformUpdate = startPlatformUpdate;
-window.executePostUpdateRestart = executePostUpdateRestart;
 window.copyUpdateLogs = copyUpdateLogs;
 window.pollReconnectionAfterUpdate = pollReconnectionAfterUpdate;

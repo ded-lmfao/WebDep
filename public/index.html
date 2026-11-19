@@ -2625,7 +2625,7 @@
 
   <!-- CREATE / EDIT USER MODAL -->
   <div class="modal-overlay" id="modal-create-user">
-    <div class="modal-container" style="max-width: 580px;">
+    <div class="modal-container user-access-modal" style="max-width: 600px;">
       <div class="modal-header">
         <h3 class="modal-title" id="user-modal-title">Create Platform User</h3>
         <button class="modal-close" data-close-modal>&times;</button>
@@ -2645,122 +2645,125 @@
             </div>
           </div>
 
-          <div class="form-group">
-            <div
-              style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 6px;">
-              <span class="form-label" style="margin-bottom: 0;">Granular Powers (Permissions)</span>
-              <div style="display: flex; gap: 6px;">
-                <button type="button" class="btn btn-secondary btn-xs" onclick="setUserPowerPreset('all')">Select
-                  All</button>
-                <button type="button" class="btn btn-secondary btn-xs"
-                  onclick="setUserPowerPreset('defaults')">Defaults</button>
-                <button type="button" class="btn btn-secondary btn-xs"
-                  onclick="setUserPowerPreset('readonly')">Read-Only</button>
-                <button type="button" class="btn btn-secondary btn-xs"
-                  onclick="setUserPowerPreset('none')">Clear</button>
-              </div>
+          <div class="ua-section">
+            <div class="ua-section-title">What can this user do?</div>
+            <div class="ua-roles" role="group" aria-label="Access level">
+              <button type="button" class="ua-role" data-user-role="readonly" onclick="setUserPowerPreset('readonly')">
+                <span class="ua-role-name">Viewer</span>
+                <span class="ua-role-desc">Can look, can't change anything</span>
+              </button>
+              <button type="button" class="ua-role" data-user-role="defaults" onclick="setUserPowerPreset('defaults')">
+                <span class="ua-role-name">Developer</span>
+                <span class="ua-role-desc">Deploy, restart, files and backups</span>
+              </button>
+              <button type="button" class="ua-role" data-user-role="all" onclick="setUserPowerPreset('all')">
+                <span class="ua-role-name">Full access</span>
+                <span class="ua-role-desc">Every permission</span>
+              </button>
+              <button type="button" class="ua-role" data-user-role="custom" onclick="setUserPowerPreset('custom')">
+                <span class="ua-role-name">Custom</span>
+                <span class="ua-role-desc">Pick permissions yourself</span>
+              </button>
             </div>
-            <div
-              style="display: flex; flex-direction: column; gap: 10px; max-height: 250px; overflow-y: auto; background: var(--bg-input); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-subtle);">
-              <div
-                style="font-size: 12px; font-weight: 500; color: var(--text-dim);">
-                Workloads &amp; deploy</div>
-              <div class="modal-grid-2" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="deploy" checked>
-                  <span>Deploy, Fetch &amp; Rollback</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="process" checked>
-                  <span>Start / Stop / Restart</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="projects_manage">
-                  <span>Add / Edit / Delete Websites</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="services_manage">
-                  <span>Add / Edit / Delete Services</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="domains">
-                  <span>Domains &amp; SSL (Caddy)</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="backups" checked>
-                  <span>Create &amp; Restore Backups</span>
-                </label>
+            <details class="ua-perms" id="user-perms-details">
+              <summary><span id="user-perms-summary">Permissions</span></summary>
+              <div class="ua-perms-body">
+              <div class="ua-perm-group">
+                <div class="ua-perm-group-title">Apps</div>
+                <div class="ua-perm-grid">
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="deploy" checked>
+                    <span><span class="ua-perm-name">Deploy &amp; roll back</span><span class="ua-perm-hint">Ship new code, redeploy, roll back</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="process" checked>
+                    <span><span class="ua-perm-name">Start, stop &amp; restart</span><span class="ua-perm-hint">Control running apps</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="projects_manage">
+                    <span><span class="ua-perm-name">Add &amp; delete websites</span><span class="ua-perm-hint">Create, edit and remove websites</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="services_manage">
+                    <span><span class="ua-perm-name">Add &amp; delete services</span><span class="ua-perm-hint">Create, edit and remove services</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="domains">
+                    <span><span class="ua-perm-name">Domains &amp; SSL</span><span class="ua-perm-hint">Attach domains, manage certificates</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="backups" checked>
+                    <span><span class="ua-perm-name">Backups</span><span class="ua-perm-hint">Create and restore backups</span></span>
+                  </label>
+                </div>
               </div>
-
-              <div
-                style="font-size: 12px; font-weight: 500; color: var(--text-dim); margin-top: 4px;">
-                Storage, env &amp; databases</div>
-              <div class="modal-grid-2" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="files" checked>
-                  <span>Browse &amp; Download Files</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="files_write">
-                  <span>Edit, Upload &amp; Delete Files</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="env">
-                  <span>Manage Env Variables (.env)</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="databases">
-                  <span>Control Databases &amp; Logs</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="databases_manage">
-                  <span>Create, Expose &amp; Delete DBs</span>
-                </label>
+              <div class="ua-perm-group">
+                <div class="ua-perm-group-title">Files &amp; data</div>
+                <div class="ua-perm-grid">
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="files" checked>
+                    <span><span class="ua-perm-name">View files</span><span class="ua-perm-hint">Browse and download</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="files_write">
+                    <span><span class="ua-perm-name">Edit files</span><span class="ua-perm-hint">Upload, edit and delete</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="env">
+                    <span><span class="ua-perm-name">Environment variables</span><span class="ua-perm-hint">See and change .env secrets</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="databases">
+                    <span><span class="ua-perm-name">Use databases</span><span class="ua-perm-hint">Start, stop and view logs</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="databases_manage">
+                    <span><span class="ua-perm-name">Manage databases</span><span class="ua-perm-hint">Create, expose and delete</span></span>
+                  </label>
+                </div>
               </div>
-
-              <div
-                style="font-size: 12px; font-weight: 500; color: var(--text-dim); margin-top: 4px;">
-                Observability &amp; platform</div>
-              <div class="modal-grid-2" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="logs" checked>
-                  <span>View &amp; Download Logs</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="audit">
-                  <span>View Activity &amp; Audit Logs</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="monitor">
-                  <span>Server Telemetry &amp; Monitor</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="settings_manage">
-                  <span>Platform Settings &amp; Cache</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                  <input type="checkbox" class="user-power-check" value="system_manage">
-                  <span>Panel Restart &amp; Updates</span>
-                </label>
+              <div class="ua-perm-group">
+                <div class="ua-perm-group-title">Monitoring &amp; panel</div>
+                <div class="ua-perm-grid">
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="logs" checked>
+                    <span><span class="ua-perm-name">App logs</span><span class="ua-perm-hint">View and download logs</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="audit">
+                    <span><span class="ua-perm-name">Activity log</span><span class="ua-perm-hint">See who did what</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="monitor">
+                    <span><span class="ua-perm-name">Server stats</span><span class="ua-perm-hint">CPU, memory and network</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="settings_manage">
+                    <span><span class="ua-perm-name">Panel settings</span><span class="ua-perm-hint">Change settings, clear cache</span></span>
+                  </label>
+                  <label class="ua-perm">
+                    <input type="checkbox" class="user-power-check" value="system_manage">
+                    <span><span class="ua-perm-name">Restart &amp; update panel</span><span class="ua-perm-hint">Restart WebDep, install updates</span></span>
+                  </label>
+                </div>
               </div>
-            </div>
+              </div>
+            </details>
           </div>
 
-          <div class="form-group">
-            <div
-              style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 6px;">
-              <span class="form-label" style="margin-bottom: 0;">Website Access</span>
-              <label
-                style="display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; color: var(--accent);">
-                <input type="checkbox" id="user-all-projects-check" checked>
-                <span>Allow Access to All Websites (*)</span>
+          <div class="ua-section">
+            <div class="ua-section-title">Which websites and services?</div>
+            <div class="ua-scope">
+              <label class="ua-scope-option">
+                <input type="radio" name="user-project-scope" id="user-all-projects-check" value="all" checked>
+                <span>All of them</span>
+              </label>
+              <label class="ua-scope-option">
+                <input type="radio" name="user-project-scope" id="user-some-projects-radio" value="some">
+                <span>Only the ones I pick</span>
               </label>
             </div>
-            <div id="user-projects-checklist" class="modal-grid-2"
-              style="max-height: 150px; overflow-y: auto; background: var(--bg-input); padding: 10px 12px; border-radius: var(--radius-md); border: 1px solid var(--border-subtle); display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-            </div>
-            <span class="form-hint">Uncheck "Allow Access to All Websites" to restrict this user to specific websites
-              only.</span>
+            <div id="user-projects-checklist" class="ua-project-list" hidden></div>
           </div>
         </form>
       </div>

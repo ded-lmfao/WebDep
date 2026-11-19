@@ -514,18 +514,6 @@ export async function handleFilesUpload(e) {
   if (e.target) e.target.value = '';
 }
 
-export async function handleFolderUpload(e) {
-  if (!getFilesEntityContext()?.canWrite) {
-    if (e.target) e.target.value = '';
-    return;
-  }
-  const files = e.target?.files;
-  if (files && files.length) {
-    await uploadFileList(files);
-  }
-  if (e.target) e.target.value = '';
-}
-
 export function setupFileDropzone() {
   const dropzone = document.getElementById('file-explorer-dropzone');
   const overlay = document.getElementById('file-drop-overlay');
@@ -596,5 +584,4 @@ window.filesNewFile = filesNewFile;
 window.filesNewFolder = filesNewFolder;
 window.filesDelete = filesDelete;
 window.handleFilesUpload = handleFilesUpload;
-window.handleFolderUpload = handleFolderUpload;
 window.setupFileDropzone = setupFileDropzone;

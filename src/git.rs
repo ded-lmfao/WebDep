@@ -109,7 +109,7 @@ impl Git {
         }
 
         if let Some(raw_s) = raw_single {
-            for part in raw_s.split(|c| c == ',' || c == '\n' || c == ';') {
+            for part in raw_s.split([',', '\n', ';']) {
                 let t = part.trim().to_string();
                 if !t.is_empty() && seen.insert(t.clone()) {
                     list.push(StoredGithubToken {
@@ -121,7 +121,7 @@ impl Git {
         }
 
         if let Ok(env_tok) = std::env::var("GITHUB_TOKEN") {
-            for part in env_tok.split(|c| c == ',' || c == '\n' || c == ';') {
+            for part in env_tok.split([',', '\n', ';']) {
                 let t = part.trim().to_string();
                 if !t.is_empty() && seen.insert(t.clone()) {
                     list.push(StoredGithubToken {
@@ -191,7 +191,7 @@ impl Git {
             .unwrap_or_default();
         let mut seen: std::collections::HashSet<String> = list.iter().map(|t| t.token.clone()).collect();
         if let Ok(env_tok) = std::env::var("GITHUB_TOKEN") {
-            for part in env_tok.split(|c| c == ',' || c == '\n' || c == ';') {
+            for part in env_tok.split([',', '\n', ';']) {
                 let t = part.trim().to_string();
                 if !t.is_empty() && seen.insert(t.clone()) {
                     list.push(StoredGithubToken {

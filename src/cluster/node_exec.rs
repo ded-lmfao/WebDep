@@ -68,8 +68,6 @@ pub struct P2pTransferTicket {
     pub project_slug: String,
     pub project_kind: String,
     pub project_id: i64,
-    #[allow(dead_code)]
-    pub port: u16,
     pub expires_at: i64,
     pub max_bytes: u64,
 }
@@ -111,7 +109,6 @@ impl NodeExecState {
         project_id: i64,
         project_slug: String,
         project_kind: String,
-        port: u16,
         max_bytes: u64,
         ttl_secs: i64,
     ) -> String {
@@ -124,7 +121,6 @@ impl NodeExecState {
             project_slug,
             project_kind,
             project_id,
-            port,
             expires_at: now + ttl_secs.clamp(30, 3600),
             max_bytes,
         };
@@ -1330,7 +1326,7 @@ pub async fn execute_rpc(
             .unwrap_or_default();
             ok_resp(req_id, json!({ "commits": commits }))
         }
-        "git.check" => {
+        "git.check" | "git.fetch" => {
             let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
                 return err_resp(req_id, 400, "Invalid project payload");
             };
@@ -1346,27 +1342,8 @@ pub async fn execute_rpc(
             .await
             .unwrap_or_else(|e| Err(e.to_string()));
             match head_res {
+                Ok(head) if op == "git.fetch" => ok_resp(req_id, json!({ "head": head, "fetched": true })),
                 Ok(head) => ok_resp(req_id, json!({ "head": head })),
-                Err(e) => err_resp(req_id, 500, e),
-            }
-        }
-        "git.fetch" => {
-            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
-                return err_resp(req_id, 400, "Invalid project payload");
-            };
-            let ctx: RemoteContextPayload = serde_json::from_value(params["context"].clone()).unwrap_or_default();
-            apply_remote_context(&exec.data_dir, p.id, &ctx);
-            let repo_dir = PathBuf::from(&p.deploy_dir).join("repo");
-            let branch = p.branch.clone();
-            let repo_url = p.repo_url.clone();
-            let head_res = tokio::task::spawn_blocking(move || {
-                Git::clone_or_fetch(&repo_url, &repo_dir, &branch)?;
-                Git::resolve_head(&repo_dir)
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
-            match head_res {
-                Ok(head) => ok_resp(req_id, json!({ "head": head, "fetched": true })),
                 Err(e) => err_resp(req_id, 500, e),
             }
         }
@@ -1564,7 +1541,6 @@ pub async fn execute_rpc(
                     p.id,
                     p.slug.clone(),
                     p.project_kind.clone(),
-                    p.port.unwrap_or(3000),
                     max_bytes,
                     ttl_secs,
                 )
@@ -2637,11 +2613,10 @@ fn install_shift_unpacked_tree(
 pub fn allocate_free_port_on_node(preferred: Option<u16>, used_ports: &[u16]) -> Result<u16, String> {
     let blocked: HashSet<u16> = used_ports.iter().copied().collect();
     if let Some(pref) = preferred {
-        if pref >= 1024 && !blocked.contains(&pref) {
-            if std::net::TcpListener::bind(("127.0.0.1", pref)).is_ok() {
+        if pref >= 1024 && !blocked.contains(&pref)
+            && std::net::TcpListener::bind(("127.0.0.1", pref)).is_ok() {
                 return Ok(pref);
             }
-        }
     }
     for port in 43000u16..=44999u16 {
         if blocked.contains(&port) {

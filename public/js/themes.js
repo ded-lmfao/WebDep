@@ -9,113 +9,32 @@ import { api, toast } from './api.js';
 export const THEME_STORAGE_KEY = 'webdep.theme';
 export const DEFAULT_THEME_ID = 'midnight-ink';
 
-export const PLATFORM_THEMES = [
-  {
-    id: 'midnight-ink',
-    name: 'Midnight Ink',
-    category: 'Dark • Cobalt',
-    metaColor: '#0b101d',
-    preview: { canvas: '#0b101d', sidebar: '#070b14', card: '#111829', accent: '#4f8ef7', text: '#eef1f7' },
-  },
-  {
-    id: 'obsidian-carbon',
-    name: 'Obsidian Carbon',
-    category: 'OLED • Cyan',
-    metaColor: '#090a0d',
-    preview: { canvas: '#090a0d', sidebar: '#050608', card: '#111318', accent: '#38bdf8', text: '#f1f5f9' },
-  },
-  {
-    id: 'nordic-frost',
-    name: 'Nordic Frost',
-    category: 'Dark • Glacier',
-    metaColor: '#1a1f29',
-    preview: { canvas: '#1a1f29', sidebar: '#131720', card: '#222836', accent: '#88c0d0', text: '#eceff4' },
-  },
-  {
-    id: 'emerald-terminal',
-    name: 'Emerald Terminal',
-    category: 'Dark • Mint',
-    metaColor: '#08110e',
-    preview: { canvas: '#08110e', sidebar: '#050b09', card: '#0e1c17', accent: '#34d399', text: '#ecfdf5' },
-  },
-  {
-    id: 'catppuccin-mocha',
-    name: 'Catppuccin Mocha',
-    category: 'Dark • Mocha',
-    metaColor: '#181825',
-    preview: { canvas: '#181825', sidebar: '#11111b', card: '#1e1e2e', accent: '#89b4fa', text: '#cdd6f4' },
-  },
-  {
-    id: 'tokyo-dusk',
-    name: 'Tokyo Dusk',
-    category: 'Dark • Indigo',
-    metaColor: '#131521',
-    preview: { canvas: '#131521', sidebar: '#0d0f18', card: '#1a1d2d', accent: '#7aa2f7', text: '#c0caf5' },
-  },
-  {
-    id: 'gruvbox-warm',
-    name: 'Gruvbox Warm',
-    category: 'Dark • Amber',
-    metaColor: '#1b1917',
-    preview: { canvas: '#1b1917', sidebar: '#141210', card: '#24211e', accent: '#e09f3e', text: '#ebdbb2' },
-  },
-  {
-    id: 'crimson-ember',
-    name: 'Crimson Ember',
-    category: 'Dark • Rose',
-    metaColor: '#120c0e',
-    preview: { canvas: '#120c0e', sidebar: '#0b0708', card: '#1b1215', accent: '#fb7185', text: '#f8eff1' },
-  },
-  {
-    id: 'daylight-crisp',
-    name: 'Daylight Crisp',
-    category: 'Light • Sapphire',
-    metaColor: '#f3f6fb',
-    preview: { canvas: '#f3f6fb', sidebar: '#e9eef6', card: '#ffffff', accent: '#2563eb', text: '#0f172a' },
-  },
-  {
-    id: 'paper-espresso',
-    name: 'Paper Pine',
-    category: 'Light • Forest',
-    metaColor: '#f4f1ea',
-    preview: { canvas: '#f4f1ea', sidebar: '#eae5da', card: '#fcfbf7', accent: '#15803d', text: '#1c1917' },
-  },
-  {
-    id: 'sage-mist',
-    name: 'Sage Mist',
-    category: 'Dark • Soft Sage',
-    metaColor: '#1b201d',
-    preview: { canvas: '#1b201d', sidebar: '#161a17', card: '#222925', accent: '#8fb39b', text: '#d6ddd7' },
-  },
-  {
-    id: 'lavender-dusk',
-    name: 'Lavender Dusk',
-    category: 'Dark • Soft Violet',
-    metaColor: '#1c1b22',
-    preview: { canvas: '#1c1b22', sidebar: '#17161c', card: '#24232c', accent: '#a99bd6', text: '#dcd9e6' },
-  },
-  {
-    id: 'harbor-slate',
-    name: 'Harbor Slate',
-    category: 'Dark • Soft Teal',
-    metaColor: '#192127',
-    preview: { canvas: '#192127', sidebar: '#141b20', card: '#202a31', accent: '#7fb4bf', text: '#d3dee3' },
-  },
-  {
-    id: 'cocoa-ember',
-    name: 'Cocoa Ember',
-    category: 'Dark • Soft Amber',
-    metaColor: '#1f1b18',
-    preview: { canvas: '#1f1b18', sidebar: '#191613', card: '#28231f', accent: '#d1a774', text: '#e3dbd2' },
-  },
-  {
-    id: 'soft-linen',
-    name: 'Soft Linen',
-    category: 'Light • Dimmed',
-    metaColor: '#e7e2d8',
-    preview: { canvas: '#e7e2d8', sidebar: '#ddd7cb', card: '#efebe3', accent: '#4f7f7a', text: '#38342f' },
-  },
+// [id, name, category, [canvas, sidebar, card, accent, text]]; the browser bar uses the canvas colour.
+const THEME_ROWS = [
+  ['midnight-ink', 'Midnight Ink', 'Dark • Cobalt', ['#0b101d', '#070b14', '#111829', '#4f8ef7', '#eef1f7']],
+  ['obsidian-carbon', 'Obsidian Carbon', 'OLED • Cyan', ['#090a0d', '#050608', '#111318', '#38bdf8', '#f1f5f9']],
+  ['nordic-frost', 'Nordic Frost', 'Dark • Glacier', ['#1a1f29', '#131720', '#222836', '#88c0d0', '#eceff4']],
+  ['emerald-terminal', 'Emerald Terminal', 'Dark • Mint', ['#08110e', '#050b09', '#0e1c17', '#34d399', '#ecfdf5']],
+  ['catppuccin-mocha', 'Catppuccin Mocha', 'Dark • Mocha', ['#181825', '#11111b', '#1e1e2e', '#89b4fa', '#cdd6f4']],
+  ['tokyo-dusk', 'Tokyo Dusk', 'Dark • Indigo', ['#131521', '#0d0f18', '#1a1d2d', '#7aa2f7', '#c0caf5']],
+  ['gruvbox-warm', 'Gruvbox Warm', 'Dark • Amber', ['#1b1917', '#141210', '#24211e', '#e09f3e', '#ebdbb2']],
+  ['crimson-ember', 'Crimson Ember', 'Dark • Rose', ['#120c0e', '#0b0708', '#1b1215', '#fb7185', '#f8eff1']],
+  ['daylight-crisp', 'Daylight Crisp', 'Light • Sapphire', ['#f3f6fb', '#e9eef6', '#ffffff', '#2563eb', '#0f172a']],
+  ['paper-espresso', 'Paper Pine', 'Light • Forest', ['#f4f1ea', '#eae5da', '#fcfbf7', '#15803d', '#1c1917']],
+  ['sage-mist', 'Sage Mist', 'Dark • Soft Sage', ['#1b201d', '#161a17', '#222925', '#8fb39b', '#d6ddd7']],
+  ['lavender-dusk', 'Lavender Dusk', 'Dark • Soft Violet', ['#1c1b22', '#17161c', '#24232c', '#a99bd6', '#dcd9e6']],
+  ['harbor-slate', 'Harbor Slate', 'Dark • Soft Teal', ['#192127', '#141b20', '#202a31', '#7fb4bf', '#d3dee3']],
+  ['cocoa-ember', 'Cocoa Ember', 'Dark • Soft Amber', ['#1f1b18', '#191613', '#28231f', '#d1a774', '#e3dbd2']],
+  ['soft-linen', 'Soft Linen', 'Light • Dimmed', ['#e7e2d8', '#ddd7cb', '#efebe3', '#4f7f7a', '#38342f']],
 ];
+
+export const PLATFORM_THEMES = THEME_ROWS.map(([id, name, category, [canvas, sidebar, card, accent, text]]) => ({
+  id,
+  name,
+  category,
+  metaColor: canvas,
+  preview: { canvas, sidebar, card, accent, text },
+}));
 
 export function resolveTheme(themeId) {
   const clean = String(themeId || '').trim().toLowerCase();

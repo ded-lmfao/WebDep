@@ -148,6 +148,9 @@ export function renderServicesList() {
     if (pid != null) resByProjId.set(pid, r);
   }
 
+  // Cards already on screen (return visit, background refresh) must not be faded in again:
+  // the view itself fades in on navigation, and re-animating them looked like a second load.
+  const hadCards = Boolean(container.querySelector('.project-card'));
   setHtmlIfChanged(container, filtered.map((p) => {
     const isOnline = p.app_status === 'running' || p.status?.running;
     const isBuilding = p.deployStatus?.status === 'in_progress' || p.deployStatus?.status === 'building';
@@ -265,7 +268,7 @@ export function renderServicesList() {
   }).join(''));
 
   filtered.forEach(syncServiceCardPipeline);
-  if (consumePendingViewStagger('services')) {
+  if (consumePendingViewStagger('services') && !hadCards) {
     staggerElements(container.querySelectorAll('.project-card'), { y: 12 });
   }
 }

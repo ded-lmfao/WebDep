@@ -9,7 +9,7 @@
 
 **WebDep** is a self-contained hosting, deployment, and multi-server fleet orchestrator compiled into a **single static binary** with embedded frontend assets (`rust-embed`). It combines an async control plane (**Web-Core**), lightweight worker agents (**Web-Node**), Git deployment pipelines, automated Caddy HTTPS, live SSE telemetry, an AES-256-GCM encrypted `.env` vault, managed PostgreSQL clusters, and direct node-to-node live app shifting—without Docker or external orchestration clutter.
 
-On first boot, **Web-Core** automatically initializes a zero-config control PostgreSQL cluster (`data/control-pg/` on port `5431`, or uses your external `DATABASE_URL`) and imports legacy `data/webdep.sqlite` data if present. **Web-Node** workers require **zero PostgreSQL**—they connect outbound to Web-Core over WebSocket and store only their local manifest in `data/node-state.json`.
+On first boot, **Web-Core** automatically initializes a zero-config control PostgreSQL cluster (`data/control-pg/` on port `5431`, or the next free port below it; or your external `DATABASE_URL`). Upgrading from WebDep 2.x? The old `data/webdep.sqlite` is imported once, automatically — see [Upgrading from 2.x](#upgrading-from-2x-sqlite--postgresql). **Web-Node** workers require **zero PostgreSQL**—they connect outbound to Web-Core over WebSocket and store only their local manifest in `data/node-state.json`.
 
 ---
 
@@ -237,8 +237,11 @@ Move a website or backend service from one VPS to another directly from its work
 | **Websites** | Multi-framework web apps placed on any node with auto-allocated ports, custom domains, Caddy HTTPS, and maintenance mode. |
 | **Services** | 24/7 background daemons (Lavalink/Java, Python workers, Node bots, Go/Rust binaries) with live PID tracking and log streaming. |
 | **Databases** | Isolated native PostgreSQL clusters on any node with SCRAM-SHA-256 auth, local/mesh/CIDR/public rules, and 1-click `DATABASE_URL` linking. |
-| **Nodes** | Cluster Nodes & Mesh Topology view with node telemetry, `+ Add Node` token/command generator, drain/evacuate, and `Update Fleet`. |
-| **Platform Settings** | WebAuthn Passkeys, TOTP 2FA, User Accounts & Permissions, GitHub tokens, SHA-256 verified Core/Fleet updates, server cache/restart controls, and theme settings. |
+| **Nodes** | Cluster Nodes & Mesh Topology view with per-node network charts, display names, `+ Add Node` token/command generator, drain/evacuate, and `Update Fleet`. |
+| **Modules** | Per-VPS runtime readiness (Git, Node.js, Python, Java, Go, Rust, PHP, Ruby, .NET, UnRAR) with one-click install/remove through the server's package manager (Main Admin only). |
+| **Platform Settings** | WebAuthn Passkeys, TOTP 2FA, users with simple access levels (Viewer / Developer / Full access / Custom) and per-website scope, GitHub tokens, SHA-256 verified Core/Fleet updates, server cache/restart controls, and 15 themes. |
+
+The panel is fully responsive: on phones and tablets the sidebar becomes a drawer with a bottom tab bar, and data tables turn into compact cards.
 
 ### Website & Service Workspace Tabs
 Opening any website or service exposes its workspace toolbar (**Start / Stop / Restart**, **Deploy**, **Move Node**) and tab bar:
@@ -249,6 +252,44 @@ Opening any website or service exposes its workspace toolbar (**Start / Stop / R
 - **Environment** — AES-256-GCM encrypted `.env` Vault secrets and linked database bindings.
 - **Releases** — Build archives, local snapshots, **Save Off-Node on Web-Core**, and **Restore to Node**.
 - **Activity** — Workload audit trail and placement/shift events.
+
+### Data Layout
+
+Everything WebDep stores lives under `DATA_DIR` (default `./data` inside the install folder; the service log prints `Data directory: ...` on start):
+
+| Path | Contents |
+| :--- | :--- |
+| `control-pg/pgdata/` | Web-Core's own PostgreSQL database (users, projects, deployments, settings, nodes). `control-pg/conn.json` holds its port and credentials. |
+| `master.key` | Key for the encrypted `.env` vault. **Back it up together with `control-pg/`** — without it stored secrets cannot be decrypted. |
+| `databases/db-<id>/data/` | Each managed PostgreSQL database created in the panel. |
+| `containers/<app>/`, `sites/`, `services/` | App runtime data and deployed code. |
+| `caddy/`, `mesh/`, `keys/` | Reverse-proxy config and certificates, WireGuard mesh, deploy keys. |
+
+Do not copy these folders while PostgreSQL is running; use panel backups or stop WebDep first.
+
+### Upgrading from 2.x (SQLite → PostgreSQL)
+
+On the first 3.x start, Web-Core imports `data/webdep.sqlite` into PostgreSQL in a single transaction (the SQLite file is opened read-only). If the import fails, WebDep stops without changing anything; fix the cause and restart, or retry with `webdep --import-sqlite`. It never imports twice.
+
+To confirm the import and retire the old file, compare row counts on the server (from the install folder):
+
+```bash
+C=data/control-pg/conn.json
+PGPASSWORD=$(python3 -c "import json;print(json.load(open('$C'))['password'])") psql -h 127.0.0.1   -p $(python3 -c "import json;print(json.load(open('$C'))['port'])") -U webdep_core -d webdep_core   -c "SELECT (SELECT count(*) FROM users) users, (SELECT count(*) FROM projects) projects, (SELECT count(*) FROM databases) dbs, (SELECT count(*) FROM deployments) deployments;"
+python3 -c "import sqlite3; c=sqlite3.connect('file:data/webdep.sqlite?mode=ro', uri=True); print({t: c.execute(f'select count(*) from {t}').fetchone()[0] for t in ['users','projects','databases','deployments']})"
+```
+
+When PostgreSQL shows at least the SQLite numbers, move `data/webdep.sqlite*` out of `data/`, restart and check the panel, then delete the old files.
+
+### Running as a Non-Root User (Ubuntu)
+
+If the service runs as a regular user (for example `ubuntu`), systemd-logind deletes that user's shared memory when their last SSH session ends (`RemoveIPC=yes`). The control PostgreSQL then refuses new connections (`could not open shared memory segment`) and WebDep fails on its next restart. Disable it once per server:
+
+```bash
+sudo sed -i 's/^#\?RemoveIPC=.*/RemoveIPC=no/' /etc/systemd/logind.conf && sudo systemctl restart systemd-logind
+```
+
+If it already happened: `sudo systemctl stop webdep-core`, stop the stale server with `pg_ctl -D data/control-pg/pgdata -m fast stop` (as the service user), then start WebDep again. Services running as `root` are not affected.
 
 ---
 
@@ -309,7 +350,7 @@ WebDep loads configuration from `.env` in the process's current working director
 
 ## Automated Releases (CI/CD)
 
-Pushes to `main` build static `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` binaries via [`.github/workflows/release.yml`](.github/workflows/release.yml) and publish SemVer releases (`vX.Y.Z`):
+Pushes to `main` run the Rust test suite, a frontend syntax check and the SonarCloud quality gate, then build static `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` binaries plus a Windows `x86_64` binary via [`.github/workflows/release.yml`](.github/workflows/release.yml) and publish SemVer releases (`vX.Y.Z`). A release is only cut when the quality gate passes:
 
 - **Default commit** → bumps **`patch`** (`v2.0.0` → `v2.0.1`)
 - **`[minor]` / `minor:`** in commit message → bumps **`minor`** (`v2.0.1` → `v2.1.0`)
@@ -322,17 +363,16 @@ Pushes to `main` build static `x86_64-unknown-linux-musl` and `aarch64-unknown-l
 
 ```bash
 # Run all Rust unit and integration tests
-cargo test --locked --offline
+cargo test --locked
 
-# Type-check without a full release build
-cargo check --all-targets --locked --offline
+# Lints (keep this clean; CI's SonarCloud gate blocks releases on new issues)
+cargo clippy --tests
 
-# Verify frontend module syntax
-node --check public/app.js
-node --check public/js/cluster.js
-node --check public/js/releases.js
-node --check public/js/workspace.js
+# Verify every frontend module's syntax (same check as CI)
+for f in public/app.js public/js/*.js; do node --check "$f"; done
 ```
+
+PostgreSQL-backed tests start a throwaway cluster automatically when PostgreSQL binaries are installed, or use `WEBDEP_TEST_DATABASE_URL` if set.
 
 ---
 

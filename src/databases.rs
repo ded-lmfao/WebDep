@@ -246,11 +246,6 @@ impl Databases {
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn list(&self) -> Result<Vec<ManagedDatabase>, String> {
-        self.query_databases(None, true).await
-    }
-
     pub async fn list_with_secrets(&self, include_secrets: bool) -> Result<Vec<ManagedDatabase>, String> {
         self.query_databases(None, include_secrets).await
     }

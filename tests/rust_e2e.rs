@@ -14,7 +14,7 @@ mod tests {
             key[i] = i as u8;
         }
         let key_path = temp_dir.join("master.key");
-        fs::write(&key_path, hex::encode(&key)).unwrap();
+        fs::write(&key_path, hex::encode(key)).unwrap();
 
         let hex_read = fs::read_to_string(&key_path).unwrap();
         let decoded = hex::decode(hex_read.trim()).unwrap();

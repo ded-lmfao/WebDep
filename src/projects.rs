@@ -231,52 +231,23 @@ impl Projects {
     }
 
     pub async fn delete(&self, id: i64) -> Result<(), sqlx::Error> {
+        // Detach and remove everything that references the project; each step is best-effort so
+        // one missing table row never blocks the delete. The project row itself must go.
+        const CLEANUP: &[&str] = &[
+            "UPDATE projects SET current_release_id = NULL WHERE id = $1",
+            "UPDATE deployments SET release_id = NULL, from_release_id = NULL WHERE project_id = $1",
+            "DELETE FROM logs WHERE project_id = $1",
+            "DELETE FROM backups WHERE project_id = $1",
+            "DELETE FROM deployments WHERE project_id = $1",
+            "DELETE FROM releases WHERE project_id = $1",
+            "DELETE FROM project_env WHERE project_id = $1",
+            "DELETE FROM project_keys WHERE project_id = $1",
+            "DELETE FROM audit WHERE project_id = $1 AND action != 'website.delete'",
+        ];
         let mut tx = self.db.begin().await?;
-        sqlx::query("UPDATE projects SET current_release_id = NULL WHERE id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
-        sqlx::query("UPDATE deployments SET release_id = NULL, from_release_id = NULL WHERE project_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM logs WHERE project_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM backups WHERE project_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM deployments WHERE project_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM releases WHERE project_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM project_env WHERE project_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM project_keys WHERE project_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM audit WHERE project_id = $1 AND action != 'website.delete'")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .ok();
+        for sql in CLEANUP {
+            sqlx::query(sql).bind(id).execute(&mut *tx).await.ok();
+        }
         sqlx::query("DELETE FROM projects WHERE id = $1")
             .bind(id)
             .execute(&mut *tx)
