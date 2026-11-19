@@ -43,6 +43,14 @@ pub(crate) async fn login_handler(
 
     let Some((user, hash)) = state.auth.get_user_by_username(payload.username.trim()).await else {
         state.auth.record_failure(&uname_key);
+        // Explain only to someone who knows the request's password.
+        match super::accounts::request_status_for_login(&state, &payload.username, &payload.password).await.as_deref() {
+            Some("pending") => {
+                return Err((StatusCode::FORBIDDEN, "Your account request is waiting for admin approval.".to_string()))
+            }
+            Some("rejected") => return Err((StatusCode::FORBIDDEN, "Your account request was declined.".to_string())),
+            _ => {}
+        }
         return Err((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()));
     };
 
@@ -306,7 +314,7 @@ pub(crate) async fn change_password_handler(
     let next_hash = hash_password(&payload.next)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to hash password".to_string()))?;
 
-    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+    sqlx::query("UPDATE users SET password_hash = $1, must_change_password = FALSE WHERE id = $2")
         .bind(&next_hash)
         .bind(user.id)
         .execute(&state.db)

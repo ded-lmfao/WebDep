@@ -9,6 +9,8 @@ pub mod logs;
 pub mod system;
 pub mod databases;
 pub mod users;
+pub mod access;
+pub mod accounts;
 
 pub use common::AppState;
 
@@ -19,7 +21,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::StatusCode,
     middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use tower_http::compression::CompressionLayer;
@@ -57,6 +59,8 @@ use self::logs::*;
 use self::system::*;
 use self::databases::*;
 use self::users::*;
+use self::access::*;
+use self::accounts::*;
 use self::common::{axum_static_fallback, security_middleware};
 
 pub fn create_router(state: AppState) -> Router {
@@ -160,6 +164,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/users", get(list_users_handler).post(create_user_handler))
         .route("/api/users/:id", put(update_user_handler).patch(update_user_handler).delete(delete_user_handler))
         .route("/api/users/:id/reset-2fa", post(admin_reset_user_2fa_handler))
+        // Account requests and per-app access
+        .route("/api/auth/registration", get(registration_status_handler))
+        .route("/api/auth/register", post(register_handler))
+        .route("/api/auth/profile", patch(update_profile_handler).put(update_profile_handler))
+        .route("/api/requests", get(list_requests_handler))
+        .route("/api/requests/:id", delete(delete_request_handler))
+        .route("/api/requests/:id/approve", post(approve_request_handler))
+        .route("/api/requests/:id/reject", post(reject_request_handler))
+        .route("/api/access/:scope/:id", get(get_app_access_handler))
+        .route("/api/access/:scope/:id/:user_id", put(set_app_access_handler).delete(remove_app_access_handler))
         // Multi-Node Cluster Mesh & Enrollment
         .route("/api/cluster/enroll", post(enroll_node_handler))
         .route("/api/cluster/node-ws", get(node_ws_handler))

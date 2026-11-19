@@ -17,6 +17,40 @@ use crate::db::DbPool;
 pub const ALL_POWERS: &str = "*";
 const LEGACY_MIGRATION_META_KEY: &str = "legacy_grants_migrated_at";
 
+/// Panel powers an admin (or a delegate holding them) can hand out from the user editor.
+pub const PANEL_ACCOUNT_POWERS: &[&str] = &["users_view", "users_create", "users_edit", "requests_review"];
+/// Powers a website or service grant may hold.
+pub const PROJECT_POWERS: &[&str] = &[
+    "logs", "files", "files_write", "deploy", "process", "backups", "env", "domains",
+    "projects_manage", "services_manage", "activity", "access_manage",
+];
+/// Powers a database grant may hold.
+pub const DATABASE_POWERS: &[&str] = &["databases", "env", "databases_manage", "activity", "access_manage"];
+
+/// Checklist shown for one kind of app, in display order.
+pub fn kind_catalog(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "website" => &[
+            "logs", "files", "files_write", "deploy", "process", "backups", "env", "domains",
+            "projects_manage", "activity", "access_manage",
+        ],
+        "service" => &[
+            "logs", "files", "files_write", "deploy", "process", "backups", "env",
+            "services_manage", "activity", "access_manage",
+        ],
+        "database" | "all-databases" => DATABASE_POWERS,
+        _ => PROJECT_POWERS,
+    }
+}
+
+pub fn catalog(scope: &str) -> &'static [&'static str] {
+    match scope {
+        SCOPE_PROJECT => PROJECT_POWERS,
+        SCOPE_DATABASE => DATABASE_POWERS,
+        _ => PANEL_ACCOUNT_POWERS,
+    }
+}
+
 pub const SCOPE_GLOBAL: &str = "global";
 pub const SCOPE_PROJECT: &str = "project";
 pub const SCOPE_DATABASE: &str = "database";
@@ -41,7 +75,48 @@ fn scoped_has_any(map: &HashMap<Option<i64>, HashSet<String>>, id: i64, powers: 
         .any(|set| set_has_any(set, powers))
 }
 
+/// JSON shape: `{"panel": [...], "projects": {"*": [...], "12": [...]}, "databases": {...}}`
+/// where `"*"` is the every-app grant.
+impl serde::Serialize for Grants {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        fn sorted(set: &HashSet<String>) -> Vec<&String> {
+            let mut v: Vec<&String> = set.iter().collect();
+            v.sort();
+            v
+        }
+        fn scoped(map: &HashMap<Option<i64>, HashSet<String>>) -> std::collections::BTreeMap<String, Vec<&String>> {
+            map.iter()
+                .map(|(k, v)| (k.map_or_else(|| ALL_POWERS.to_string(), |id| id.to_string()), sorted(v)))
+                .collect()
+        }
+        let mut m = ser.serialize_map(Some(3))?;
+        m.serialize_entry("panel", &sorted(&self.panel))?;
+        m.serialize_entry("projects", &scoped(&self.projects))?;
+        m.serialize_entry("databases", &scoped(&self.databases))?;
+        m.end()
+    }
+}
+
 impl Grants {
+    /// Every power held on one app (its own grant plus the every-app grant), or `None`
+    /// when the user has no grant reaching it.
+    pub fn powers_on(&self, scope: &str, id: Option<i64>) -> Option<HashSet<String>> {
+        let map = match scope {
+            SCOPE_PROJECT => &self.projects,
+            SCOPE_DATABASE => &self.databases,
+            _ => return Some(self.panel.clone()),
+        };
+        let mut out: Option<HashSet<String>> = None;
+        let keys = if id.is_some() { vec![id, None] } else { vec![None] };
+        for key in &keys {
+            if let Some(set) = map.get(key) {
+                out.get_or_insert_with(HashSet::new).extend(set.iter().cloned());
+            }
+        }
+        out
+    }
+
     pub fn panel_has_any(&self, powers: &[&str]) -> bool {
         set_has_any(&self.panel, powers)
     }
@@ -158,6 +233,83 @@ pub async fn load(db: &DbPool, user_id: i64) -> Result<Grants, sqlx::Error> {
     Ok(out)
 }
 
+/// Loads unexpired grants of every user, keyed by user id.
+pub async fn load_all(db: &DbPool) -> Result<HashMap<i64, Grants>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT user_id, scope_type, scope_id, powers_json FROM access_grants
+         WHERE expires_at IS NULL OR expires_at > $1",
+    )
+    .bind(now_ms())
+    .fetch_all(db)
+    .await?;
+    let mut out: HashMap<i64, Grants> = HashMap::new();
+    for row in rows {
+        let g = out.entry(row.try_get(0)?).or_default();
+        let scope_id: Option<i64> = row.try_get(2)?;
+        let powers = parse_legacy_permissions(&row.try_get::<String, _>(3)?);
+        match row.try_get::<String, _>(1)?.as_str() {
+            SCOPE_GLOBAL => g.panel.extend(powers),
+            SCOPE_PROJECT => g.projects.entry(scope_id).or_default().extend(powers),
+            SCOPE_DATABASE => g.databases.entry(scope_id).or_default().extend(powers),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Creates or replaces one grant row (`scope_id` NULL = every app of that scope, or the
+/// panel for `global`).
+pub async fn upsert(
+    db: &DbPool,
+    user_id: i64,
+    scope: &str,
+    scope_id: Option<i64>,
+    powers: &[String],
+    granted_by: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    let mut sorted: Vec<&String> = powers.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+    let ts = now_ms();
+    sqlx::query(
+        "INSERT INTO access_grants(user_id, scope_type, scope_id, role_preset, powers_json, granted_by, created_at, updated_at)
+         VALUES($1, $2, $3, 'custom', $4, $5, $6, $6)
+         ON CONFLICT (user_id, scope_type, COALESCE(scope_id, 0))
+         DO UPDATE SET powers_json = EXCLUDED.powers_json, granted_by = EXCLUDED.granted_by, updated_at = EXCLUDED.updated_at",
+    )
+    .bind(user_id)
+    .bind(scope)
+    .bind(scope_id)
+    .bind(serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".into()))
+    .bind(granted_by)
+    .bind(ts)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn remove(db: &DbPool, user_id: i64, scope: &str, scope_id: Option<i64>) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
+        "DELETE FROM access_grants WHERE user_id = $1 AND scope_type = $2 AND scope_id IS NOT DISTINCT FROM $3",
+    )
+    .bind(user_id)
+    .bind(scope)
+    .bind(scope_id)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Drops grants that point at deleted apps.
+pub async fn remove_for_app(db: &DbPool, scope: &str, scope_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM access_grants WHERE scope_type = $1 AND scope_id = $2")
+        .bind(scope)
+        .bind(scope_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Replaces every grant of `user_id` with `grants`. Run inside a transaction.
 pub async fn replace(
     conn: &mut PgConnection,
@@ -189,8 +341,8 @@ pub async fn replace(
     Ok(())
 }
 
-/// Rebuilds a user's grants from legacy permission JSON (used while the user editor still
-/// speaks the legacy format).
+/// Rebuilds a user's grants from legacy permission JSON (test fixtures).
+#[cfg(test)]
 pub async fn replace_from_legacy_json(
     db: &DbPool,
     user_id: i64,

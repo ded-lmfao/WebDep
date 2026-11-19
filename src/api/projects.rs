@@ -468,6 +468,8 @@ pub(crate) async fn delete_project_handler(
         .delete(id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = crate::auth::grants::remove_for_app(&state.db, crate::auth::grants::SCOPE_PROJECT, id).await;
+    state.auth.invalidate_sessions();
 
     if let Some(ref p) = deleted_proj {
         if resolve_remote_node(&state, p.node_id).await?.is_some() {

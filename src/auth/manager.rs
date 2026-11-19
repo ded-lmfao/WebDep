@@ -8,7 +8,7 @@ use crate::db::DbPool;
 use super::password::{constant_time_eq, hash_password, random_token, verify_password};
 use super::session::Session;
 use super::totp::{sync_real_utc_offset, verify_totp_code};
-use super::user::User;
+use super::user::{User, USER_COLUMNS};
 
 pub const ACCESS_REVOKE_CHANNEL: &str = "webdep_access_revoke";
 
@@ -355,9 +355,7 @@ impl Auth {
     }
 
     pub async fn get_user_by_id(&self, id: i64) -> Option<User> {
-        let row = sqlx::query(
-            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at FROM users WHERE id = $1",
-        )
+        let row = sqlx::query(&format!("SELECT {USER_COLUMNS} FROM users WHERE id = $1"))
         .bind(id)
         .fetch_optional(&self.db)
         .await
@@ -377,7 +375,7 @@ impl Auth {
     /// Main admin needs no grant rows. A load failure denies (returns None) rather than
     /// silently authorizing with empty grants.
     async fn load_grants(&self, user: &User) -> Option<super::grants::Grants> {
-        if user.is_main_admin {
+        if user.is_admin {
             return Some(Default::default());
         }
         match super::grants::load(&self.db, user.id).await {
@@ -389,16 +387,19 @@ impl Auth {
         }
     }
 
+    /// Every user with their grants (for the admin user list).
     pub async fn list_users(&self) -> Result<Vec<User>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at FROM users ORDER BY id ASC",
-        )
-        .fetch_all(&self.db)
-        .await?;
+        let rows = sqlx::query(&format!("SELECT {USER_COLUMNS} FROM users ORDER BY id ASC"))
+            .fetch_all(&self.db)
+            .await?;
+        let mut all_grants = super::grants::load_all(&self.db).await?;
 
         let mut list = Vec::with_capacity(rows.len());
         for row in rows {
             let mut u = User::from_pg_row(&row)?;
+            if !u.is_admin {
+                u.grants = all_grants.remove(&u.id).unwrap_or_default();
+            }
             u.presence = if u.disabled {
                 "offline".to_string()
             } else {
@@ -409,19 +410,22 @@ impl Auth {
         Ok(list)
     }
 
-    pub async fn get_user_by_username(&self, username: &str) -> Option<(User, String)> {
-        let row = sqlx::query(
-            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at, password_hash
-             FROM users WHERE LOWER(username) = LOWER($1)",
-        )
-        .bind(username)
+    /// Looks a user up by username or email (case-insensitive) and returns the password hash.
+    /// The returned user carries no grants: load it by id before authorizing.
+    pub async fn get_user_by_username(&self, login: &str) -> Option<(User, String)> {
+        let row = sqlx::query(&format!(
+            "SELECT {USER_COLUMNS}, password_hash FROM users
+             WHERE LOWER(username) = LOWER($1) OR (email IS NOT NULL AND LOWER(email) = LOWER($1))
+             ORDER BY (LOWER(username) = LOWER($1)) DESC LIMIT 1"
+        ))
+        .bind(login)
         .fetch_optional(&self.db)
         .await
         .ok()
         .flatten()?;
 
         let user = User::from_pg_row(&row).ok()?;
-        let hash: String = row.try_get(7).ok()?;
+        let hash: String = row.try_get(12).ok()?;
         Some((user, hash))
     }
 
@@ -531,10 +535,7 @@ impl Auth {
         }
 
         let row = sqlx::query(
-            "SELECT s.id, s.user_id, s.expires_at, s.last_active_at, s.csrf_token, u.username, u.disabled, u.permissions, u.allowed_projects, COALESCE(u.totp_enabled, FALSE), u.created_at
-             FROM sessions s
-             JOIN users u ON u.id = s.user_id
-             WHERE s.id = $1 AND s.expires_at > $2",
+            "SELECT id, user_id, expires_at, last_active_at, csrf_token FROM sessions WHERE id = $1 AND expires_at > $2",
         )
         .bind(session_id)
         .bind(now_s as i64)
@@ -550,22 +551,8 @@ impl Auth {
             last_active_at: row.try_get(3).ok()?,
             csrf_token: row.try_get(4).ok()?,
         };
-        let disabled_bool: bool = row.try_get::<Option<bool>, _>(6).ok().flatten().unwrap_or(false);
-        let totp_bool: bool = row.try_get::<Option<bool>, _>(9).ok().flatten().unwrap_or(false);
-        let user = User::from_db(
-            session.user_id,
-            row.try_get(5).ok()?,
-            if disabled_bool { 1 } else { 0 },
-            row.try_get::<Option<String>, _>(7).ok().flatten().unwrap_or_else(|| "[\"*\"]".into()),
-            row.try_get::<Option<String>, _>(8).ok().flatten().unwrap_or_else(|| "[\"*\"]".into()),
-            if totp_bool { 1 } else { 0 },
-            row.try_get(10).ok()?,
-        );
-
-        let mut user = user;
-        if !user.disabled {
-            user.grants = self.load_grants(&user).await?;
-        }
+        // Loads profile and grants; a grant load failure denies the session.
+        let user = self.get_user_by_id(session.user_id).await?;
         let mut valid = (!user.disabled).then_some((session, user))?;
         if self.is_idle_expired(valid.0.last_active_at, now_s) {
             self.delete_session(session_id).await;

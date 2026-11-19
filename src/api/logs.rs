@@ -469,7 +469,7 @@ pub(crate) async fn audit_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        let can_global = u.is_main_admin || u.has_power("settings_manage");
+        let can_global = u.has_power("settings_manage");
         for row in rows {
             if let Ok(r) = pg_row_to_audit_item(&row, None) {
                 match r.project_id {

@@ -105,7 +105,7 @@ pub async fn verify_cross_node_shift_rbac(
             "Insufficient project permission to shift workload".to_string(),
         ));
     }
-    if user.is_main_admin {
+    if user.is_admin {
         return Ok(());
     }
     let _ = target_node_id;

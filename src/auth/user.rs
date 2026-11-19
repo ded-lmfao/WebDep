@@ -23,11 +23,30 @@ pub struct User {
     #[serde(default = "default_presence")]
     pub presence: String,
     pub created_at: i64,
-    /// Authorization source of truth, loaded from `access_grants` for session users.
-    /// Users loaded for display (lists, lookups) carry no grants.
-    #[serde(skip)]
+    #[serde(default)]
+    pub email: String,
+    #[serde(rename = "displayName", default)]
+    pub display_name: String,
+    /// `admin` or `user`. Admins (and the main admin) bypass every permission check.
+    #[serde(default = "default_role")]
+    pub role: String,
+    #[serde(rename = "isAdmin", default)]
+    pub is_admin: bool,
+    #[serde(rename = "mustChangePassword", default)]
+    pub must_change_password: bool,
+    #[serde(rename = "lastLoginAt", default)]
+    pub last_login_at: Option<i64>,
+    /// Authorization source of truth, loaded from `access_grants`.
+    #[serde(rename = "access", skip_deserializing)]
     pub grants: Grants,
 }
+
+fn default_role() -> String {
+    "user".to_string()
+}
+
+/// Column list every user query selects, in the order `from_pg_row` reads.
+pub const USER_COLUMNS: &str = "id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at,      COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), COALESCE(must_change_password, FALSE), last_login_at";
 
 impl User {
     pub fn from_db(
@@ -61,6 +80,12 @@ impl User {
             totp_enabled: totp_enabled_int != 0,
             presence: default_presence(),
             created_at,
+            email: String::new(),
+            display_name: String::new(),
+            role: if is_main_admin { "admin".into() } else { default_role() },
+            is_admin: is_main_admin,
+            must_change_password: false,
+            last_login_at: None,
             grants: Grants::default(),
         }
     }
@@ -69,7 +94,7 @@ impl User {
         use sqlx::Row;
         let disabled_bool: bool = r.try_get::<Option<bool>, _>(2)?.unwrap_or(false);
         let totp_bool: bool = r.try_get::<Option<bool>, _>(5)?.unwrap_or(false);
-        Ok(Self::from_db(
+        let mut u = Self::from_db(
             r.try_get(0)?,
             r.try_get(1)?,
             if disabled_bool { 1 } else { 0 },
@@ -77,7 +102,17 @@ impl User {
             r.try_get::<Option<String>, _>(4)?.unwrap_or_else(|| "[\"*\"]".into()),
             if totp_bool { 1 } else { 0 },
             r.try_get(6)?,
-        ))
+        );
+        u.email = r.try_get(7)?;
+        u.display_name = r.try_get(8)?;
+        let role: String = r.try_get(9)?;
+        if !u.is_main_admin {
+            u.is_admin = role == "admin";
+            u.role = role;
+        }
+        u.must_change_password = !u.is_main_admin && r.try_get::<bool, _>(10)?;
+        u.last_login_at = r.try_get(11)?;
+        Ok(u)
     }
 
     pub fn is_main_admin_identity(id: i64, username: &str) -> bool {
@@ -97,21 +132,21 @@ impl User {
 
     /// Panel-level powers (not tied to one app).
     pub fn has_any_power(&self, powers: &[&str]) -> bool {
-        self.is_main_admin || self.grants.panel_has_any(powers)
+        self.is_admin || self.grants.panel_has_any(powers)
     }
 
     pub fn can_access_project(&self, project_id: i64) -> bool {
-        self.is_main_admin || self.grants.can_access_project(project_id)
+        self.is_admin || self.grants.can_access_project(project_id)
     }
 
     pub fn has_project_power(&self, project_id: i64, powers: &[&str]) -> bool {
-        self.is_main_admin || self.grants.project_has_any(project_id, powers)
+        self.is_admin || self.grants.project_has_any(project_id, powers)
     }
 
     /// Database powers come from a grant on the database itself or, for a database linked
     /// to a website/service, from the user's grant on that project.
     pub fn has_database_power(&self, database_id: i64, linked_project_id: Option<i64>, powers: &[&str]) -> bool {
-        self.is_main_admin
+        self.is_admin
             || self.grants.database_has_any(database_id, powers)
             || linked_project_id.is_some_and(|pid| self.grants.project_has_any(pid, powers))
     }

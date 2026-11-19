@@ -114,6 +114,8 @@ pub(crate) async fn security_middleware(
 
         if is_api {
             let is_public_auth = path == "/api/auth/login"
+                || path == "/api/auth/register"
+                || (path == "/api/auth/registration" && *req.method() == Method::GET)
                 || path == "/api/auth/2fa/verify-login"
                 || path == "/api/auth/passkeys/login/start"
                 || path == "/api/auth/passkeys/login/finish"
@@ -130,7 +132,7 @@ pub(crate) async fn security_middleware(
                     None => None,
                 };
 
-                let Some((session, _user)) = session_pair else {
+                let Some((session, user)) = session_pair else {
                     let mut res = (
                         StatusCode::UNAUTHORIZED,
                         Json(serde_json::json!({ "error": "Unauthorized. Please sign in." })),
@@ -139,6 +141,25 @@ pub(crate) async fn security_middleware(
                     attach_security_headers(&mut res, true, is_https);
                     return res;
                 };
+
+                // Accounts created with a temporary password may only change it (or sign out).
+                if user.must_change_password
+                    && !matches!(
+                        path,
+                        "/api/auth/me" | "/api/auth/password" | "/api/auth/logout" | "/api/auth/presence"
+                    )
+                {
+                    let mut res = (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "Change your temporary password to continue.",
+                            "code": "password_change_required"
+                        })),
+                    )
+                        .into_response();
+                    attach_security_headers(&mut res, true, is_https);
+                    return res;
+                }
 
                 if is_mutating && path != "/api/auth/logout" {
                     let csrf_hdr = req
@@ -272,15 +293,26 @@ pub(crate) async fn verify_project_access(
     Ok(u)
 }
 
-pub(crate) async fn verify_main_admin(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
+/// Admins (main admin or role `admin`).
+pub(crate) async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
     let u = require_current_user(state, headers).await?;
-    if !u.is_main_admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Only the Main Admin can perform this action.".to_string(),
-        ));
+    if !u.is_admin {
+        return Err((StatusCode::FORBIDDEN, "Only an admin can perform this action.".to_string()));
     }
     Ok(u)
+}
+
+/// Best-effort client address (proxy headers first). Spoofable: use only for audit and
+/// soft rate limits.
+pub(crate) fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 pub(crate) async fn verify_power(
@@ -378,6 +410,13 @@ pub(crate) async fn create_authenticated_response(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create session".to_string()))?;
 
+    let _ = sqlx::query("UPDATE users SET last_login_at = $1 WHERE id = $2")
+        .bind(now())
+        .bind(user.id)
+        .execute(&state.db)
+        .await;
+    // Return the full user (profile + grants) so the UI can gate itself.
+    let user = state.auth.get_user_by_id(user.id).await.unwrap_or(user);
     let active_sessions = state.auth.count_active_sessions(user.id).await;
     let passkey_count = state.auth.count_user_passkeys(user.id).await;
     let secure_attr = if is_https_request(headers, state.auth.force_secure_cookies) {

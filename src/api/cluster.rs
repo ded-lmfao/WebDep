@@ -150,7 +150,7 @@ pub(crate) async fn delete_enroll_token_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let admin = verify_main_admin(&state, &headers).await?;
+    let admin = verify_admin(&state, &headers).await?;
     state.cluster.delete_enroll_token(id).await.map_err(|e| {
         let code = if e.contains("not found") { StatusCode::NOT_FOUND } else { StatusCode::INTERNAL_SERVER_ERROR };
         (code, e)
@@ -164,7 +164,7 @@ pub(crate) async fn list_enroll_tokens_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<NodeEnrollTokenView>>, (StatusCode, String)> {
-    let _admin = verify_main_admin(&state, &headers).await?;
+    let _admin = verify_admin(&state, &headers).await?;
     let tokens = state
         .cluster
         .list_enroll_tokens()
@@ -264,7 +264,7 @@ pub(crate) async fn cluster_panel_info_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let _admin = verify_main_admin(&state, &headers).await?;
+    let _admin = verify_admin(&state, &headers).await?;
     let (request_url, _) = infer_core_urls(&headers, &state);
     let (_, req_host, port) = extract_host_and_port(&headers);
     let proto = if is_https_request(&headers, state.auth.force_secure_cookies) {
@@ -306,7 +306,7 @@ pub(crate) async fn create_enroll_token_handler(
     headers: HeaderMap,
     Json(mut input): Json<CreateEnrollTokenInput>,
 ) -> Result<(StatusCode, Json<CreateEnrollTokenResponse>), (StatusCode, String)> {
-    let admin = verify_main_admin(&state, &headers).await?;
+    let admin = verify_admin(&state, &headers).await?;
     let (inferred_http_url, _) = infer_core_urls(&headers, &state);
     let core_http_url = input
         .core_url
@@ -394,7 +394,7 @@ pub(crate) async fn drain_cluster_node_handler(
     AxPath(id): AxPath<i64>,
     body: Option<Json<DrainNodeInput>>,
 ) -> Result<Json<ClusterNode>, (StatusCode, String)> {
-    let admin = verify_main_admin(&state, &headers).await?;
+    let admin = verify_admin(&state, &headers).await?;
     let input = body.map(|b| b.0).unwrap_or_default();
     let target_status = if let Some(s) = input.status {
         s
@@ -441,7 +441,7 @@ pub(crate) async fn delete_cluster_node_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let admin = verify_main_admin(&state, &headers).await?;
+    let admin = verify_admin(&state, &headers).await?;
     let existing = state
         .cluster
         .get_node(id)
@@ -487,7 +487,7 @@ pub(crate) async fn update_cluster_node_handler(
     AxPath(id): AxPath<i64>,
     Json(payload): Json<UpdateNodePayload>,
 ) -> Result<Json<crate::cluster::models::ClusterNode>, (StatusCode, String)> {
-    let admin = verify_main_admin(&state, &headers).await?;
+    let admin = verify_admin(&state, &headers).await?;
     let node = state
         .cluster
         .set_node_display_name(id, &payload.display_name)
@@ -520,7 +520,7 @@ pub(crate) async fn evacuate_cluster_node_handler(
     AxPath(id): AxPath<i64>,
     payload: Option<Json<EvacuateNodePayload>>,
 ) -> Result<Json<crate::cluster::shift::EvacuateNodeResult>, (StatusCode, String)> {
-    let admin = verify_main_admin(&state, &headers).await?;
+    let admin = verify_admin(&state, &headers).await?;
     let pref = payload.and_then(|p| p.target_node_id);
     let res = crate::cluster::shift::evacuate_node_workloads(&state, &admin.username, id, pref).await?;
     let id_str = id.to_string();
@@ -679,7 +679,7 @@ pub(crate) async fn fleet_update_handler(
     headers: HeaderMap,
     payload: Option<Json<crate::updater::TriggerUpdatePayload>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers).await?;
+    let actor = verify_admin(&state, &headers).await?;
     let tag = payload.and_then(|p| p.tag.clone());
     crate::api::system::settings::trigger_fleet_and_core_update(&state, &actor.username, tag).await
 }
@@ -1162,7 +1162,7 @@ pub(crate) async fn install_node_modules_handler(
     AxPath(node_id): AxPath<i64>,
     Json(input): Json<InstallModulesInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers).await?;
+    let actor = verify_admin(&state, &headers).await?;
     let node = reachable_node(&state, node_id).await?;
     let catalog = crate::cluster::modules::module_catalog();
     let res =
@@ -1196,7 +1196,7 @@ pub(crate) async fn uninstall_node_modules_handler(
     AxPath(node_id): AxPath<i64>,
     Json(input): Json<InstallModulesInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers).await?;
+    let actor = verify_admin(&state, &headers).await?;
     let node = reachable_node(&state, node_id).await?;
     let catalog = crate::cluster::modules::module_catalog();
     let res =
@@ -1210,7 +1210,7 @@ pub(crate) async fn install_fleet_modules_handler(
     headers: HeaderMap,
     Json(input): Json<InstallModulesInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let actor = verify_main_admin(&state, &headers).await?;
+    let actor = verify_admin(&state, &headers).await?;
     let nodes = state
         .cluster
         .list_nodes()
