@@ -80,7 +80,7 @@ export async function loadMonitorView() {
             <span style="font-size:12px; font-weight:600; margin-left:6px; color:${isOnline ? 'var(--success)' : isMaint ? 'var(--warning)' : 'var(--text-muted)'};">${isOnline ? 'Online' : isMaint ? 'Maintenance' : 'Stopped'}</span>
           </td>
           <td>${p.status?.uptimeMs ? formatDuration(p.status.uptimeMs / 1000) : '--'}</td>
-          <td>${p.deployedSha ? `<span class="sha-pill">${p.deployedSha.slice(0, 7)}</span>` : '--'}</td>
+          <td>${p.deployedSha ? `<span class="sha-pill">${shortSha(p.deployedSha)}</span>` : '--'}</td>
           <td>${p.disk ? `${(p.disk.used / 1048576).toFixed(1)} MB` : '--'}</td>
           <td><span class="badge ${p.deployStatus?.status === 'success' ? 'badge-success' : 'badge-neutral'}">${p.deployStatus?.status ? escapeHtml(p.deployStatus.status.charAt(0).toUpperCase() + p.deployStatus.status.slice(1)) : 'Idle'}</span></td>
         </tr>
@@ -251,7 +251,7 @@ document.getElementById('settings-form')?.addEventListener('submit', async (e) =
 
   try {
     await api('/api/settings', { method: 'PUT', body: payload });
-    toast(`Global settings and ${cleanTokens.length} GitHub token(s) saved in SQLite.`, 'success');
+    toast(`Global settings and ${cleanTokens.length} GitHub token(s) saved.`, 'success');
     await loadSettingsView();
   } catch (err) {
     toast(`Save failed: ${err.message}`, 'error');
@@ -422,6 +422,14 @@ document.getElementById('clear-cache-btn')?.addEventListener('click', async () =
 // ============================================================================
 let updatePollTimer = null;
 
+// "v3.0.1-7bdfc49" / "3.0.1" -> "v3.0.1"; anything without a version number -> ''.
+function releaseVersionLabel(tag) {
+  const [major, minor, patch = ''] = String(tag || '').replace(/^\D+/, '').split('.');
+  const patchDigits = patch.slice(0, patch.search(/\D|$/));
+  const isNum = (v) => v !== '' && [...v].every((c) => c >= '0' && c <= '9');
+  return isNum(major) && isNum(minor) && isNum(patchDigits) ? `v${major}.${minor}.${patchDigits}` : '';
+}
+
 export async function loadSystemVersionInfo(quiet = false, forceRefresh = false) {
   try {
     const endpoint = forceRefresh ? '/api/system/version?refresh=1' : '/api/system/version';
@@ -432,9 +440,16 @@ export async function loadSystemVersionInfo(quiet = false, forceRefresh = false)
     const badgeEl = document.getElementById('platform-version-badge');
     const repoInput = document.getElementById('platform-update-repo-input');
 
-    if (branchEl) branchEl.textContent = v.current_release_tag || v.current_branch || `v${v.current_version || '2.0.0'}`;
-    if (hashEl) hashEl.textContent = v.current_commit || 'unknown';
-    if (msgEl) msgEl.textContent = v.commit_message || 'Self-hosted WebDep deployment platform';
+    // Show release versions only (e.g. v3.0.1); commit hashes mean nothing to most operators.
+    const installed = releaseVersionLabel(v.current_version ? `v${v.current_version}` : v.current_release_tag);
+    const latest = releaseVersionLabel(v.remote_tag || v.remote_version);
+    if (branchEl) branchEl.textContent = installed || 'unknown';
+    if (hashEl) hashEl.style.display = 'none';
+    if (msgEl) {
+      msgEl.textContent = v.has_update && latest
+        ? `${latest} is available`
+        : (latest ? 'You are on the latest release' : 'Checking for releases...');
+    }
     if (repoInput && document.activeElement !== repoInput && v.remote_url) {
       repoInput.value = v.remote_url;
     }
@@ -450,8 +465,11 @@ export async function loadSystemVersionInfo(quiet = false, forceRefresh = false)
         badgeEl.textContent = 'Restart required';
       } else if (v.has_update) {
         badgeEl.className = 'badge badge-success';
-        const label = v.remote_commit || v.remote_tag || 'latest';
-        badgeEl.textContent = `Update available (${label})`;
+        badgeEl.textContent = latest ? `${latest} available` : 'Update available';
+      } else if (v.check_error && /built from the '/.test(v.check_error)) {
+        badgeEl.className = 'badge badge-info';
+        badgeEl.textContent = 'Branch build';
+        badgeEl.title = v.check_error;
       } else if (v.check_error) {
         badgeEl.className = 'badge badge-neutral';
         badgeEl.textContent = 'No release checked';
@@ -505,7 +523,7 @@ export async function checkPlatformUpdates(manual = false) {
       toast('A new release is ready. Click Restart Panel to activate it.', 'warning', 6000);
     } else if (v.has_update) {
       const sizeMb = v.asset_size_bytes ? ` • ${(v.asset_size_bytes / (1024 * 1024)).toFixed(1)} MB` : '';
-      toast(`Release ${v.remote_tag || v.remote_commit} is available${sizeMb}. Click Update to install.`, 'success', 5500);
+      toast(`${releaseVersionLabel(v.remote_tag) || 'A new release'} is available${sizeMb}. Click Update to install.`, 'success', 5500);
     } else if (v.check_error) {
       toast(v.check_error, 'warning', 6500);
     } else {
@@ -516,7 +534,7 @@ export async function checkPlatformUpdates(manual = false) {
 
 export async function startPlatformUpdate() {
   const v = await loadSystemVersionInfo(true, true);
-  const targetLabel = v?.remote_tag || v?.remote_commit || 'latest';
+  const targetLabel = releaseVersionLabel(v?.remote_tag) || 'latest';
   const assetMeta = v?.asset_name
     ? `${escapeHtml(v.asset_name)}${v.asset_size_bytes ? ` (${(v.asset_size_bytes / (1024 * 1024)).toFixed(1)} MB)` : ''}`
     : 'prebuilt Linux release binary';
@@ -524,7 +542,7 @@ export async function startPlatformUpdate() {
   const ok = await showConfirmDialog({
     title: 'Update WebDep from GitHub Release',
     message: `Download and install release <strong>${escapeHtml(targetLabel)}</strong> (${assetMeta})?<br><br>
-    &bull; <strong style="color:var(--success);">Preserves data:</strong> Your <code>data/</code> folder (SQLite databases, hosted websites, services, logs) and <code>.env</code> secrets stay untouched.<br>
+    &bull; <strong style="color:var(--success);">Preserves data:</strong> Your <code>data/</code> folder (databases, hosted websites, services, logs) and <code>.env</code> secrets stay untouched.<br>
     &bull; <strong style="color:var(--accent-light);">Instant binary update:</strong> Downloads prebuilt CI binary, verifies its SHA-256 checksum, and runs a smoke test before swapping (no on-server Rust compilation).<br>
     &bull; <strong style="color:var(--text-main);">Automatic restart:</strong> Swaps atomically with rollback protection and restarts the panel cleanly.`,
     confirmText: 'Download & Apply Release',
@@ -618,40 +636,6 @@ export async function startPlatformUpdate() {
   }, 900);
 }
 
-export async function executePostUpdateRestart() {
-  const ok = await showConfirmDialog({
-    title: 'Restart WebDep Panel',
-    message: 'Restart the WebDep panel now to activate the new version? The dashboard will reconnect in about 3 seconds.',
-    confirmText: 'Restart Now',
-    danger: false,
-  });
-  if (!ok) return;
-
-  const stepText = document.getElementById('update-step-text');
-  const bannerMsg = document.getElementById('update-banner-msg');
-  const statusBanner = document.getElementById('update-status-banner');
-  const spinner = document.getElementById('update-active-spinner');
-  const dismissBtn = document.getElementById('update-dismiss-btn');
-  const closeBtn = document.getElementById('modal-platform-update-close');
-
-  openModal('modal-platform-update');
-  if (statusBanner) statusBanner.style.display = 'flex';
-  if (spinner) spinner.style.display = 'block';
-  if (stepText) stepText.textContent = 'Restarting WebDep service';
-  if (bannerMsg) bannerMsg.textContent = 'Triggering service restart. Waiting for WebDep to come back online';
-  if (dismissBtn) dismissBtn.disabled = true;
-  if (closeBtn) closeBtn.style.display = 'none';
-
-  const initialHealth = await probeHealthBoot();
-  try {
-    await api('/api/system/restart', { method: 'POST' });
-  } catch (err) {
-    toast(`Restart trigger returned: ${err.message}`, 'info');
-  }
-
-  void pollReconnectionAfterUpdate(initialHealth.boot);
-}
-
 export function copyUpdateLogs() {
   const el = document.getElementById('update-console-logs');
   if (!el) return;
@@ -689,9 +673,9 @@ async function performSingleHardReload(bootToken) {
   }
 
   await Promise.allSettled([
-    fetch('./index.html', { cache: 'reload', credentials: 'same-origin' }),
-    fetch('./style.css', { cache: 'reload', credentials: 'same-origin' }),
-    fetch('./app.js', { cache: 'reload', credentials: 'same-origin' }),
+    fetch('/', { cache: 'reload', credentials: 'same-origin' }),
+    fetch('/style.css', { cache: 'reload', credentials: 'same-origin' }),
+    fetch('/app.js', { cache: 'reload', credentials: 'same-origin' }),
   ]);
 
   try {
@@ -760,6 +744,5 @@ window.loadSystemVersionInfo = loadSystemVersionInfo;
 window.savePlatformUpdateRepo = savePlatformUpdateRepo;
 window.checkPlatformUpdates = checkPlatformUpdates;
 window.startPlatformUpdate = startPlatformUpdate;
-window.executePostUpdateRestart = executePostUpdateRestart;
 window.copyUpdateLogs = copyUpdateLogs;
 window.pollReconnectionAfterUpdate = pollReconnectionAfterUpdate;

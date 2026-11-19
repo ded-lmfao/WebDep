@@ -4,11 +4,20 @@
  */
 
 import { icon } from './icons.js';
-import { state, setHtmlIfChanged, escapeHtml } from './state.js';
+import {
+  state,
+  setHtmlIfChanged,
+  escapeHtml,
+  matchesNodeFilter,
+  getNodeDisplayName,
+  appNodeBadgeHtml,
+  nodeLabel,
+  getNodeEffectivePublicIp,
+  renderPublicIpPill,
+} from './state.js';
 import { api } from './api.js';
 import {
   consumePendingViewStagger,
-  animateOverviewReveal,
   animateNumberValue,
   animateProgressBar,
   animateTableRowsStagger,
@@ -20,39 +29,23 @@ import {
   formatRate,
   setText,
   setElText,
-  syncPerfOffset,
   renderSmoothNetFrame,
 } from './app_usage.js';
+import {
+  OV_NET_WINDOW_MS,
+  OV_NET_LAG_MS,
+  OV_NET_SVG_W,
+  OV_NET_SVG_H,
+  OV_NET_TOP,
+  OV_NET_BOTTOM,
+  OV_NET_Y_ZERO_IN,
+  OV_NET_Y_ZERO_OUT,
+  OV_NET_POLL_MS,
+  createNetChartState,
+  normalizeAndMergeNetState,
+} from './net_chart.js';
 
-const OV_NET_WINDOW_MS = 45000;
-const OV_NET_LAG_MS = 1250;
-const OV_NET_SVG_W = 420;
-const OV_NET_SVG_H = 56;
-const OV_NET_TOP = 7;
-const OV_NET_BOTTOM = 50;
-const OV_NET_Y_ZERO_IN = 48.2;
-const OV_NET_Y_ZERO_OUT = OV_NET_BOTTOM;
-const OV_NET_POLL_MS = 1000;
-
-const _ovNetState = {
-  samples: [],
-  perfToServerOffset: 0,
-  hasOffset: false,
-  playheadTs: null,
-  displayMaxRate: 1024,
-  hoverRatio: null,
-  rafId: null,
-  pollTimer: null,
-  pollInFlight: false,
-  lastFetchAt: 0,
-  lastDrawPerf: 0,
-  lastLiveServerTs: 0,
-  hasDrawnInitial: false,
-  _chartEl: null,
-  _domReady: false,
-  _labelEls: null,
-  _mergeBuf: [],
-};
+const _ovNetState = createNetChartState();
 
 const OV_NET_CHART_CFG = {
   svgW: OV_NET_SVG_W,
@@ -94,6 +87,14 @@ function stopOverviewNetPoller() {
     _ovNetState.pollTimer = null;
   }
   stopOverviewNetRaf();
+}
+
+function resetOverviewNetGraph() {
+  _ovNetState.samples = [];
+  _ovNetState.lastLiveServerTs = 0;
+  _ovNetState.hasDrawnInitial = false;
+  _ovNetState.playheadTs = null;
+  _ovNetState.hasOffset = false;
 }
 
 function ensureOverviewNetDom() {
@@ -178,18 +179,22 @@ function drawOverviewNetFrame(nowPerf = 0) {
   _ovNetState.rafId = null;
 
   if (state.currentView !== 'overview' || (typeof document !== 'undefined' && document.hidden)) {
-    _ovNetState.lastDrawPerf = 0;
+    stopOverviewNetRaf();
     return;
   }
 
-  const chartEl = ensureOverviewNetDom();
-  if (!chartEl) return;
-
-  if (renderSmoothNetFrame(OV_NET_CHART_CFG, _ovNetState, nowPerf)) {
-    _ovNetState.hasDrawnInitial = true;
-    if (_ovNetState.samples.length >= 2) {
-      startOverviewNetRaf();
+  let anyActive = false;
+  const singleEl = document.getElementById('overview-single-stats-grid');
+  if (!singleEl || singleEl.style.display !== 'none') {
+    const chartEl = ensureOverviewNetDom();
+    if (chartEl && renderSmoothNetFrame(OV_NET_CHART_CFG, _ovNetState, nowPerf)) {
+      _ovNetState.hasDrawnInitial = true;
+      if (_ovNetState.samples.length >= 2) anyActive = true;
     }
+  }
+
+  if (anyActive) {
+    startOverviewNetRaf();
   }
 }
 
@@ -197,6 +202,7 @@ function startOverviewNetRaf() {
   if (_ovNetState.rafId !== null || state.currentView !== 'overview') return;
   if (typeof document !== 'undefined' && document.hidden) return;
   if (typeof requestAnimationFrame !== 'function') return;
+
   if (_ovNetState.samples.length < 2) {
     drawOverviewNetFrame(typeof performance !== 'undefined' ? performance.now() : 0);
     return;
@@ -206,66 +212,9 @@ function startOverviewNetRaf() {
 
 function updateOverviewNetwork(net, opts = {}) {
   if (!net || typeof net !== 'object') return;
-  const rawHistory = Array.isArray(net.history) ? net.history : [];
-  const normalized = [];
-  let normSorted = true;
-  let prevNormTs = -Infinity;
-  for (let i = 0; i < rawHistory.length; i++) {
-    const pt = rawHistory[i];
-    if (!pt || typeof pt.ts !== 'number') continue;
-    if (pt.ts < prevNormTs) normSorted = false;
-    prevNormTs = pt.ts;
-    normalized.push({
-      ts: pt.ts,
-      inboundBps: Math.max(0, Number(pt.inboundBps ?? pt.inbound_bps) || 0),
-      outboundBps: Math.max(0, Number(pt.outboundBps ?? pt.outbound_bps) || 0),
-    });
-  }
-  if (!normSorted) {
-    normalized.sort((a, b) => a.ts - b.ts);
-  }
+  const { inBps, outBps, updated } = normalizeAndMergeNetState(_ovNetState, net, opts);
 
-  const inBps = Math.max(0, Number(net.inboundBps ?? net.inbound_bps) || 0);
-  const outBps = Math.max(0, Number(net.outboundBps ?? net.outbound_bps) || 0);
-  if (normalized.length === 0) {
-    normalized.push({ ts: Date.now(), inboundBps: inBps, outboundBps: outBps });
-  }
-
-  const latestServerTs = normalized[normalized.length - 1].ts;
-  // Never let a 2s/3s-cached /api/overview snapshot overwrite or regress live 1s telemetry
-  const staleSnapshot = Boolean(opts.fromSnapshot)
-    && _ovNetState.lastLiveServerTs > 0
-    && latestServerTs <= _ovNetState.lastLiveServerTs;
-
-  if (!staleSnapshot) {
-    if (!opts.fromSnapshot) {
-      _ovNetState.lastLiveServerTs = Math.max(_ovNetState.lastLiveServerTs, latestServerTs);
-    }
-
-    const cutoff = latestServerTs - (OV_NET_WINDOW_MS + 12000);
-    const existing = _ovNetState.samples;
-    const out = _ovNetState._mergeBuf;
-    out.length = 0;
-    let i = 0;
-    let j = 0;
-    while (i < existing.length && existing[i].ts < cutoff) i++;
-    while (j < normalized.length && normalized[j].ts < cutoff) j++;
-    while (i < existing.length && j < normalized.length) {
-      if (existing[i].ts < normalized[j].ts) {
-        out.push(existing[i++]);
-      } else if (normalized[j].ts < existing[i].ts) {
-        out.push(normalized[j++]);
-      } else {
-        out.push(normalized[j++]);
-        i++;
-      }
-    }
-    while (i < existing.length) out.push(existing[i++]);
-    while (j < normalized.length) out.push(normalized[j++]);
-    _ovNetState._mergeBuf = existing;
-    _ovNetState.samples = out;
-    syncPerfOffset(_ovNetState, _ovNetState.samples, 0.05);
-
+  if (updated) {
     const { inValEl, outValEl, ifaceEl, totalsEl } = getOverviewLabelEls();
     if (_ovNetState.hoverRatio === null) {
       setElText(inValEl, formatRate(inBps));
@@ -273,9 +222,15 @@ function updateOverviewNetwork(net, opts = {}) {
     }
 
     const ifaces = Number(net.interfaceCount ?? net.interface_count ?? 0);
+    const activeNodeId = getEffectiveOverviewNodeId();
+    const scopeLabel = state.overview?.nodeLabel || (activeNodeId
+      ? getNodeDisplayName(activeNodeId) || `VPS ${activeNodeId}`
+      : (state.selectedNodeFilter && state.selectedNodeFilter !== 'all'
+        ? getNodeDisplayName(state.selectedNodeFilter) || 'Selected VPS'
+        : 'Whole VPS'));
     setElText(
       ifaceEl,
-      ifaces > 0 ? `Whole VPS • ${ifaces} NIC${ifaces === 1 ? '' : 's'}` : 'Whole VPS NIC'
+      ifaces > 0 ? `${scopeLabel} • ${ifaces} NIC${ifaces === 1 ? '' : 's'}` : `${scopeLabel} NIC`
     );
 
     const rxTotal = Number(net.totalRxBytes ?? net.total_rx_bytes ?? 0);
@@ -293,11 +248,19 @@ function updateOverviewNetwork(net, opts = {}) {
 
 async function fetchOverviewNetwork() {
   if (_ovNetState.pollInFlight || !state.user || !state.csrf || state.currentView !== 'overview') return;
+  // The network chart is only on screen for a single inspected VPS.
+  if (!getEffectiveOverviewNodeId()) return;
   if (typeof document !== 'undefined' && document.hidden) return;
   _ovNetState.pollInFlight = true;
   _ovNetState.lastFetchAt = Date.now();
   try {
-    const net = await api('/api/overview/network', { noCache: true });
+    const scopeParam = getEffectiveOverviewNodeParam();
+    if (_ovNetState.lastScopeParam !== scopeParam) {
+      _ovNetState.lastScopeParam = scopeParam;
+      resetOverviewNetGraph();
+    }
+    const nodeParam = encodeURIComponent(scopeParam);
+    const net = await api(`/api/overview/network?nodeId=${nodeParam}`, { noCache: true });
     if (net && typeof net === 'object') {
       updateOverviewNetwork(net, { fromSnapshot: false });
     }
@@ -431,12 +394,124 @@ function getWorkloadIconInfo(r) {
 // ============================================================================
 // View 1: Overview & Live Resource Consumption
 // ============================================================================
+const _ovDomCache = {
+  els: null,
+};
+
+function getOverviewDomEls() {
+  const cached = _ovDomCache.els;
+  if (cached && cached.badgeWeb && cached.badgeWeb.isConnected !== false) {
+    return cached;
+  }
+  const els = {
+    badgeWeb: document.getElementById('badge-projects-count'),
+    badgeSvc: document.getElementById('badge-services-count'),
+    badgeDb: document.getElementById('badge-databases-count'),
+    cpuBar: document.getElementById('stat-cpu-bar'),
+    cpuMeta: document.getElementById('stat-cpu-meta'),
+    memBar: document.getElementById('stat-mem-bar'),
+    memMeta: document.getElementById('stat-mem-meta'),
+    diskBar: document.getElementById('stat-disk-bar'),
+    resPanelUsage: document.getElementById('res-panel-usage'),
+    resWorkloadsUsage: document.getElementById('res-workloads-usage'),
+    resSystemUsage: document.getElementById('res-system-usage'),
+    resFreeMem: document.getElementById('res-free-memory'),
+    resCountBadge: document.getElementById('res-workloads-count-badge'),
+    resTable: document.getElementById('resource-breakdown-table'),
+    actBox: document.getElementById('overview-active-deployment-box'),
+    actName: document.getElementById('active-dep-project-name'),
+    actKind: document.getElementById('active-dep-kind'),
+  };
+  _ovDomCache.els = els;
+  return els;
+}
+
+function getEffectiveOverviewNodeId() {
+  const inspectId = Number(state.overviewInspectNodeId);
+  return Number.isInteger(inspectId) && inspectId > 0 ? inspectId : null;
+}
+
+function getEffectiveOverviewNodeParam() {
+  const inspectId = getEffectiveOverviewNodeId();
+  return inspectId ? String(inspectId) : 'all';
+}
+
+function renderIpPillHtml(node) {
+  const pubIp = getNodeEffectivePublicIp(node);
+  return pubIp ? renderPublicIpPill(pubIp, { label: 'IP' }) : '';
+}
+
+function renderHostedPillsInnerHtml(node) {
+  const websites = Number(node?.websiteCount ?? node?.projectCount ?? 0);
+  const services = Number(node?.serviceCount ?? 0);
+  const dbs = Number(node?.databaseCount ?? 0);
+  return `
+    <span class="overview-hosted-pill ${websites > 0 ? 'has-items' : ''}"><span class="overview-hosted-pill-dot web"></span>${websites} Website${websites === 1 ? '' : 's'}</span>
+    <span class="overview-hosted-pill ${services > 0 ? 'has-items' : ''}"><span class="overview-hosted-pill-dot svc"></span>${services} Service${services === 1 ? '' : 's'}</span>
+    <span class="overview-hosted-pill ${dbs > 0 ? 'has-items' : ''}"><span class="overview-hosted-pill-dot db"></span>${dbs} Database${dbs === 1 ? '' : 's'}</span>
+  `;
+}
+
+function renderInspectNodeTopbar(nodes) {
+  const topbar = document.getElementById('overview-inspect-topbar');
+  const resCard = document.querySelector('#view-overview .resource-breakdown-card');
+  const singleGrid = document.getElementById('overview-single-stats-grid');
+  const inspectId = getEffectiveOverviewNodeId();
+
+  // The all-VPS overview is just every app together; per-node charts and stats live on the Nodes view.
+  // A single VPS opened from a link (overview/vpsN) still gets its stats grid above the app list.
+  if (resCard) resCard.style.display = '';
+  if (!inspectId) {
+    if (singleGrid) singleGrid.style.display = 'none';
+    if (topbar) {
+      topbar.style.display = 'none';
+      setHtmlIfChanged(topbar, '');
+    }
+    return;
+  }
+
+  if (singleGrid) singleGrid.style.display = '';
+  if (!topbar) return;
+
+  const list = Array.isArray(nodes) ? nodes : [];
+  const n = list.find((item) => Number(item.id) === inspectId);
+  const isUp = n ? (n.isLocal || n.status === 'online') : true;
+  const isDraining = n && n.status === 'draining';
+  const statusDot = isUp ? 'online' : isDraining ? 'maintenance' : 'offline';
+  const isCore = n ? Boolean(n.isLocal) : false;
+  const roleBadge = n
+    ? `<span class="overview-role-pill ${isCore ? 'is-core' : 'is-worker'}">${isCore ? 'Core' : 'Worker'}</span>`
+    : '';
+  const nameLabel = n ? nodeLabel(n) : `VPS ${inspectId}`;
+  const ipPillHtml = n ? renderIpPillHtml(n) : '';
+  const hostedHtml = n ? renderHostedPillsInnerHtml(n) : '';
+
+  const html = `
+    <div class="overview-inspect-topbar-left">
+      <button type="button" class="overview-back-btn" onclick="window.navigateTo('overview')">&larr; Back to All VPS</button>
+      <span class="status-dot ${statusDot}"></span>
+      <span class="overview-node-name">${escapeHtml(nameLabel)}</span>
+      ${roleBadge}
+      ${ipPillHtml}
+    </div>
+    <div class="overview-hosted-pills">
+      ${hostedHtml}
+    </div>
+  `;
+  topbar.style.display = 'flex';
+  setHtmlIfChanged(topbar, html);
+}
+
 function renderResourceBreakdown(resources) {
-  const tbody = document.getElementById('resource-breakdown-table');
+  const tbody = getOverviewDomEls().resTable || document.getElementById('resource-breakdown-table');
   if (!tbody) return;
   const list = resources || state.overview?.resources || [];
   const filter = state.resourceFilter || 'all';
-  const filtered = filter === 'all' ? list.filter((r) => r.kind !== 'panel') : list.filter((r) => r.kind === filter);
+  const inspectId = getEffectiveOverviewNodeId();
+  const nodeScoped = inspectId
+    ? list.filter((r) => Number(r?.nodeId ?? r?.node_id ?? 0) === inspectId)
+    : list.filter((r) => matchesNodeFilter(r));
+  const filtered = filter === 'all' ? nodeScoped.filter((r) => r.kind !== 'panel') : nodeScoped.filter((r) => r.kind === filter);
 
   if (!filtered.length) {
     let emptyMsg = 'No active workloads found.';
@@ -478,19 +553,21 @@ function renderResourceBreakdown(resources) {
     const kindBadgeClass = `badge-res-${r.kind}`;
     const iconInfo = getWorkloadIconInfo(r);
     const kindIconSvg = icon(iconInfo.name, { size: 24, cls: `res-icon-${r.kind}` });
-    
+
+    const nodeTag = appNodeBadgeHtml(r.nodeId ?? r.node_id);
+
     let subtitle = '';
     if (r.kind === 'panel') {
-      subtitle = '<span style="color:var(--text-dim)">Core Platform Daemon</span>';
+      subtitle = `<span style="color:var(--text-dim)">Core Platform Daemon</span>${nodeTag}`;
     } else if (r.kind === 'database') {
-      subtitle = '<span style="color:var(--text-dim)">PostgreSQL Instance</span>';
+      subtitle = `<span style="color:var(--text-dim)">PostgreSQL Instance</span>${nodeTag}`;
     } else if (r.kind === 'service') {
-      const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${r.commitSha.slice(0, 7)}</span>` : '';
-      subtitle = `<span style="color:var(--text-dim)">Backend Service</span>${sha}`;
+      const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${shortSha(r.commitSha)}</span>` : '';
+      subtitle = `<span style="color:var(--text-dim)">Backend Service</span>${sha}${nodeTag}`;
     } else {
-      const dom = r.domain ? `<a href="http://${escapeHtml(r.domain)}" target="_blank" class="domain-badge" style="font-size:11px;" onclick="event.stopPropagation()">${escapeHtml(r.domain)}</a>` : (r.port ? `<span style="color:var(--text-dim)">${r.port}</span>` : '<span style="color:var(--text-dim)">Local only</span>');
-      const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${r.commitSha.slice(0, 7)}</span>` : '';
-      subtitle = `${dom}${sha}`;
+      const dom = r.domain ? `<a href="http://${escapeHtml(r.domain)}" target="_blank" class="domain-badge" style="font-size:11px;" onclick="event.stopPropagation()">${escapeHtml(r.domain)}</a>` : `<span style="color:var(--text-dim)">${r.port ? 'Website' : 'Local only'}</span>`;
+      const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${shortSha(r.commitSha)}</span>` : '';
+      subtitle = `${dom}${sha}${nodeTag}`;
     }
 
     const pId = r.projectId ?? r.project_id;
@@ -530,8 +607,8 @@ function renderResourceBreakdown(resources) {
         : 'style="cursor: pointer;" onclick="navigateTo(\'settings\')"');
 
     return `
-      <tr>
-        <td ${navClick}>
+      <tr class="res-row" ${navClick}>
+        <td class="res-col-name">
           <div class="res-workload-title">
             <div class="res-workload-icon" style="color: ${iconInfo.color};">${kindIconSvg}</div>
             <div>
@@ -540,13 +617,13 @@ function renderResourceBreakdown(resources) {
             </div>
           </div>
         </td>
-        <td ${navClick}><span class="${kindBadgeClass}">${kindLabel}</span></td>
-        <td>${portPid}</td>
-        <td>
+        <td class="res-col-kind"><span class="${kindBadgeClass}">${kindLabel}</span></td>
+        <td class="res-col-port${r.port ? '' : ' no-port'}">${portPid}</td>
+        <td class="res-col-status">
           <span class="status-dot ${isRunning ? 'online' : isMaintenance ? 'maintenance' : 'offline'}"></span>
           <span style="font-size: 12px; font-weight: 500; margin-left: 6px; color: ${isRunning ? 'var(--success)' : isMaintenance ? 'var(--warning)' : 'var(--text-muted)'};">${isRunning ? 'Running' : isMaintenance ? 'Maintenance' : 'Stopped'}</span>
         </td>
-        <td>
+        <td class="res-col-metric res-col-cpu">
           <div class="res-metric-cell">
             <div class="res-metric-head">
               <span style="color: ${isRunning ? 'var(--text-main)' : 'var(--text-dim)'}; font-weight: 600;">${isRunning ? `${cpuVal}%` : '0%'}</span>
@@ -557,7 +634,7 @@ function renderResourceBreakdown(resources) {
             </div>
           </div>
         </td>
-        <td>
+        <td class="res-col-metric res-col-mem">
           <div class="res-metric-cell">
             <div class="res-metric-head">
               <span style="color: ${isRunning ? 'var(--text-main)' : 'var(--text-dim)'}; font-weight: 600;">${isRunning ? memVal : '0 MB'}</span>
@@ -568,7 +645,7 @@ function renderResourceBreakdown(resources) {
             </div>
           </div>
         </td>
-        <td>
+        <td class="res-col-metric res-col-disk">
           <div class="res-metric-cell">
             <div class="res-metric-head">
               <span style="color: var(--text-main); font-weight: 600;">${diskVal}</span>
@@ -579,7 +656,7 @@ function renderResourceBreakdown(resources) {
             </div>
           </div>
         </td>
-        <td style="text-align: right;">
+        <td class="res-col-action" style="text-align: right;">
           ${actionBtn}
         </td>
       </tr>
@@ -598,7 +675,13 @@ function filterResourceBreakdown(filter) {
 
 async function loadOverview() {
   try {
-    const data = await api('/api/overview');
+    const scopeParam = getEffectiveOverviewNodeParam();
+    if (_ovNetState.lastScopeParam && _ovNetState.lastScopeParam !== scopeParam) {
+      resetOverviewNetGraph();
+    }
+    _ovNetState.lastScopeParam = scopeParam;
+    const nodeParam = encodeURIComponent(scopeParam);
+    const data = await api(`/api/overview?nodeId=${nodeParam}`);
     state.overview = data;
     if (Array.isArray(data.projects)) {
       state.projects = data.projects.map((x) => x.project);
@@ -607,21 +690,32 @@ async function loadOverview() {
       }
     }
 
+    const els = getOverviewDomEls();
+
     // Server Stats & Sidebar Counts
     const m = data.monitor || {};
-    const ovWeb = (data.projects || []).filter((x) => x.project.project_kind !== 'service');
-    const ovSvc = (data.projects || []).filter((x) => x.project.project_kind === 'service');
+    let webCount = 0;
+    let svcCount = 0;
+    const dataProjects = Array.isArray(data.projects) ? data.projects : [];
+    for (let i = 0; i < dataProjects.length; i++) {
+      const p = dataProjects[i]?.project;
+      if (!p) continue;
+      if (p.project_kind === 'service') svcCount++;
+      else webCount++;
+    }
 
     // Keep navigation sidebar counts updated immediately without extra network calls
-    const badgeWebEl = document.getElementById('badge-projects-count');
-    if (badgeWebEl) badgeWebEl.textContent = ovWeb.length;
-    const badgeSvcEl = document.getElementById('badge-services-count');
-    if (badgeSvcEl) badgeSvcEl.textContent = ovSvc.length;
-    const badgeDbEl = document.getElementById('badge-databases-count');
-    if (badgeDbEl) {
-      const dbCountFromResources = Array.isArray(data.resources) ? data.resources.filter((r) => r.kind === 'database').length : 0;
+    setElText(els.badgeWeb, String(webCount));
+    setElText(els.badgeSvc, String(svcCount));
+    if (els.badgeDb) {
+      let dbCountFromResources = 0;
+      if (Array.isArray(data.resources)) {
+        for (let i = 0; i < data.resources.length; i++) {
+          if (data.resources[i]?.kind === 'database') dbCountFromResources++;
+        }
+      }
       const dbCountFromState = Array.isArray(state.databases) ? state.databases.length : 0;
-      badgeDbEl.textContent = Math.max(dbCountFromResources, dbCountFromState);
+      setElText(els.badgeDb, String(Math.max(dbCountFromResources, dbCountFromState)));
     }
 
     if (data.network) {
@@ -632,34 +726,38 @@ async function loadOverview() {
     const cpuPct = m.cpu?.pct || 0;
     const cpuCores = m.cpu?.cores || 1;
     animateNumberValue('stat-cpu-pct', cpuPct, (v) => `${Math.round(v)}%`);
-    const cpuBar = document.getElementById('stat-cpu-bar');
+    const cpuBar = els.cpuBar;
     if (cpuBar) {
-      cpuBar.className = `progress-fill ${cpuPct > 80 ? 'rose' : cpuPct > 50 ? 'amber' : 'green'}`;
+      const nextCls = `progress-fill ${cpuPct > 80 ? 'rose' : cpuPct > 50 ? 'amber' : 'green'}`;
+      if (cpuBar.className !== nextCls) cpuBar.className = nextCls;
       animateProgressBar(cpuBar, cpuPct);
     }
-    const cpuMeta = document.getElementById('stat-cpu-meta');
-    if (cpuMeta) cpuMeta.textContent = `${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`;
+    const cpuMetaLabel = data.nodeLabel
+      ? `${data.nodeLabel} • ${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`
+      : `${cpuCores} Core${cpuCores === 1 ? '' : 's'} (${cpuPct}% total)`;
+    setElText(els.cpuMeta, cpuMetaLabel);
 
     const memPct = m.memory?.pct || 0;
     const usedMb = ((m.memory?.used || 0) / 1048576).toFixed(0);
     const totalMb = ((m.memory?.total || 0) / 1048576).toFixed(0);
     animateNumberValue('stat-mem-pct', memPct, (v) => `${Math.round(v)}%`);
-    const memBar = document.getElementById('stat-mem-bar');
+    const memBar = els.memBar;
     if (memBar) {
-      memBar.className = `progress-fill ${memPct > 85 ? 'rose' : memPct > 65 ? 'amber' : 'green'}`;
+      const nextCls = `progress-fill ${memPct > 85 ? 'rose' : memPct > 65 ? 'amber' : 'green'}`;
+      if (memBar.className !== nextCls) memBar.className = nextCls;
       animateProgressBar(memBar, memPct);
     }
-    const memMeta = document.getElementById('stat-mem-meta');
-    if (memMeta) memMeta.textContent = `${usedMb} MB / ${totalMb} MB`;
+    setElText(els.memMeta, `${usedMb} MB / ${totalMb} MB`);
 
     if (m.disk) {
       const diskPct = Math.min(100, Math.max(0, Number(m.disk.pct) || 0));
       const freeGb = Number((m.disk.free / 1073741824).toFixed(1));
       const totalGb = (m.disk.total / 1073741824).toFixed(1);
       animateNumberValue('stat-disk-free', freeGb, (v) => `${v.toFixed(1)} GB`);
-      const diskBar = document.getElementById('stat-disk-bar');
+      const diskBar = els.diskBar;
       if (diskBar) {
-        diskBar.className = `progress-fill ${diskPct > 85 ? 'rose' : diskPct > 70 ? 'amber' : 'green'}`;
+        const nextCls = `progress-fill ${diskPct > 85 ? 'rose' : diskPct > 70 ? 'amber' : 'green'}`;
+        if (diskBar.className !== nextCls) diskBar.className = nextCls;
         animateProgressBar(diskBar, diskPct);
       }
       setText('stat-disk-meta', `${totalGb} GB total (${diskPct}% used)`);
@@ -667,32 +765,31 @@ async function loadOverview() {
 
     // Active resource summary bar
     const sum = data.summary || {};
-    const panelUsageEl = document.getElementById('res-panel-usage');
-    if (panelUsageEl) {
-      panelUsageEl.textContent = `${sum.panelMemoryFormatted || '--'} • ${(sum.panelCpu || 0).toFixed(1)}% CPU`;
+    setElText(els.resPanelUsage, `${sum.panelMemoryFormatted || '--'} • ${(sum.panelCpu || 0).toFixed(1)}% CPU`);
+    setElText(els.resWorkloadsUsage, `${sum.totalManagedMemoryFormatted || '--'} • ${(sum.totalManagedCpu || 0).toFixed(1)}% CPU`);
+    setElText(els.resSystemUsage, `${sum.systemOverheadMemoryFormatted || '--'} • ${(sum.systemOverheadCpu || 0).toFixed(1)}% CPU`);
+    if (els.resFreeMem) {
+      const totalMbInt = Math.round((m.memory?.total || 0) / 1048576);
+      const usedMbInt = Math.round((m.memory?.used || 0) / 1048576);
+      const availMb = Math.max(0, totalMbInt - usedMbInt);
+      setElText(els.resFreeMem, `${availMb} MB available`);
     }
-    const workloadsUsageEl = document.getElementById('res-workloads-usage');
-    if (workloadsUsageEl) {
-      workloadsUsageEl.textContent = `${sum.totalManagedMemoryFormatted || '--'} • ${(sum.totalManagedCpu || 0).toFixed(1)}% CPU`;
-    }
-    const sysUsageEl = document.getElementById('res-system-usage');
-    if (sysUsageEl) {
-      sysUsageEl.textContent = `${sum.systemOverheadMemoryFormatted || '--'} • ${(sum.systemOverheadCpu || 0).toFixed(1)}% CPU`;
-    }
-    const freeMemEl = document.getElementById('res-free-memory');
-    if (freeMemEl) {
-      const totalMb = Math.round((m.memory?.total || 0) / 1048576);
-      const usedMb = Math.round((m.memory?.used || 0) / 1048576);
-      const availMb = Math.max(0, totalMb - usedMb);
-      freeMemEl.textContent = `${availMb} MB available`;
-    }
-    const countBadgeEl = document.getElementById('res-workloads-count-badge');
-    if (countBadgeEl) {
-      countBadgeEl.textContent = `${sum.runningWorkloadsCount || 0} / ${sum.totalWorkloadsCount || 0} Running`;
-    }
+    setElText(els.resCountBadge, `${sum.runningWorkloadsCount || 0} / ${sum.totalWorkloadsCount || 0} Running`);
 
-    // Render active resources telemetry table
+    // Render per-VPS separate capacity comparison cards or single-VPS inspect view
+    renderInspectNodeTopbar(data.nodes);
+    // The view itself fades in on navigation (animateViewEnter). Only rows that appear for the
+    // first time (table still showing its placeholder) get their own entrance; re-animating rows
+    // that are already on screen made the Overview look like it loaded twice.
+    const resTbody = document.getElementById('resource-breakdown-table');
+    const hadRows = Boolean(resTbody?.querySelector('tr:not(:has(td[colspan]))'));
     renderResourceBreakdown(data.resources);
+    if (consumePendingViewStagger('overview') && !hadRows) {
+      animateTableRowsStagger(resTbody);
+    }
+    if (typeof window.updateBreadcrumbs === 'function') {
+      window.updateBreadcrumbs();
+    }
 
     // Keep service pipelines synchronized with live telemetry & deployments
     if (state.currentView === 'services') {
@@ -701,29 +798,29 @@ async function loadOverview() {
       });
     }
 
-    // Active deployment box
-    const active = data.projects.find((x) => x.active);
-    const actBox = document.getElementById('overview-active-deployment-box');
-    const wasActBoxHidden = actBox && getComputedStyle(actBox).display === 'none';
+    // Active deployment box (check inline style instead of getComputedStyle to avoid forced reflow)
+    const active = dataProjects.find((x) => x.active);
+    const actBox = els.actBox;
+    const wasActBoxHidden = actBox && (actBox.style.display === 'none' || actBox.style.display === '');
     const pOverview = waterPipelines['overview-pipeline-track'];
     if (active && active.active) {
-      actBox.style.display = 'block';
-      if (wasActBoxHidden) animateSectionShow(actBox);
-      document.getElementById('active-dep-project-name').textContent = active.project.name;
+      if (actBox) {
+        if (actBox.style.display !== 'block') actBox.style.display = 'block';
+        if (wasActBoxHidden) animateSectionShow(actBox);
+      }
+      setElText(els.actName, active.project.name);
       const kindRaw = active.active.kind || 'deploy';
-      document.getElementById('active-dep-kind').textContent = kindRaw.charAt(0).toUpperCase() + kindRaw.slice(1).toLowerCase();
+      setElText(els.actKind, kindRaw.charAt(0).toUpperCase() + kindRaw.slice(1).toLowerCase());
       renderPipelineStages('overview-pipeline-track', active.active.stage, active.active.status, active.active.id);
     } else if (pOverview && pOverview.isLooping && pOverview.currentProgress < 6.95) {
-      actBox.style.display = 'block';
-      if (wasActBoxHidden) animateSectionShow(actBox);
-      document.getElementById('active-dep-kind').textContent = 'Deployed';
+      if (actBox) {
+        if (actBox.style.display !== 'block') actBox.style.display = 'block';
+        if (wasActBoxHidden) animateSectionShow(actBox);
+      }
+      setElText(els.actKind, 'Deployed');
       renderPipelineStages('overview-pipeline-track', 'health_checking', 'success', pOverview.lastDeploymentId);
-    } else {
+    } else if (actBox && actBox.style.display !== 'none') {
       actBox.style.display = 'none';
-    }
-
-    if (consumePendingViewStagger('overview')) {
-      animateOverviewReveal();
     }
 
   } catch (err) {
@@ -737,6 +834,7 @@ window.loadOverview = loadOverview;
 window.renderResourceBreakdown = renderResourceBreakdown;
 window.filterResourceBreakdown = filterResourceBreakdown;
 window.stopOverviewNetPoller = stopOverviewNetPoller;
+window.resetOverviewNetGraph = resetOverviewNetGraph;
 
 export {
   loadOverview,
@@ -744,4 +842,5 @@ export {
   filterResourceBreakdown,
   updateOverviewNetwork,
   stopOverviewNetPoller,
+  resetOverviewNetGraph,
 };

@@ -4,7 +4,7 @@
  */
 
 import { icon } from './icons.js';
-import { state, escapeHtml, formatRelativeTime, setHtmlIfChanged } from './state.js';
+import { state, escapeHtml, formatRelativeTime, setHtmlIfChanged, matchesNodeFilter, appNodeBadgeHtml } from './state.js';
 import { loadProjects } from './websites.js';
 import { openWebsiteWorkspace } from './workspace.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
@@ -118,6 +118,7 @@ export function renderServicesList() {
   const filter = state.serviceStatusFilter || 'all';
 
   const filtered = services.filter((s) => {
+    if (!matchesNodeFilter(s)) return false;
     const isOnline = s.app_status === 'running' || s.status?.running;
     if (filter === 'running' && !isOnline) return false;
     if (filter === 'stopped' && isOnline) return false;
@@ -147,6 +148,9 @@ export function renderServicesList() {
     if (pid != null) resByProjId.set(pid, r);
   }
 
+  // Cards already on screen (return visit, background refresh) must not be faded in again:
+  // the view itself fades in on navigation, and re-animating them looked like a second load.
+  const hadCards = Boolean(container.querySelector('.project-card'));
   setHtmlIfChanged(container, filtered.map((p) => {
     const isOnline = p.app_status === 'running' || p.status?.running;
     const isBuilding = p.deployStatus?.status === 'in_progress' || p.deployStatus?.status === 'building';
@@ -189,7 +193,7 @@ export function renderServicesList() {
     }
 
     const isLocal = !p.repo_url || p.repo_url === 'local' || pt.includes('lavalink');
-    const shaText = p.deployed_sha ? p.deployed_sha.slice(0, 7) : (p.deployedSha ? p.deployedSha.slice(0, 7) : (isLocal ? 'Manual' : 'Auto'));
+    const shaText = p.deployed_sha ? shortSha(p.deployed_sha) : (p.deployedSha ? shortSha(p.deployedSha) : (isLocal ? 'Manual' : 'Auto'));
     const portText = p.port ? `Port ${p.port}` : '';
     const accessText = p.access_mode === 'public' ? 'Public reverse proxy' : (p.access_mode === 'allowlist' || p.access_mode === 'allowed_ips' ? 'IP whitelist' : 'Localhost only');
     const resItem = resByProjId.get(p.id);
@@ -230,6 +234,7 @@ export function renderServicesList() {
 
         <!-- Badges & Telemetry Row -->
         <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 24px;">
+          ${appNodeBadgeHtml(p.node_id)}
           <span class="badge badge-neutral" style="font-size: 10px; padding: 2px 8px; font-family: var(--font-mono);">
             ${isLocal ? icon('folder', { size: 10 }) + ' ' + shaText : icon('git-branch', { size: 10 }) + ' ' + escapeHtml(shaText)}
           </span>
@@ -263,7 +268,7 @@ export function renderServicesList() {
   }).join(''));
 
   filtered.forEach(syncServiceCardPipeline);
-  if (consumePendingViewStagger('services')) {
+  if (consumePendingViewStagger('services') && !hadCards) {
     staggerElements(container.querySelectorAll('.project-card'), { y: 12 });
   }
 }

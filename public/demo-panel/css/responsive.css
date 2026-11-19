@@ -20,6 +20,7 @@
   }
 
   .projects-grid,
+  .nodes-grid,
   .settings-cards-grid { grid-template-columns: 1fr; }
   .top-header { padding: 0 16px; height: 50px; }
   .content-area { padding: 16px 16px 80px; }
@@ -132,6 +133,7 @@
   }
   .stat-card { padding: 12px 16px; }
   .stat-value { font-size: 20px; }
+  .overview-inspect-topbar { padding: 12px; gap: 10px; }
 
   /* Compact, uncluttered headers and toolbars */
   .view-header { gap: 10px; margin-bottom: 16px; }

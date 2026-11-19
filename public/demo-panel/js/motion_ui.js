@@ -585,8 +585,20 @@ export function animateProgressBar(barTarget, pct) {
   const el = resolveElement(barTarget);
   if (!el) return;
   const clamped = Math.min(100, Math.max(0, Number(pct) || 0));
+  const targetWidth = `${clamped}%`;
   const prev = barState.get(el);
-  if (prev && prev.val === clamped) return;
+  const canAnimate =
+    el.isConnected
+    && document.visibilityState !== 'hidden'
+    && el.getClientRects().length > 0;
+
+  if (prev && prev.val === clamped) {
+    if (prev.active && canAnimate) return;
+    if (el.style.width !== targetWidth) {
+      el.style.width = targetWidth;
+    }
+    return;
+  }
 
   if (prev?.ctrl) {
     try {
@@ -594,12 +606,30 @@ export function animateProgressBar(barTarget, pct) {
     } catch (_) {}
   }
 
+  if (!canAnimate) {
+    el.style.width = targetWidth;
+    barState.set(el, { val: clamped, ctrl: null, active: false });
+    return;
+  }
+
+  const entry = { val: clamped, ctrl: null, active: true };
+  barState.set(el, entry);
   const ctrl = animate(
     el,
-    { width: `${clamped}%` },
+    { width: targetWidth },
     { type: spring, stiffness: 260, damping: 28, mass: 0.85, reduceMotion: false },
   );
-  barState.set(el, { val: clamped, ctrl });
+  entry.ctrl = ctrl;
+
+  void afterFinished(ctrl).then(() => {
+    const cur = barState.get(el);
+    if (cur === entry) {
+      entry.active = false;
+      if (el.isConnected && el.style.width !== targetWidth) {
+        el.style.width = targetWidth;
+      }
+    }
+  });
 }
 
 /**
@@ -651,35 +681,4 @@ export function animateSectionShow(target) {
     ),
   );
   clearStylesWhenDone(ctrl, el, ['transform', 'opacity']);
-}
-
-/**
- * Coordinated Framer Motion entrance across Overview stats, cards, summary
- * cells, and workload table rows on initial/navigated Overview render.
- */
-export function animateOverviewReveal() {
-  const view = document.getElementById('view-overview');
-  if (!view) return;
-
-  const statCards = view.querySelectorAll('.overview-stats-grid .stat-card');
-  if (statCards.length) {
-    staggerElements(statCards, { y: 14, startDelay: 0.02 });
-  }
-
-  const cards = Array.from(view.querySelectorAll('.card')).filter(
-    (c) => getComputedStyle(c).display !== 'none',
-  );
-  if (cards.length) {
-    staggerElements(cards, { y: 16, startDelay: 0.08 });
-  }
-
-  const summaryItems = view.querySelectorAll('.resource-summary-bar .res-summary-item');
-  if (summaryItems.length) {
-    staggerElements(summaryItems, { y: 8, startDelay: 0.12 });
-  }
-
-  const tbody = document.getElementById('resource-breakdown-table');
-  if (tbody) {
-    animateTableRowsStagger(tbody);
-  }
 }

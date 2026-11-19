@@ -14,6 +14,7 @@ import {
   isProjectOnline,
   isProjectMaintenance,
   isDatabaseRunning,
+  nodeLabel,
 } from './state.js';
 import { prefetchWebsiteWorkspace, prefetchDatabaseWorkspace } from './api.js';
 import {
@@ -21,7 +22,6 @@ import {
   animateWorkspaceBanner,
   markViewStaggerPending,
   consumePendingViewStagger,
-  staggerElements,
 } from './motion_ui.js';
 
 let lastBannerEntityKey = null;
@@ -70,6 +70,15 @@ function switchWebsiteTab(tab) {
 }
 window.switchWebsiteTab = switchWebsiteTab;
 
+function parseOverviewNodeParam(param) {
+  if (param === null || param === undefined) return null;
+  const raw = String(param).trim();
+  const match = /^vps(\d+)$/i.exec(raw) || /^(\d+)$/.exec(raw);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
 function navigateTo(viewName, entityParam = null) {
   if (!state.user || !state.csrf || state.pendingMfaToken) {
     showLogin();
@@ -77,6 +86,23 @@ function navigateTo(viewName, entityParam = null) {
   }
   if (viewName === 'backups') viewName = 'releases';
   state.currentView = viewName;
+
+  if (viewName === 'overview') {
+    const inspectNodeId = parseOverviewNodeParam(entityParam);
+    state.overviewInspectNodeId = inspectNodeId;
+    state.selectedEntityKind = 'project';
+    const routeParam = inspectNodeId ? `vps${inspectNodeId}` : null;
+    const targetPath = routeParam ? `/overview/${routeParam}` : '/overview';
+    const curPath = window.location.pathname || '/';
+    if (curPath !== targetPath || window.location.hash) {
+      try {
+        window.history.pushState({ view: 'overview', param: routeParam }, '', targetPath);
+      } catch (_) { }
+    }
+    renderCurrentView();
+    return;
+  }
+  state.overviewInspectNodeId = null;
 
   if (typeof entityParam === 'string' && entityParam.startsWith('db-')) {
     const dbId = Number(entityParam.slice(3));
@@ -134,12 +160,19 @@ function handleHashRoute() {
   if (view === 'backups') view = 'releases';
 
   let routeParam = parts[1] || null;
-  if (routeParam && routeParam.startsWith('db-')) {
+  if (view === 'overview') {
+    state.selectedEntityKind = 'project';
+    const inspectNodeId = parseOverviewNodeParam(routeParam);
+    state.overviewInspectNodeId = inspectNodeId;
+    routeParam = inspectNodeId ? `vps${inspectNodeId}` : null;
+  } else if (routeParam && routeParam.startsWith('db-')) {
+    state.overviewInspectNodeId = null;
     const dbId = Number(routeParam.slice(3));
     state.selectedEntityKind = 'database';
     if (dbId) state.selectedDatabaseId = dbId;
     if (!DATABASE_WORKSPACE_TABS.has(view)) view = 'deployments';
   } else {
+    state.overviewInspectNodeId = null;
     state.selectedEntityKind = 'project';
     const pid = routeParam ? Number(routeParam) : null;
     if (pid) state.selectedProjectId = pid;
@@ -200,12 +233,19 @@ function updateBreadcrumbs() {
     const parentView = p.project_kind === 'service' ? 'services' : 'projects';
     const parentLabel = p.project_kind === 'service' ? 'Services' : 'Websites';
     secEl.innerHTML = `<span style="cursor:pointer; color:var(--text-muted);" onclick="navigateTo('${parentView}')">${parentLabel}</span> &rsaquo; <strong style="color:var(--text-main);">${escapeHtml(p.name)}</strong> &rsaquo; <span style="color:var(--accent-light);">${escapeHtml(tabLabels[state.currentView] || state.currentView)}</span>`;
+  } else if (state.currentView === 'overview' && state.overviewInspectNodeId) {
+    const nodeList = Array.isArray(state.overview?.nodes) && state.overview.nodes.length ? state.overview.nodes : (state.nodes || []);
+    const node = nodeList.find((n) => Number(n.id) === Number(state.overviewInspectNodeId));
+    const inspectLabel = node ? nodeLabel(node) : `VPS ${state.overviewInspectNodeId}`;
+    secEl.innerHTML = `<span style="cursor:pointer; color:var(--text-muted);" onclick="navigateTo('overview')">System Overview</span> &rsaquo; <strong style="color:var(--text-main);">${escapeHtml(inspectLabel)}</strong>`;
   } else {
     const globalLabels = {
       overview: 'System Overview',
       projects: 'Hosted Websites',
       services: 'Backend Services',
       databases: 'Managed Databases',
+      nodes: 'Cluster Nodes',
+      modules: 'VPS Modules',
       settings: 'Platform Settings',
     };
     secEl.textContent = globalLabels[state.currentView] || state.currentView;
@@ -482,7 +522,7 @@ function renderWebsiteWorkspaceHeader() {
 
     const links = document.getElementById('ws-project-links');
     if (links) {
-      const sha = p.deployed_sha ? p.deployed_sha.slice(0, 7) : 'Not deployed';
+      const sha = p.deployed_sha ? shortSha(p.deployed_sha) : 'Not deployed';
       if (isService) {
         let typeLabel = `${icon('server', { size: 14 })} Backend Service`;
         const pt = (p.project_type || '').toLowerCase();
@@ -563,16 +603,25 @@ function renderWebsiteWorkspaceHeader() {
         if (p.access_mode === 'allowlist') accessText = `${icon('shield', { size: 11 })} Allowlist`;
         else if (p.access_mode === 'public') accessText = `${icon('globe', { size: 11 })} Public`;
 
+        const isLocalSite = !p.repo_url || p.repo_url === 'local';
         links.innerHTML = `
           ${primaryLinkHtml ? `${primaryLinkHtml}<span class="ws-meta-sep">&bull;</span>` : ''}
-          <span class="ws-meta-item" title="Git Branch">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
-            <span style="color:var(--text-main); font-weight:600;">${escapeHtml(p.branch || 'main')}</span>
-          </span>
-          <span class="ws-meta-sep">&bull;</span>
-          <span class="ws-meta-item" title="Deployed Commit SHA">
-            <code class="ws-meta-sha">${escapeHtml(sha)}</code>
-          </span>
+          ${isLocalSite ? `
+            <span class="ws-meta-item" title="Files are uploaded in the Files tab and deployed as a snapshot">
+              ${icon('folder', { size: 12 })} Manual upload
+            </span>
+            <span class="ws-meta-sep">&bull;</span>
+            <span class="ws-meta-item">${p.deployed_sha ? 'Deployed' : '<code class="ws-meta-sha">Not deployed</code>'}</span>
+          ` : `
+            <span class="ws-meta-item" title="Git Branch">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+              <span style="color:var(--text-main); font-weight:600;">${escapeHtml(p.branch || 'main')}</span>
+            </span>
+            <span class="ws-meta-sep">&bull;</span>
+            <span class="ws-meta-item" title="Deployed Commit SHA">
+              <code class="ws-meta-sha">${escapeHtml(sha)}</code>
+            </span>
+          `}
           ${p.port ? `
             <span class="ws-meta-sep">&bull;</span>
             <span class="ws-meta-item" title="Local Port">Port <strong style="color:var(--text-main); font-weight:600;">${p.port}</strong></span>
@@ -593,58 +642,58 @@ function renderWebsiteWorkspaceHeader() {
 
     const actions = document.getElementById('ws-project-actions');
     if (actions) {
+      const ico = (d) => `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">${d}</svg>`;
+      const I = {
+        deploy: ico('<polyline points="13 2 13 9 20 9"></polyline><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>'),
+        start: ico('<polygon points="5 3 19 12 5 21 5 3"></polygon>'),
+        stop: ico('<rect x="6" y="6" width="12" height="12"></rect>'),
+        restart: ico('<path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"></path>'),
+        maint: ico('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>'),
+        globe: ico('<circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>'),
+        move: ico('<path d="M5 12h14M13 5l7 7-7 7"></path>'),
+        gear: ico('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>'),
+        more: ico('<circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle>'),
+        trash: ico('<polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>'),
+      };
+      const localSource = !p.repo_url || p.repo_url === 'local';
+      const canDeploy = hasPower('deploy') && (!isService || !localSource);
+      const canProcess = hasPower('process');
+      const canManage = hasPower(isService ? 'services_manage' : 'projects_manage');
+      // Websites must be deployed once before they can start; manual services run from their files directly.
+      const neverDeployed = !isService && !p.deployed_sha;
+      const settingsAction = isService ? `openEditServiceModal(${p.id})` : `openEditWebsiteModal(${p.id})`;
+
+      const menuItems = [];
+      if (!isService && canProcess) {
+        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="toggleMaintenanceMode(${p.id})">${I.maint}<span>${isMaintenance ? 'Exit maintenance mode' : 'Maintenance mode'}</span></button>`);
+      }
+      if (!isService && hasPower('domains')) {
+        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="openNginxModal(${p.id})">${I.globe}<span>Domains &amp; SSL</span></button>`);
+      }
+      if (canManage) {
+        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="window.openMoveToNodeModal && window.openMoveToNodeModal(${p.id})">${I.move}<span>Move to another node</span></button>`);
+        menuItems.push('<div class="menu-sep" role="separator"></div>');
+        menuItems.push(`<button type="button" class="menu-item menu-item-danger" role="menuitem" onclick="deleteProject(${p.id}, '${escapeHtml(p.slug)}')">${I.trash}<span>Delete ${isService ? 'service' : 'website'}</span></button>`);
+      }
+
       actions.innerHTML = `
         <div class="ws-actions-group">
-          ${hasPower('deploy') && (!isService || (p.repo_url && p.repo_url !== 'local')) ? `
-            <button class="btn btn-primary btn-sm" onclick="deployProject(${p.id})">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="13 2 13 9 20 9"></polyline><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
-              <span>Deploy</span>
-            </button>
-          ` : ''}
-          ${hasPower('process') ? `
-            ${!isOnline
-            ? `<button class="btn btn-success btn-sm ws-btn-start" onclick="startProject(${p.id})">
-                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                   <span>Start</span>
-                 </button>`
-            : ''
-          }
+          ${canDeploy ? `<button class="btn btn-primary btn-sm" onclick="deployProject(${p.id})" title="${localSource ? 'Deploy the files uploaded in the Files tab' : 'Pull the latest commit and deploy it'}">${I.deploy}<span>Deploy</span></button>` : ''}
+          ${canProcess ? `
             ${isOnline || isMaintenance
-            ? `<button class="btn btn-secondary btn-sm ws-btn-stop" onclick="stopProject(${p.id})" title="Completely stop process">
-                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="6" y="6" width="12" height="12"></rect></svg>
-                   <span>Stop</span>
-                 </button>`
-            : ''
-          }
-            <button class="btn btn-secondary btn-sm ws-btn-restart" onclick="restartProject(${p.id})" title="Restart process">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"></path></svg>
-              <span>Restart</span>
-            </button>
-            ${!isService ? `
-              <button class="btn btn-secondary btn-sm" onclick="toggleMaintenanceMode(${p.id})" title="${isMaintenance ? 'Exit Maintenance Mode and resume live website' : 'Enable Maintenance Mode'}" style="${isMaintenance ? 'background: var(--warning-bg); border-color: var(--warning-border); color: var(--warning-light);' : ''}">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>
-                <span>${isMaintenance ? 'Exit Maint.' : 'Maint.'}</span>
-              </button>
-            ` : ''}
+              ? `<button class="btn btn-secondary btn-sm ws-btn-stop" onclick="stopProject(${p.id})" title="Stop the process">${I.stop}<span>Stop</span></button>`
+              : `<button class="btn btn-secondary btn-sm ws-btn-start" onclick="startProject(${p.id})" ${neverDeployed ? 'disabled title="Deploy this website once before starting it"' : 'title="Start the process"'}>${I.start}<span>Start</span></button>`}
+            ${isOnline ? `<button class="btn btn-secondary btn-sm ws-btn-restart" onclick="restartProject(${p.id})" title="Restart the process">${I.restart}<span>Restart</span></button>` : ''}
           ` : ''}
         </div>
-
         <div class="ws-actions-group">
-          ${!isService && hasPower('domains') ? `
-            <button class="btn btn-secondary btn-sm" onclick="openNginxModal(${p.id})" title="Domains &amp; SSL">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
-              <span>Domains</span>
-            </button>
-          ` : ''}
-          ${hasPower(isService ? 'services_manage' : 'projects_manage') ? `
-            <button class="btn btn-secondary btn-sm" onclick="${isService ? `openEditServiceModal(${p.id})` : `openEditWebsiteModal(${p.id})`}" title="${isService ? 'Service Settings' : 'Website Settings'}">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-              <span>Settings</span>
-            </button>
-            <button class="btn btn-sm ws-btn-delete" onclick="deleteProject(${p.id}, '${escapeHtml(p.slug)}')" title="${isService ? 'Delete Service' : 'Delete Website'}">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-            </button>
-          ` : ''}
+          ${isMaintenance ? `<span class="badge badge-warning" title="Visitors see the maintenance page">${I.maint} Maintenance</span>` : ''}
+          ${canManage ? `<button class="btn btn-secondary btn-sm" onclick="${settingsAction}" title="${isService ? 'Service settings' : 'Website settings'}">${I.gear}<span>Settings</span></button>` : ''}
+          ${menuItems.length ? `
+            <div class="menu-wrap">
+              <button type="button" class="btn btn-secondary btn-sm btn-icon" data-menu-toggle aria-haspopup="menu" aria-expanded="false" aria-label="More actions" title="More actions">${I.more}</button>
+              <div class="menu" role="menu">${menuItems.join('')}</div>
+            </div>` : ''}
         </div>
       `;
     }
@@ -671,7 +720,11 @@ function renderWebsiteWorkspaceHeader() {
     const reqPowers = tabPowerMap[tab];
     const isActive = tab === state.currentView;
     const isLocalService = isService && (!p.repo_url || p.repo_url === 'local' || (p.project_type && p.project_type.includes('lavalink')));
+    const isLocalWebsite = !isService && (!p.repo_url || p.repo_url === 'local');
     if (isLocalService && (tab === 'github' || tab === 'releases' || tab === 'rollbacks')) {
+      btn.style.display = 'none';
+    } else if (isLocalWebsite && tab === 'github') {
+      // No repository to show commits for.
       btn.style.display = 'none';
     } else if (tab === 'env' && isService) {
       btn.style.display = 'none';
@@ -721,31 +774,6 @@ function centerActiveWebsiteTab(smooth = true) {
 }
 window.addEventListener('resize', () => centerActiveWebsiteTab(false));
 
-function syncProjectSelectors() {
-  renderWebsiteWorkspaceHeader();
-}
-
-// Which kind of item the global "Add" button should create for the current view (null = hide it)
-function getGlobalAddKind() {
-  const v = state.currentView;
-  if (v === 'databases') return 'database';
-  if (v === 'services') return 'service';
-  if (v === 'projects') return 'website';
-  if (WEBSITE_WORKSPACE_TABS.has(v)) {
-    if (state.selectedEntityKind === 'database') return 'database';
-    const cur = getSelectedProject();
-    return cur && cur.project_kind === 'service' ? 'service' : 'website';
-  }
-  return null;
-}
-
-function globalAddAction() {
-  const kind = getGlobalAddKind();
-  if (kind === 'database') openCreateDatabaseModal();
-  else if (kind === 'service') openAddServiceModal();
-  else openAddWebsiteModal();
-}
-window.globalAddAction = globalAddAction;
 
 function renderCurrentView() {
   updateBreadcrumbs();
@@ -813,17 +841,14 @@ function renderCurrentView() {
     case 'files': void loadFilesView(); break;
     case 'monitor': void loadMonitorView(); break;
     case 'settings':
+      // Settings content is static: the view fade is its only entrance (a second card stagger on
+      // top of it made the page jitter).
+      consumePendingViewStagger('settings');
       void loadSettingsView();
-      if (consumePendingViewStagger('settings')) {
-        requestAnimationFrame(() => {
-          staggerElements(
-            document.querySelectorAll('#view-settings .settings-card, #view-settings .overview-section, #settings-theme-grid .theme-swatch-card'),
-            { y: 10 },
-          );
-        });
-      }
       break;
     case 'audit': void loadAuditView(); break;
+    case 'nodes': if (window.loadNodesView) void window.loadNodesView(); break;
+    case 'modules': if (window.loadModulesView) void window.loadModulesView(); break;
   }
 }
 
@@ -831,8 +856,6 @@ function renderCurrentView() {
 window.renderWebsiteWorkspaceHeader = renderWebsiteWorkspaceHeader;
 window.updateBreadcrumbs = updateBreadcrumbs;
 window.centerActiveWebsiteTab = centerActiveWebsiteTab;
-window.syncProjectSelectors = syncProjectSelectors;
-window.getGlobalAddKind = getGlobalAddKind;
 window.renderCurrentView = renderCurrentView;
 
 export {
@@ -844,8 +867,5 @@ export {
   updateBreadcrumbs,
   renderWebsiteWorkspaceHeader,
   centerActiveWebsiteTab,
-  syncProjectSelectors,
-  getGlobalAddKind,
-  globalAddAction,
   renderCurrentView,
 };

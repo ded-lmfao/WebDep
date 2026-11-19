@@ -11,7 +11,31 @@
   const nowSec = () => Math.floor(Date.now() / 1000);
   const nowMs = () => Date.now();
 
-  let signedIn = false;
+  // `?embed=1`: the website shows the panel inline, already signed in, and switches pages by
+  // posting { type: 'webdep-demo:navigate', view } to this frame.
+  const params = new URLSearchParams(window.location.search);
+  const EMBED = params.has('embed');
+  let signedIn = EMBED;
+  if (EMBED) {
+    const startView = params.get('view');
+    window.addEventListener('message', (e) => {
+      if (e.origin !== window.location.origin) return;
+      const data = e.data || {};
+      if (data.type === 'webdep-demo:navigate' && typeof window.navigateTo === 'function') {
+        window.navigateTo(String(data.view || 'overview'));
+      }
+    });
+    if (startView) {
+      const go = () => {
+        if (typeof window.navigateTo === 'function' && document.body.classList.contains('auth-verified')) {
+          window.navigateTo(startView);
+        } else {
+          setTimeout(go, 150);
+        }
+      };
+      setTimeout(go, 150);
+    }
+  }
   let activeTheme = (() => {
     try {
       return localStorage.getItem('webdep.theme') || 'midnight-ink';
@@ -384,6 +408,98 @@ export function verifyWebhook(sigHeader) {
     totpEnabled: true,
   };
 
+  // Multi-node cluster (see demo_cluster.js): place every workload on one of the two demo nodes.
+  const cluster = window.__WEBDEP_DEMO_CLUSTER__;
+  for (const p of projects) p.node_id = cluster.placement.projects[p.id] || 1;
+  for (const d of databases) d.node_id = cluster.placement.databases[d.id] || 1;
+  const enrollTokens = [];
+
+  function nodeView(n) {
+    const { installed, net, ...rest } = n;
+    return {
+      ...rest,
+      lastSeenAt: Date.now() - 2000,
+      projectCount: projects.filter((p) => p.node_id === n.id).length,
+      databaseCount: databases.filter((d) => d.node_id === n.id).length,
+    };
+  }
+
+  function findNode(id) {
+    return cluster.nodes.find((x) => x.id === Number(id)) || null;
+  }
+
+  function handleClusterRoute(path, method, body) {
+    let m;
+    if (path === '/api/cluster/nodes') return cluster.nodes.map(nodeView);
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)$/))) {
+      const n = findNode(m[1]);
+      if (!n) return [{ error: 'Node not found' }, 404];
+      if (method === 'PATCH') {
+        n.displayName = String(body.displayName || '').trim().slice(0, 40);
+      } else if (method === 'DELETE') {
+        return [{ error: 'Removing nodes is disabled in the live demo.' }, 400];
+      }
+      return nodeView(n);
+    }
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/drain$/))) {
+      const n = findNode(m[1]);
+      if (n) n.status = body.drain === false ? 'online' : 'draining';
+      return n ? nodeView(n) : { ok: true };
+    }
+    if (/^\/api\/cluster\/nodes\/\d+\/evacuate$/.test(path)) {
+      return { ok: true, moved: 0, message: 'Evacuation is simulated in the live demo; no apps were moved.' };
+    }
+    if (path === '/api/cluster/panel-info') {
+      return { publicIp: '203.0.113.10', port: 4600, panelUrl: 'http://203.0.113.10:4600', version: '3.0.4' };
+    }
+    if (path === '/api/cluster/enroll-tokens' && method === 'POST') {
+      const tok = {
+        id: nextId++,
+        label: body.label || 'Demo worker',
+        token: `WDJOIN_demo_${Math.random().toString(36).slice(2, 12)}`,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 24 * 3600 * 1000,
+        used: false,
+      };
+      enrollTokens.unshift(tok);
+      return {
+        ...tok,
+        command: `curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- node --join http://203.0.113.10:4600 --token ${tok.token}`,
+      };
+    }
+    if (path === '/api/cluster/enroll-tokens') return enrollTokens;
+    if ((m = path.match(/^\/api\/cluster\/enroll-tokens\/(\d+)$/))) {
+      const i = enrollTokens.findIndex((t) => t.id === Number(m[1]));
+      if (i >= 0) enrollTokens.splice(i, 1);
+      return { ok: true };
+    }
+    if (path === '/api/cluster/fleet-update') {
+      return { ok: true, message: 'Every node already runs v3.0.4 (demo).', nodes: cluster.nodes.map((n) => ({ nodeId: n.id, ok: true, skipped: true })) };
+    }
+    if (path === '/api/cluster/modules') {
+      return { catalog: cluster.catalog, nodes: cluster.nodes.map(cluster.modulesView) };
+    }
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/modules\/(install|uninstall|refresh)$/))) {
+      const n = findNode(m[1]);
+      if (!n) return [{ error: 'Node not found' }, 404];
+      const results = (Array.isArray(body.moduleIds) ? body.moduleIds : []).map((id) => {
+        if (m[2] === 'uninstall') {
+          n.installed.delete(id);
+          return { moduleId: id, success: true, alreadyInstalled: false, message: 'Uninstalled successfully', output: '' };
+        }
+        const already = n.installed.has(id);
+        n.installed.add(id);
+        return { moduleId: id, success: true, alreadyInstalled: already, message: already ? 'Already installed' : `Installed successfully (${cluster.versions[id] || id})`, output: '' };
+      });
+      return { ok: true, nodeId: n.id, nodeName: n.displayName || n.name, skipped: false, results, node: cluster.modulesView(n), delayMs: m[2] === 'refresh' ? 400 : 1100 };
+    }
+    if (/^\/api\/projects\/\d+\/migrations$/.test(path)) return [];
+    if (/^\/api\/projects\/\d+\/move$/.test(path)) {
+      return [{ error: 'Moving apps between nodes is read-only in the live demo.' }, 400];
+    }
+    return null;
+  }
+
   function buildResources() {
     const res = [
       {
@@ -406,6 +522,7 @@ export function verifyWebhook(sigHeader) {
       res.push({
         kind: p.project_kind === 'service' ? 'service' : 'website',
         projectId: p.id,
+        nodeId: p.node_id,
         name: p.name,
         domain: p.domains?.[0] || null,
         commitSha: p.deployed_sha || null,
@@ -428,6 +545,7 @@ export function verifyWebhook(sigHeader) {
       res.push({
         kind: 'database',
         databaseId: d.id,
+        nodeId: d.node_id,
         name: d.name,
         port: d.port,
         pid: running ? d.pid : null,
@@ -476,6 +594,7 @@ export function verifyWebhook(sigHeader) {
         totalWorkloadsCount: workloads.length,
       },
       resources,
+      nodes: cluster.nodes.map(nodeView),
       projects: projects.map((p) => ({
         project: p,
         active: deployments.find((d) => d.project_id === p.id && d.status === 'running') || null,
@@ -599,7 +718,17 @@ export function verifyWebhook(sigHeader) {
         totalRxBytes: Math.round(totalRxBytes),
         totalTxBytes: Math.round(totalTxBytes),
         history: [...netHistory],
+        perNode: cluster.sampleAll(),
       });
+    }
+
+    // Cluster: nodes, enrollment tokens, modules, app moves
+    const clusterResult = handleClusterRoute(path, method, body);
+    if (clusterResult !== null) {
+      if (clusterResult.delayMs) await new Promise((r) => setTimeout(r, clusterResult.delayMs));
+      return Array.isArray(clusterResult) && clusterResult.length === 2 && typeof clusterResult[1] === 'number'
+        ? jsonResp(clusterResult[0], clusterResult[1])
+        : jsonResp(clusterResult);
     }
 
     // Projects / Websites / Services

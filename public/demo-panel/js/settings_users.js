@@ -36,15 +36,49 @@ export const POWER_LABELS = {
 const POWER_PRESETS = {
   all: null,
   defaults: ['deploy', 'process', 'logs', 'files', 'backups'],
-  readonly: ['logs', 'files', 'audit', 'monitor', 'databases'],
+  readonly: ['logs', 'files', 'audit', 'monitor'],
   none: [],
 };
 
 export function setUserPowerPreset(preset) {
+  if (preset === 'custom') {
+    syncUserRoleUi({ forceCustom: true });
+    return;
+  }
   const list = POWER_PRESETS[preset];
+  if (list === undefined) return;
   document.querySelectorAll('.user-power-check').forEach((cb) => {
     cb.checked = list === null ? true : list.includes(cb.value);
   });
+  syncUserRoleUi();
+}
+
+/** Which preset the ticked permissions match exactly, or 'custom'. */
+function currentUserRole() {
+  const checks = Array.from(document.querySelectorAll('.user-power-check'));
+  const on = new Set(checks.filter((cb) => cb.checked).map((cb) => cb.value));
+  if (checks.length && on.size === checks.length) return 'all';
+  for (const key of ['defaults', 'readonly']) {
+    const list = POWER_PRESETS[key];
+    if (list.length === on.size && list.every((v) => on.has(v))) return key;
+  }
+  return 'custom';
+}
+
+/** Highlights the matching access level and keeps the permission list summary current. */
+function syncUserRoleUi({ forceCustom = false } = {}) {
+  const role = forceCustom ? 'custom' : currentUserRole();
+  document.querySelectorAll('.ua-role').forEach((btn) => {
+    const active = btn.dataset.userRole === role;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+  });
+  const checks = document.querySelectorAll('.user-power-check');
+  const on = Array.from(checks).filter((cb) => cb.checked).length;
+  const summary = document.getElementById('user-perms-summary');
+  if (summary) summary.textContent = `Permissions: ${on} of ${checks.length} allowed`;
+  const details = document.getElementById('user-perms-details');
+  if (details && forceCustom) details.open = true;
 }
 
 // ============================================================================
@@ -111,22 +145,28 @@ export function toggleGithubTokenRowReveal(idx) {
 // User Access Control
 // ============================================================================
 export function renderUserProjectsChecklist(selectedIds = [], allProjects = true) {
-  const allCheck = document.getElementById('user-all-projects-check');
+  const allRadio = document.getElementById('user-all-projects-check');
+  const someRadio = document.getElementById('user-some-projects-radio');
   const container = document.getElementById('user-projects-checklist');
-  if (allCheck) allCheck.checked = allProjects;
+  if (allRadio) allRadio.checked = allProjects;
+  if (someRadio) someRadio.checked = !allProjects;
   if (!container) return;
+  // The list is only relevant when access is limited; with "All of them" it is hidden, not greyed out.
+  container.hidden = allProjects;
 
   if (!state.projects.length) {
-    container.innerHTML = '<div style="color:var(--text-dim); font-size:12px; grid-column: 1 / -1;">No websites created yet.</div>';
+    container.innerHTML = '<div class="ua-project-empty">No websites or services yet.</div>';
     return;
   }
 
   container.innerHTML = state.projects.map((p) => {
-    const checked = allProjects || selectedIds.includes(p.id);
+    const checked = selectedIds.includes(p.id);
+    const kind = p.project_kind === 'service' ? 'Service' : 'Website';
     return `
-      <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; opacity:${allProjects ? '0.6' : '1'};">
-        <input type="checkbox" class="user-project-check" value="${p.id}" ${checked ? 'checked' : ''} ${allProjects ? 'disabled' : ''}>
-        <span>${escapeHtml(p.name)} <code style="font-size:11px;">(${p.port || 3000})</code></span>
+      <label class="ua-project">
+        <input type="checkbox" class="user-project-check" value="${p.id}" ${checked ? 'checked' : ''}>
+        <span class="ua-project-name">${escapeHtml(p.name)}</span>
+        <span class="ua-project-kind">${kind}</span>
       </label>
     `;
   }).join('');
@@ -256,9 +296,9 @@ export function openEditUserModal(userId) {
   const idEl = document.getElementById('user-edit-id');
   if (idEl) idEl.value = String(u.id);
   const titleEl = document.getElementById('user-modal-title');
-  if (titleEl) titleEl.textContent = `Edit Access & Powers: ${u.username}`;
+  if (titleEl) titleEl.textContent = `Edit user: ${u.username}`;
   const saveBtn = document.getElementById('save-new-user-btn');
-  if (saveBtn) saveBtn.textContent = 'Save Access & Powers';
+  if (saveBtn) saveBtn.textContent = 'Save changes';
 
   const unameInput = document.getElementById('user-new-username');
   if (unameInput) {
@@ -267,7 +307,7 @@ export function openEditUserModal(userId) {
   }
 
   const passLabel = document.getElementById('user-password-label');
-  if (passLabel) passLabel.textContent = 'Reset Password (Optional)';
+  if (passLabel) passLabel.textContent = 'New password (optional)';
   const passInput = document.getElementById('user-new-password');
   if (passInput) {
     passInput.value = '';
@@ -278,6 +318,9 @@ export function openEditUserModal(userId) {
   document.querySelectorAll('.user-power-check').forEach((cb) => {
     cb.checked = hasWildcard || (u.permissions || []).includes(cb.value);
   });
+  syncUserRoleUi();
+  const details = document.getElementById('user-perms-details');
+  if (details) details.open = currentUserRole() === 'custom';
 
   renderUserProjectsChecklist(u.allowedProjects || [], Boolean(u.allProjects));
   openModal('modal-create-user');
@@ -303,7 +346,7 @@ export async function deleteUser(userId, username) {
   if (!ok) return;
   try {
     await api(`/api/users/${userId}`, { method: 'DELETE' });
-    toast(`User "${username}" removed from SQLite.`, 'success');
+    toast(`User "${username}" removed from database.`, 'success');
     if (window.loadSettingsView) await window.loadSettingsView();
   } catch (err) {
     toast(`Delete failed: ${err.message}`, 'error');
@@ -311,10 +354,16 @@ export async function deleteUser(userId, username) {
 }
 
 // Bind DOM event listeners
-document.getElementById('user-all-projects-check')?.addEventListener('change', (e) => {
-  const isAll = e.target.checked;
-  const currentSelected = Array.from(document.querySelectorAll('.user-project-check:checked')).map((cb) => Number(cb.value));
-  renderUserProjectsChecklist(currentSelected, isAll);
+document.querySelectorAll('input[name="user-project-scope"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    const isAll = Boolean(document.getElementById('user-all-projects-check')?.checked);
+    const currentSelected = Array.from(document.querySelectorAll('.user-project-check:checked')).map((cb) => Number(cb.value));
+    renderUserProjectsChecklist(currentSelected, isAll);
+  });
+});
+
+document.getElementById('create-user-form')?.addEventListener('change', (e) => {
+  if (e.target.classList?.contains('user-power-check')) syncUserRoleUi();
 });
 
 document.getElementById('create-user-modal-btn')?.addEventListener('click', () => {
@@ -323,7 +372,7 @@ document.getElementById('create-user-modal-btn')?.addEventListener('click', () =
   const idEl = document.getElementById('user-edit-id');
   if (idEl) idEl.value = '';
   const titleEl = document.getElementById('user-modal-title');
-  if (titleEl) titleEl.textContent = 'Create Platform User';
+  if (titleEl) titleEl.textContent = 'Add user';
   const saveBtn = document.getElementById('save-new-user-btn');
   if (saveBtn) saveBtn.textContent = 'Create User';
   const unameInput = document.getElementById('user-new-username');
@@ -332,6 +381,8 @@ document.getElementById('create-user-modal-btn')?.addEventListener('click', () =
   if (passLabel) passLabel.textContent = 'Password (min 6 chars) *';
   const passInput = document.getElementById('user-new-password');
   if (passInput) passInput.placeholder = '••••••••';
+  const details = document.getElementById('user-perms-details');
+  if (details) details.open = false;
   renderUserProjectsChecklist([], true);
   openModal('modal-create-user');
 });
@@ -347,6 +398,10 @@ document.getElementById('save-new-user-btn')?.addEventListener('click', async (e
     ? []
     : Array.from(document.querySelectorAll('.user-project-check:checked')).map((cb) => Number(cb.value));
 
+  if (!allProjects && !allowedProjects.length) {
+    toast('Pick at least one website or service, or choose "All of them".', 'warning');
+    return;
+  }
   if (!editId && (!username || password.length < 6)) {
     toast('Username required and password must be at least 6 characters.', 'warning');
     return;
@@ -367,7 +422,7 @@ document.getElementById('save-new-user-btn')?.addEventListener('click', async (e
         method: 'POST',
         body: { username, password, permissions, allProjects, allowedProjects },
       });
-      toast(`User "${username}" created in SQLite.`, 'success');
+      toast(`User "${username}" created.`, 'success');
     }
     closeModal('modal-create-user');
     if (window.loadSettingsView) await window.loadSettingsView();

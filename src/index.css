@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "@heroui/styles";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -108,9 +107,15 @@
 @layer base {
   html {
     font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
-    scroll-behavior: smooth;
     background-color: var(--background);
     color: var(--foreground);
+    /* The page still scrolls; the scrollbar itself is hidden. */
+    scrollbar-width: none;
+  }
+
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar {
+    display: none;
   }
 
   code,
@@ -122,45 +127,16 @@
   }
 }
 
-.ink-table.table-root--primary,
-.ink-table.table-root--secondary {
-  padding: 0;
-  border-radius: 0;
-  background-color: transparent;
+/* Lenis smooth scrolling (recommended base styles). */
+html.lenis,
+html.lenis body {
+  height: auto;
 }
 
-.ink-table .table__header,
-.ink-table.table-root--secondary .table__header {
-  border-bottom: 1px solid var(--border);
-  background-color: color-mix(in srgb, var(--surface-deep) 75%, transparent);
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
 }
 
-.ink-table .table__column {
-  background-color: transparent;
-  border-radius: 0;
-}
-
-.ink-table .table__body tr:first-child td:first-child,
-.ink-table .table__body tr:first-child td:last-child,
-.ink-table .table__body tr:last-child td:first-child,
-.ink-table .table__body tr:last-child td:last-child {
-  border-radius: 0;
-}
-
-.ink-table .table__cell {
-  background-color: transparent;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-}
-
-.ink-table .table__row {
-  border-bottom-width: 0;
-}
-
-.ink-table .table__row:last-child .table__cell {
-  border-bottom-width: 0;
-}
-
-.ink-table .table__row:hover .table__cell,
-.ink-table .table__row[data-hovered="true"] .table__cell {
-  background-color: color-mix(in srgb, var(--secondary) 45%, transparent);
+.lenis.lenis-stopped {
+  overflow: hidden;
 }

@@ -1,0 +1,607 @@
+/**
+ * WebDep UI refresh: calmer hierarchy, consistent controls, action menus,
+ * and a working mobile navigation drawer. Loaded last so it can settle
+ * conflicts from earlier layers. Uses theme tokens only, so every palette
+ * in themes.css keeps working.
+ */
+
+/* ---------- Base ---------- */
+[hidden] { display: none !important; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn:focus-visible, .form-control:focus-visible { outline-offset: 1px; }
+
+/* ---------- Native selects: one consistent chevron across themes ---------- */
+select.form-control {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a93a6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px;
+  padding-right: 32px !important;
+  cursor: pointer;
+}
+
+/* ---------- Header ---------- */
+.header-node-select {
+  width: auto;
+  min-width: 140px;
+  max-width: 220px;
+  height: 30px;
+  padding-left: 10px;
+  font-size: 12px;
+}
+
+/* ---------- Buttons ---------- */
+.btn { white-space: nowrap; }
+.btn-icon { width: 28px; padding: 0 !important; justify-content: center; }
+.btn-icon svg { margin: 0; }
+.btn:disabled[title] { pointer-events: auto; cursor: not-allowed; }
+
+/* ---------- Action menu ---------- */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: none;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--bg-card-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+}
+.menu-wrap.open .menu { display: block; }
+.menu.menu-left { right: auto; left: 0; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-item svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--text-dim); }
+.menu-item:hover, .menu-item:focus-visible { background: var(--ink-3); outline: none; }
+.menu-item-danger, .menu-item-danger svg { color: var(--danger-light); }
+.menu-item-danger:hover, .menu-item-danger:focus-visible { background: var(--danger-bg); }
+.menu-sep { height: 1px; margin: 4px 2px; background: var(--border-subtle); }
+
+/* ---------- Workspace header ---------- */
+.ws-banner { overflow: visible; }
+.ws-banner-header { align-items: center; }
+.ws-actions-toolbar { gap: 8px; }
+.ws-actions-toolbar .badge { display: inline-flex; align-items: center; gap: 5px; height: 28px; }
+.ws-actions-toolbar .badge svg { width: 12px; height: 12px; }
+.ws-btn-stop:hover { color: var(--danger-light) !important; }
+
+/* Pipeline stage labels were 10px: hard to read. */
+.water-pipeline-wrapper.compact .water-node-name { font-size: 12px !important; font-weight: 500 !important; }
+.water-pipeline-wrapper.compact .water-node-sub { font-size: 11px !important; }
+
+/* ---------- Settings ---------- */
+.project-card.settings-card .project-info-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.project-card.settings-card .project-card-actions { margin-top: auto; flex-wrap: wrap; gap: 8px; }
+
+/* ---------- Mobile: restore the navigation drawer behind "More" ---------- */
+@media (max-width: 900px) {
+  .sidebar {
+    display: flex !important;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: var(--sidebar-w);
+    max-width: 84vw;
+    z-index: 60;
+    /* `translate` (not `transform`): the intro animation leaves an inline transform on the sidebar,
+       and the drawer slide animates transform, so the resting position lives on its own property. */
+    translate: -105% 0;
+    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.35);
+  }
+  .sidebar.mobile-open { translate: 0 0; }
+  .sidebar-backdrop { display: none !important; }
+  .sidebar-backdrop.active { display: block !important; z-index: 59; }
+
+  .top-header .breadcrumbs { min-width: 0; overflow: hidden; }
+  .top-header .breadcrumbs * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .header-node-select { max-width: 150px; min-width: 0; }
+  .server-pill #server-status-text { display: none; }
+
+  .ws-banner-header { align-items: flex-start; }
+  .ws-actions-toolbar { justify-content: space-between; }
+}
+
+/* ---------- VPS Modules matrix ---------- */
+.modules-fleet-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.modules-node-card {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modules-node-card + .modules-node-card {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.modules-node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.modules-not-installed {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.modules-node-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.modules-node-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.modules-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 10px;
+}
+
+.modules-tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-subtle);
+  transition: border-color var(--transition-fast), background-color var(--transition-fast);
+  min-width: 0;
+}
+
+.modules-tile:hover {
+  border-color: var(--border-medium);
+}
+
+.modules-tile-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.modules-tile-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modules-tile-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.modules-tile-status .module-version {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.modules-tile-status .btn-sm {
+  width: 100%;
+  justify-content: center;
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+
+.modules-tile-status .modules-uninstall-btn {
+  width: auto;
+  flex-shrink: 0;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border-color: var(--border-subtle);
+}
+
+.modules-tile-status .modules-uninstall-btn:hover:not(:disabled) {
+  color: var(--danger-light, #fca5a5);
+  border-color: var(--danger-border, rgba(239, 68, 68, 0.4));
+  background: var(--danger-bg, rgba(239, 68, 68, 0.12));
+}
+
+@media (max-width: 640px) {
+  .modules-node-card { padding: 12px 14px; }
+  .modules-node-grid { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 8px; }
+}
+
+button.preset-chip { font-family: inherit; line-height: 1.5; }
+.preset-chip.active { border-color: var(--accent-border); color: var(--accent-light); background: var(--accent-glow); }
+
+/* Toggle buttons (e.g. service source: Manual upload / GitHub) need a visible selected state. */
+.btn-secondary.active,
+.btn-secondary[aria-pressed="true"] {
+  background: var(--accent-glow);
+  border-color: var(--accent-border);
+  color: var(--accent-light);
+}
+
+/* ==========================================================================
+   Phones & tablets
+   ========================================================================== */
+
+/* Grids of cards never grow wider than the screen: `1fr` alone lets a card's longest unbreakable
+   content (a URL, a command) push the column past the viewport. */
+@media (max-width: 900px) {
+  .settings-cards-grid,
+  .projects-grid,
+  .nodes-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .project-card,
+  .settings-card,
+  .node-card,
+  .card {
+    min-width: 0;
+  }
+}
+
+/* Tablet: two columns where a desktop page has three or more. */
+@media (min-width: 681px) and (max-width: 1080px) {
+  .settings-cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-cards-grid .settings-card-wide { grid-column: 1 / -1; }
+}
+
+/* Page headers: title on its own line, actions wrap underneath instead of squeezing the title. */
+@media (max-width: 680px) {
+  .view-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .view-header .view-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .view-header .view-actions > .btn {
+    flex: 1 1 auto;
+  }
+}
+
+/* Tables as cards (phones and portrait tablets). Each row becomes a card; the first cell is the card
+   title and every other cell shows its column name (td[data-label], filled in by js/table_cards.js). */
+@media (max-width: 900px) {
+  .table-responsive {
+    overflow-x: visible !important;
+    padding-bottom: 0 !important;
+  }
+  table.table,
+  table.table tbody {
+    display: block;
+    width: 100%;
+  }
+  table.table thead {
+    display: none;
+  }
+  table.table tr {
+    display: block;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  table.table tr:last-child {
+    border-bottom: none;
+  }
+  table.table tr:hover td {
+    background: transparent;
+  }
+  table.table td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0 !important;
+    border: none !important;
+    text-align: right !important;
+    min-width: 0;
+  }
+  table.table td::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    text-align: left;
+  }
+  table.table td[data-label=""]::before,
+  table.table td:not([data-label])::before {
+    content: none;
+  }
+  table.table td > * {
+    min-width: 0;
+    max-width: 70%;
+  }
+  /* Card title: the row's first cell, full width, no label. */
+  table.table td:first-child {
+    display: block;
+    text-align: left !important;
+    padding-bottom: 8px !important;
+  }
+  table.table td:first-child::before {
+    content: none;
+  }
+  table.table td:first-child > * {
+    max-width: 100%;
+  }
+  /* Empty/loading rows span the table: keep them centred blocks. */
+  table.table td[colspan] {
+    display: block;
+    text-align: center !important;
+  }
+  table.table td[colspan] > * {
+    max-width: 100%;
+  }
+  /* Row actions: a full-width button row at the bottom of the card. */
+  table.table td:last-child:has(.btn) {
+    justify-content: flex-end;
+    padding-top: 8px !important;
+  }
+  table.table td:last-child:has(.btn)::before {
+    content: none;
+  }
+  table.table td:last-child:has(.btn) > * {
+    max-width: 100%;
+  }
+  /* Editable rows (environment variables): inputs take the full card width. */
+  table.env-table td {
+    display: block;
+    text-align: left !important;
+  }
+  table.env-table td::before {
+    display: block;
+    margin-bottom: 4px;
+  }
+  table.env-table td > * {
+    max-width: 100%;
+  }
+  table.env-table input.form-control {
+    min-width: 0;
+    width: 100%;
+  }
+  /* Overview app list: a compact card instead of one labelled line per column.
+       [icon] name ............ ● status
+              type · node ....... :port
+       CPU 0.4%     RAM 307 MB   Disk 106 MB   (thin meters)
+     The whole card opens the workload, so the type pill, PID and "Go to list" button are dropped. */
+  table.tbl-resource-breakdown tr:not(:has(td[colspan])) {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-areas:
+      "name name status"
+      "name name port"
+      "cpu  mem  disk";
+    column-gap: 16px;
+    row-gap: 0;
+    align-items: center;
+    padding: 14px 16px !important;
+  }
+  table.tbl-resource-breakdown td {
+    padding: 0 !important;
+    border: 0 !important;
+    min-width: 0;
+  }
+  table.tbl-resource-breakdown td::before {
+    content: none !important;
+  }
+  table.tbl-resource-breakdown td,
+  table.tbl-resource-breakdown td > * {
+    max-width: 100%;
+  }
+  table.tbl-resource-breakdown .res-col-kind,
+  table.tbl-resource-breakdown .res-col-action,
+  table.tbl-resource-breakdown .res-pid-chip {
+    display: none !important;
+  }
+
+  table.tbl-resource-breakdown .res-col-name { grid-area: name; }
+  table.tbl-resource-breakdown .res-workload-title {
+    gap: 10px;
+    min-width: 0;
+  }
+  table.tbl-resource-breakdown .res-workload-title > div:last-child {
+    min-width: 0;
+  }
+  table.tbl-resource-breakdown .res-workload-icon svg {
+    width: 20px;
+    height: 20px;
+  }
+  table.tbl-resource-breakdown .res-workload-name {
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  table.tbl-resource-breakdown .res-workload-sub {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+    font-size: 11.5px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  /* Node, commit and domain read as plain muted text instead of bordered pills. */
+  table.tbl-resource-breakdown .res-workload-sub > * {
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: none !important;
+    font-size: 11.5px !important;
+    color: var(--text-dim);
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  table.tbl-resource-breakdown .res-workload-sub > * + *::before {
+    content: "\00b7";
+    margin-right: 6px;
+    color: var(--text-dim);
+  }
+  table.tbl-resource-breakdown .res-workload-sub svg {
+    display: none;
+  }
+
+  table.tbl-resource-breakdown .res-col-status {
+    grid-area: status;
+    justify-content: flex-end;
+    align-self: end;
+    white-space: nowrap;
+    gap: 0;
+  }
+  table.tbl-resource-breakdown .res-col-port {
+    grid-area: port;
+    justify-content: flex-end;
+    align-self: start;
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    gap: 0;
+  }
+  table.tbl-resource-breakdown .res-col-port::before {
+    content: ":" !important;
+  }
+  table.tbl-resource-breakdown .res-col-port.no-port {
+    visibility: hidden;
+  }
+
+  table.tbl-resource-breakdown .res-col-cpu { grid-area: cpu; }
+  table.tbl-resource-breakdown .res-col-mem { grid-area: mem; }
+  table.tbl-resource-breakdown .res-col-disk { grid-area: disk; }
+  table.tbl-resource-breakdown .res-col-metric {
+    display: block;
+    text-align: left !important;
+    margin-top: 12px;
+  }
+  table.tbl-resource-breakdown .res-col-metric::before {
+    display: block;
+    margin-bottom: 2px;
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+  table.tbl-resource-breakdown .res-col-cpu::before { content: "CPU" !important; }
+  table.tbl-resource-breakdown .res-col-mem::before { content: "RAM" !important; }
+  table.tbl-resource-breakdown .res-col-disk::before { content: "Disk" !important; }
+  table.tbl-resource-breakdown .res-metric-cell {
+    width: 100%;
+    gap: 5px;
+  }
+  table.tbl-resource-breakdown .res-metric-head {
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+  table.tbl-resource-breakdown .res-metric-head span:last-child {
+    display: none;
+  }
+  table.tbl-resource-breakdown .res-mini-bar {
+    height: 3px;
+  }
+}
+
+/* Filter pill rows (All / Websites / Services...) scroll sideways inside their own row on phones
+   instead of widening the card. */
+@media (max-width: 680px) {
+  .card-header > div {
+    max-width: 100%;
+    min-width: 0;
+  }
+  .filter-pills {
+    max-width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .filter-pills::-webkit-scrollbar {
+    display: none;
+  }
+  .filter-pills .pill {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+}
+
+/* Overview usage summary: two per row on phones instead of four stacked lines. */
+@media (max-width: 680px) {
+  .resource-summary-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+    padding: 12px 14px;
+  }
+  .resource-summary-bar .res-summary-val {
+    font-size: 11.5px;
+  }
+}
+
+/* Portrait tablets: table cards two per row. */
+@media (min-width: 681px) and (max-width: 900px) {
+  /* Usage summary: one even row of four instead of three plus a stray fourth. */
+  .resource-summary-bar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  table.table tbody {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  table.table tr {
+    border-right: 1px solid var(--border-subtle);
+  }
+  table.table tr:nth-child(2n),
+  table.table tr:last-child {
+    border-right: none;
+  }
+  /* A lone empty/loading row still spans both columns. */
+  table.table tr:has(td[colspan]) {
+    grid-column: 1 / -1;
+    border-right: none;
+  }
+}
