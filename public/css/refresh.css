@@ -406,19 +406,26 @@ button.preset-chip { font-family: inherit; line-height: 1.5; }
     width: 100%;
   }
   /* Overview app list: a compact card instead of one labelled line per column.
-       name ........ status
-       CPU   RAM   Disk      (three mini meters side by side)
-       type  port ... action */
+       [icon] name ............ ● status
+              type · node ....... :port
+       CPU 0.4%     RAM 307 MB   Disk 106 MB   (thin meters)
+     The whole card opens the workload, so the type pill, PID and "Go to list" button are dropped. */
   table.tbl-resource-breakdown tr:not(:has(td[colspan])) {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     grid-template-areas:
       "name name status"
-      "cpu mem disk"
-      "kind port action";
-    column-gap: 14px;
-    row-gap: 6px;
+      "name name port"
+      "cpu  mem  disk";
+    column-gap: 16px;
+    row-gap: 0;
     align-items: center;
+    padding: 14px 16px !important;
+  }
+  table.tbl-resource-breakdown td {
+    padding: 0 !important;
+    border: 0 !important;
+    min-width: 0;
   }
   table.tbl-resource-breakdown td::before {
     content: none !important;
@@ -427,27 +434,98 @@ button.preset-chip { font-family: inherit; line-height: 1.5; }
   table.tbl-resource-breakdown td > * {
     max-width: 100%;
   }
-  table.tbl-resource-breakdown .res-col-name { grid-area: name; padding-bottom: 2px !important; }
+  table.tbl-resource-breakdown .res-col-kind,
+  table.tbl-resource-breakdown .res-col-action,
+  table.tbl-resource-breakdown .res-pid-chip {
+    display: none !important;
+  }
+
+  table.tbl-resource-breakdown .res-col-name { grid-area: name; }
+  table.tbl-resource-breakdown .res-workload-title {
+    gap: 10px;
+    min-width: 0;
+  }
+  table.tbl-resource-breakdown .res-workload-title > div:last-child {
+    min-width: 0;
+  }
+  table.tbl-resource-breakdown .res-workload-icon svg {
+    width: 20px;
+    height: 20px;
+  }
+  table.tbl-resource-breakdown .res-workload-name {
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  table.tbl-resource-breakdown .res-workload-sub {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+    font-size: 11.5px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  /* Node, commit and domain read as plain muted text instead of bordered pills. */
+  table.tbl-resource-breakdown .res-workload-sub > * {
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: none !important;
+    font-size: 11.5px !important;
+    color: var(--text-dim);
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  table.tbl-resource-breakdown .res-workload-sub > * + *::before {
+    content: "\00b7";
+    margin-right: 6px;
+    color: var(--text-dim);
+  }
+  table.tbl-resource-breakdown .res-workload-sub svg {
+    display: none;
+  }
+
   table.tbl-resource-breakdown .res-col-status {
     grid-area: status;
     justify-content: flex-end;
-    gap: 0;
+    align-self: end;
     white-space: nowrap;
+    gap: 0;
   }
+  table.tbl-resource-breakdown .res-col-port {
+    grid-area: port;
+    justify-content: flex-end;
+    align-self: start;
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    gap: 0;
+  }
+  table.tbl-resource-breakdown .res-col-port::before {
+    content: ":" !important;
+  }
+  table.tbl-resource-breakdown .res-col-port.no-port {
+    visibility: hidden;
+  }
+
   table.tbl-resource-breakdown .res-col-cpu { grid-area: cpu; }
   table.tbl-resource-breakdown .res-col-mem { grid-area: mem; }
   table.tbl-resource-breakdown .res-col-disk { grid-area: disk; }
   table.tbl-resource-breakdown .res-col-metric {
     display: block;
     text-align: left !important;
-    padding: 8px 0 !important;
+    margin-top: 12px;
   }
-  /* Small caption above each meter; the per-meter secondary figure is dropped to fit the column. */
   table.tbl-resource-breakdown .res-col-metric::before {
     display: block;
-    margin-bottom: 3px;
+    margin-bottom: 2px;
     font-size: 10.5px;
-    letter-spacing: 0.02em;
     color: var(--text-dim);
   }
   table.tbl-resource-breakdown .res-col-cpu::before { content: "CPU" !important; }
@@ -455,38 +533,17 @@ button.preset-chip { font-family: inherit; line-height: 1.5; }
   table.tbl-resource-breakdown .res-col-disk::before { content: "Disk" !important; }
   table.tbl-resource-breakdown .res-metric-cell {
     width: 100%;
+    gap: 5px;
   }
   table.tbl-resource-breakdown .res-metric-head {
-    font-size: 13px;
+    font-size: 12.5px;
+    white-space: nowrap;
   }
   table.tbl-resource-breakdown .res-metric-head span:last-child {
     display: none;
   }
-  table.tbl-resource-breakdown .res-col-kind {
-    grid-area: kind;
-    justify-content: flex-start;
-  }
-  table.tbl-resource-breakdown .res-col-port {
-    grid-area: port;
-    justify-content: flex-start;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-  }
-  table.tbl-resource-breakdown .res-col-port::before {
-    content: "Port" !important;
-    font-size: 10.5px;
-    color: var(--text-dim);
-  }
-  table.tbl-resource-breakdown .res-col-action {
-    grid-area: action;
-    justify-content: flex-end;
-    padding-top: 4px !important;
-  }
-  table.tbl-resource-breakdown .res-col-action .btn {
-    white-space: nowrap;
+  table.tbl-resource-breakdown .res-mini-bar {
+    height: 3px;
   }
 }
 

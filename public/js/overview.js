@@ -582,7 +582,7 @@ function renderResourceBreakdown(resources) {
       const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${shortSha(r.commitSha)}</span>` : '';
       subtitle = `<span style="color:var(--text-dim)">Backend Service</span>${sha}${nodeTag}`;
     } else {
-      const dom = r.domain ? `<a href="http://${escapeHtml(r.domain)}" target="_blank" class="domain-badge" style="font-size:11px;" onclick="event.stopPropagation()">${escapeHtml(r.domain)}</a>` : (r.port ? `<span style="color:var(--text-dim)">${r.port}</span>` : '<span style="color:var(--text-dim)">Local only</span>');
+      const dom = r.domain ? `<a href="http://${escapeHtml(r.domain)}" target="_blank" class="domain-badge" style="font-size:11px;" onclick="event.stopPropagation()">${escapeHtml(r.domain)}</a>` : `<span style="color:var(--text-dim)">${r.port ? 'Website' : 'Local only'}</span>`;
       const sha = r.commitSha ? `<span class="sha-pill" style="font-size:10px; margin-left:4px;">${shortSha(r.commitSha)}</span>` : '';
       subtitle = `${dom}${sha}${nodeTag}`;
     }
@@ -624,8 +624,8 @@ function renderResourceBreakdown(resources) {
         : 'style="cursor: pointer;" onclick="navigateTo(\'settings\')"');
 
     return `
-      <tr>
-        <td class="res-col-name" ${navClick}>
+      <tr class="res-row" ${navClick}>
+        <td class="res-col-name">
           <div class="res-workload-title">
             <div class="res-workload-icon" style="color: ${iconInfo.color};">${kindIconSvg}</div>
             <div>
@@ -634,8 +634,8 @@ function renderResourceBreakdown(resources) {
             </div>
           </div>
         </td>
-        <td class="res-col-kind" ${navClick}><span class="${kindBadgeClass}">${kindLabel}</span></td>
-        <td class="res-col-port">${portPid}</td>
+        <td class="res-col-kind"><span class="${kindBadgeClass}">${kindLabel}</span></td>
+        <td class="res-col-port${r.port ? '' : ' no-port'}">${portPid}</td>
         <td class="res-col-status">
           <span class="status-dot ${isRunning ? 'online' : isMaintenance ? 'maintenance' : 'offline'}"></span>
           <span style="font-size: 12px; font-weight: 500; margin-left: 6px; color: ${isRunning ? 'var(--success)' : isMaintenance ? 'var(--warning)' : 'var(--text-muted)'};">${isRunning ? 'Running' : isMaintenance ? 'Maintenance' : 'Stopped'}</span>
