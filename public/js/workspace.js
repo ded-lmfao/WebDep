@@ -4,6 +4,8 @@
  */
 
 import { icon } from './icons.js';
+import { loadAccountsView, syncSidebarMode, guardView } from './accounts.js';
+import { databaseScope } from './permissions.js';
 import {
   state,
   WEBSITE_WORKSPACE_TABS,
@@ -218,6 +220,7 @@ function updateBreadcrumbs() {
     rollbacks: 'Rollbacks',
     monitor: 'Monitoring',
     audit: 'Activity',
+    access: 'Permissions',
   };
 
   if (isInsideCard && state.selectedEntityKind === 'database') {
@@ -247,6 +250,10 @@ function updateBreadcrumbs() {
       nodes: 'Cluster Nodes',
       modules: 'VPS Modules',
       settings: 'Platform Settings',
+      account: 'My Account',
+      users: 'Admin Panel › Users',
+      requests: 'Admin Panel › Requests',
+      'admin-audit': 'Admin Panel › Audit',
     };
     secEl.textContent = globalLabels[state.currentView] || state.currentView;
   }
@@ -362,9 +369,10 @@ function renderDatabaseWorkspaceHeader(banner) {
 
     const actions = document.getElementById('ws-project-actions');
     if (actions) {
-      const canManage = typeof window.hasPower === 'function' ? window.hasPower('databases_manage') : false;
-      const canControl = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases', 'databases_manage']) : false;
-      const canCreds = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases_manage', 'env']) : false;
+      const dbScope = databaseScope(d);
+      const canManage = typeof window.hasPower === 'function' ? window.hasPower('databases_manage', dbScope) : false;
+      const canControl = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases', 'databases_manage'], dbScope) : false;
+      const canCreds = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases_manage', 'env'], dbScope) : false;
       const safeName = escapeHtml(d.name).replace(/'/g, '&#39;');
       actions.innerHTML = `
         <div class="ws-actions-group">
@@ -409,7 +417,8 @@ function renderDatabaseWorkspaceHeader(banner) {
     deployments: ['databases', 'databases_manage'],
     logs: ['databases', 'databases_manage', 'logs'],
     files: ['databases', 'databases_manage', 'files', 'files_write'],
-    audit: ['databases', 'databases_manage', 'audit'],
+    audit: ['databases', 'databases_manage', 'audit', 'activity'],
+    access: ['access_manage'],
   };
 
   const tabsBar = document.getElementById('ws-tabs-bar');
@@ -703,8 +712,9 @@ function renderWebsiteWorkspaceHeader() {
     logs: ['logs'],
     files: ['files', 'files_write'],
     env: ['env'],
-    audit: ['audit'],
+    audit: ['audit', 'activity'],
     monitor: ['monitor'],
+    access: ['access_manage'],
   };
   const hiddenSecondaryTabs = new Set(['rollbacks', 'monitor']);
 
@@ -776,6 +786,8 @@ window.addEventListener('resize', () => centerActiveWebsiteTab(false));
 
 
 function renderCurrentView() {
+  state.currentView = guardView(state.currentView);
+  syncSidebarMode();
   updateBreadcrumbs();
   renderWebsiteWorkspaceHeader();
 
@@ -849,6 +861,13 @@ function renderCurrentView() {
     case 'audit': void loadAuditView(); break;
     case 'nodes': if (window.loadNodesView) void window.loadNodesView(); break;
     case 'modules': if (window.loadModulesView) void window.loadModulesView(); break;
+    case 'account':
+    case 'users':
+    case 'requests':
+    case 'admin-audit':
+    case 'access':
+      loadAccountsView(state.currentView);
+      break;
   }
 }
 

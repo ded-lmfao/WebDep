@@ -369,6 +369,7 @@ const WEBSITE_WORKSPACE_TABS = new Set([
   'rollbacks',
   'monitor',
   'audit',
+  'access',
 ]);
 
 const DATABASE_WORKSPACE_TABS = new Set([
@@ -376,6 +377,7 @@ const DATABASE_WORKSPACE_TABS = new Set([
   'logs',
   'files',
   'audit',
+  'access',
 ]);
 
 // ============================================================================

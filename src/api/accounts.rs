@@ -350,3 +350,100 @@ pub(crate) async fn update_profile_handler(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
     Ok(Json(updated))
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    async fn call(
+        router: &axum::Router,
+        method: Method,
+        uri: &str,
+        session: Option<(&str, &str)>,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder().method(method).uri(uri).header(header::CONTENT_TYPE, "application/json");
+        if let Some((sid, csrf)) = session {
+            req = req.header(header::COOKIE, format!("nd_session={sid}")).header("x-csrf-token", csrf);
+        }
+        let res = router.clone().oneshot(req.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn registration_approval_and_delegated_access() {
+        let state = crate::api::common::tests_state_helper().await;
+        let router = crate::api::create_router(state.clone());
+        let admin = state.auth.create_session(1).await.unwrap();
+        let admin_s = Some((admin.id.as_str(), admin.csrf_token.as_str()));
+
+        // Register: neutral ack, pending login explains itself, duplicate is silent.
+        let reg = json!({"username": "priya", "email": "Priya@Acme.io", "password": "PriyaPass123", "displayName": "Priya"});
+        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, reg.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, reg).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&router, Method::POST, "/api/auth/login", None, json!({"username": "priya", "password": "PriyaPass123"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+
+        let (_, list) = call(&router, Method::GET, "/api/requests", admin_s, json!({})).await;
+        let list = list.as_array().unwrap();
+        assert_eq!(list.len(), 1, "duplicate request was not stored");
+        let req_id = list[0]["id"].as_i64().unwrap();
+        let (st, approved) = call(&router, Method::POST, &format!("/api/requests/{req_id}/approve"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        let priya_id = approved["userId"].as_i64().unwrap();
+
+        // Approved account signs in by email and starts with no app access.
+        let (st, login) = call(&router, Method::POST, "/api/auth/login", None, json!({"username": "priya@acme.io", "password": "PriyaPass123"})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(login["user"]["access"]["projects"], json!({}));
+
+        // Self-registration toggle.
+        let (st, _) = call(&router, Method::PUT, "/api/settings", admin_s, json!({"allow_registration": "false"})).await;
+        assert!(st.is_success());
+        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, json!({"username": "late", "email": "late@x.io", "password": "LatePass123"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+
+        // Delegation: a lead with deploy + manage on one app can give deploy, not env.
+        let (_, shop) = call(&router, Method::POST, "/api/projects", admin_s, json!({"name": "Shop", "slug": "acct-shop", "repo_url": ""})).await;
+        let (_, blog) = call(&router, Method::POST, "/api/projects", admin_s, json!({"name": "Blog", "slug": "acct-blog", "repo_url": ""})).await;
+        let (shop_id, blog_id) = (shop["id"].as_i64().unwrap(), blog["id"].as_i64().unwrap());
+        let (st, lead) = call(&router, Method::POST, "/api/users", admin_s, json!({
+            "username": "lead", "password": "LeadPass123", "mustChangePassword": false,
+            "grants": [{"scope": "project", "id": shop_id, "powers": ["deploy", "access_manage"]}]
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        let lead_id = lead["id"].as_i64().unwrap();
+        let lead_sess = state.auth.create_session(lead_id).await.unwrap();
+        let lead_s = Some((lead_sess.id.as_str(), lead_sess.csrf_token.as_str()));
+        let path = format!("/api/access/project/{shop_id}/{priya_id}");
+        let (st, _) = call(&router, Method::PUT, &path, lead_s, json!({"powers": ["deploy"]})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&router, Method::PUT, &path, lead_s, json!({"powers": ["env"]})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = call(&router, Method::PUT, &format!("/api/access/project/{blog_id}/{priya_id}"), lead_s, json!({"powers": []})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "no manage access on the other app");
+        let priya = state.auth.get_user_by_id(priya_id).await.unwrap();
+        assert!(priya.has_project_power(shop_id, &["deploy"]));
+        assert!(!priya.has_project_power(shop_id, &["env"]));
+        assert!(!priya.can_access_project(blog_id));
+
+        // Temporary passwords block everything but the password change.
+        let (_, temp) = call(&router, Method::POST, "/api/users", admin_s, json!({"username": "newbie", "password": "TempPass123"})).await;
+        let temp_sess = state.auth.create_session(temp["id"].as_i64().unwrap()).await.unwrap();
+        let temp_s = Some((temp_sess.id.as_str(), temp_sess.csrf_token.as_str()));
+        let (st, body) = call(&router, Method::GET, "/api/projects", temp_s, json!({})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "password_change_required");
+        let (st, _) = call(&router, Method::POST, "/api/auth/password", temp_s, json!({"current": "TempPass123", "next": "OwnPass4567", "revokeOtherSessions": false})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&router, Method::GET, "/api/projects", temp_s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+    }
+}

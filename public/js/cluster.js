@@ -67,7 +67,7 @@ export async function loadNodes(force = false) {
 export async function loadNodesView(force = false) {
   await loadNodes(force);
   let tokens = [];
-  if (state.user?.isMainAdmin) {
+  if (state.user?.isAdmin) {
     try {
       const res = await api('/api/cluster/enroll-tokens', { noCache: true });
       if (Array.isArray(res)) tokens = res;
@@ -81,7 +81,7 @@ export function renderNodesView(enrollTokens = null) {
   if (!container) return;
 
   const nodes = Array.isArray(state.nodes) ? state.nodes : [];
-  const isMainAdmin = Boolean(state.user?.isMainAdmin);
+  const isMainAdmin = Boolean(state.user?.isAdmin);
 
   const onlineCount = nodes.filter((n) => n.status === 'online').length;
   const drainingCount = nodes.filter((n) => n.status === 'draining').length;

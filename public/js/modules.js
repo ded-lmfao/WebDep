@@ -202,7 +202,7 @@ export function renderModulesView() {
 
   const catalog = Array.isArray(data.catalog) ? data.catalog : [];
   const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-  const isMainAdmin = Boolean(state.user?.isMainAdmin);
+  const isMainAdmin = Boolean(state.user?.isAdmin);
 
   if (!nodes.length) {
     setHtmlIfChanged(wrap, '<div class="card" style="padding:24px; text-align:center; color:var(--text-dim);">No VPS nodes registered yet.</div>');

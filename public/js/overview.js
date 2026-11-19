@@ -518,18 +518,18 @@ function renderResourceBreakdown(resources) {
     let emptyAction = '';
     if (filter === 'website') {
       emptyMsg = 'No hosted websites created yet.';
-      emptyAction = hasPower('projects_manage') ? '<button class="btn btn-primary btn-sm" style="margin-top: 10px;" onclick="openAddWebsiteModal()">+ Add Website</button>' : '';
+      emptyAction = hasPower('projects_manage', 'panel') ? '<button class="btn btn-primary btn-sm" style="margin-top: 10px;" onclick="openAddWebsiteModal()">+ Add Website</button>' : '';
     } else if (filter === 'service') {
       emptyMsg = 'No backend services created yet.';
-      emptyAction = hasPower('services_manage') ? '<button class="btn btn-primary btn-sm" style="margin-top: 10px;" onclick="openAddServiceModal()">+ Add Service</button>' : '';
+      emptyAction = hasPower('services_manage', 'panel') ? '<button class="btn btn-primary btn-sm" style="margin-top: 10px;" onclick="openAddServiceModal()">+ Add Service</button>' : '';
     } else if (filter === 'database') {
       emptyMsg = 'No managed databases created yet.';
       emptyAction = hasAnyPower(['databases', 'databases_manage']) ? '<button class="btn btn-primary btn-sm" style="margin-top: 10px;" onclick="navigateTo(\'databases\')">Go to Databases &rarr;</button>' : '';
     } else if (filter === 'all') {
       emptyMsg = 'No workloads created yet. Deploy websites, backend services or databases to monitor their live resource usage.';
       const btns = [
-        hasPower('projects_manage') ? '<button class="btn btn-primary btn-sm" onclick="openAddWebsiteModal()">+ Add Website</button>' : '',
-        hasPower('services_manage') ? '<button class="btn btn-secondary btn-sm" onclick="openAddServiceModal()">+ Add Service</button>' : '',
+        hasPower('projects_manage', 'panel') ? '<button class="btn btn-primary btn-sm" onclick="openAddWebsiteModal()">+ Add Website</button>' : '',
+        hasPower('services_manage', 'panel') ? '<button class="btn btn-secondary btn-sm" onclick="openAddServiceModal()">+ Add Service</button>' : '',
         hasAnyPower(['databases', 'databases_manage']) ? '<button class="btn btn-secondary btn-sm" onclick="navigateTo(\'databases\')">Go to Databases &rarr;</button>' : '',
       ].filter(Boolean).join('');
       emptyAction = btns ? `<div style="margin-top: 12px; display: flex; gap: 8px; justify-content: center;">${btns}</div>` : '';

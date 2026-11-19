@@ -237,9 +237,15 @@ Move a website or backend service from one VPS to another directly from its work
 | **Websites** | Multi-framework web apps placed on any node with auto-allocated ports, custom domains, Caddy HTTPS, and maintenance mode. |
 | **Services** | 24/7 background daemons (Lavalink/Java, Python workers, Node bots, Go/Rust binaries) with live PID tracking and log streaming. |
 | **Databases** | Isolated native PostgreSQL clusters on any node with SCRAM-SHA-256 auth, local/mesh/CIDR/public rules, and 1-click `DATABASE_URL` linking. |
-| **Nodes** | Cluster Nodes & Mesh Topology view with per-node network charts, display names, `+ Add Node` token/command generator, drain/evacuate, and `Update Fleet`. |
-| **Modules** | Per-VPS runtime readiness (Git, Node.js, Python, Java, Go, Rust, PHP, Ruby, .NET, UnRAR) with one-click install/remove through the server's package manager (Main Admin only). |
-| **Platform Settings** | WebAuthn Passkeys, TOTP 2FA, users with simple access levels (Viewer / Developer / Full access / Custom) and per-website scope, GitHub tokens, SHA-256 verified Core/Fleet updates, server cache/restart controls, and 15 themes. |
+| **My Account** | Every user's own profile (name, email), password, passkeys, TOTP 2FA, sessions, and a read-only list of the apps they can access. |
+| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
+
+#### Accounts & Permissions
+- **Sign-up requests**: people create an account request from the sign-in page; it waits in **Admin Panel › Requests** and an account exists only after approval. Admins can also create accounts directly (with a temporary password the user must change). Self-registration can be switched off in **Platform Settings › Accounts**.
+- **Roles**: the **Main Admin** (from `.env`) can make other users **Admin** (full access). Everyone else starts with no access.
+- **Per-app permissions**: every website, service, and database has a **Permissions** tab. Pick people and tick exactly what they can do there (logs, files, deploy, start/stop, backups, env, domains, settings, activity, connection details, and so on).
+- **Delegation**: **Manage access** on an app, and the panel permissions *View users*, *Create accounts*, *Edit or disable users*, and *Approve or reject requests*, let trusted users help. Nobody can give a permission they don't hold, and every change is written to the audit log.
+- **Nodes** (topology, `+ Add Node`, drain/evacuate, `Update Fleet`), **VPS Modules** (runtime installs), and **Platform Settings** (GitHub tokens, Core/Fleet updates, cache/restart, themes) live in the Admin Panel.
 
 The panel is fully responsive: on phones and tablets the sidebar becomes a drawer with a bottom tab bar, and data tables turn into compact cards.
 
@@ -251,7 +257,8 @@ Opening any website or service exposes its workspace toolbar (**Start / Stop / R
 - **Files** — In-browser remote file explorer, upload/download, and syntax-highlighted editor scoped strictly to the project root.
 - **Environment** — AES-256-GCM encrypted `.env` Vault secrets and linked database bindings.
 - **Releases** — Build archives, local snapshots, **Save Off-Node on Web-Core**, and **Restore to Node**.
-- **Activity** — Workload audit trail and placement/shift events.
+- **Activity** — Workload audit trail and placement/shift events (visible with the app's *View activity* permission).
+- **Permissions** — Who can use this app and what they can do (admins, and users with *Manage access* on it).
 
 ### Data Layout
 

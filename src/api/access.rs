@@ -421,9 +421,7 @@ mod tests {
 
     #[test]
     fn panel_powers_follow_the_same_rule() {
-        let mut g = Grants::default();
-        g.panel = set(&["users_create", "users_view"]);
-        let u = user_with(g);
+        let u = user_with(Grants { panel: set(&["users_create", "users_view"]), ..Default::default() });
         assert!(ensure_can_grant(&u, SCOPE_GLOBAL, None, &strings(&["users_view"])).is_ok());
         assert!(ensure_can_grant(&u, SCOPE_GLOBAL, None, &strings(&["users_edit"])).is_err());
     }

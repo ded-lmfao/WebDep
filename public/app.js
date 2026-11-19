@@ -30,6 +30,7 @@ import './js/cluster.js';
 import './js/modules.js';
 import './js/sidebar.js';
 import './js/table_cards.js';
+import './js/accounts.js';
 
 // ============================================================================
 // Global Polling & Live Updates (Low Resource & Page Visibility Aware)

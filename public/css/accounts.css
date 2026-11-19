@@ -1,0 +1,90 @@
+/* Accounts: sign-up, My account, admin panel (users, requests, audit), app permissions. */
+
+[hidden] { display: none !important; }
+
+/* Sidebar groups: normal panel vs admin panel */
+.nav-group { display: flex; flex-direction: column; gap: 2px; }
+.nav-item-admin-entry { margin-top: 6px; border: 1px solid var(--border-subtle); }
+.nav-item-back { color: var(--text-muted); }
+.nav-badge.nav-badge-alert { background: var(--danger-bg); color: var(--danger-light); }
+
+/* Sign-in page additions */
+.login-register-hint { margin: 16px 0 0; text-align: center; font-size: 13px; color: var(--text-dim); }
+.login-register-hint .btn-text-action { font-size: 13px; }
+.login-register-intro { margin: 0 0 14px; font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+.login-notice { margin: 12px 0 0; padding: 9px 12px; border-radius: var(--radius-sm); font-size: 12.5px; line-height: 1.45; }
+.login-notice.is-warning { background: var(--warning-bg); color: var(--warning-light); border: 1px solid var(--warning-border); }
+.login-notice.is-success { background: var(--success-bg); color: var(--success-light); border: 1px solid var(--success-border); }
+
+/* Shared form bits */
+.acct-form { display: flex; flex-direction: column; gap: 2px; }
+.acct-form-error { margin: 6px 0 10px; font-size: 12.5px; color: var(--danger-light); }
+.acct-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 2px; cursor: pointer; }
+.acct-switch-row strong { display: block; font-weight: 500; font-size: 13.5px; color: var(--text-main); }
+.acct-switch-row small { display: block; margin-top: 3px; font-size: 12px; color: var(--text-dim); line-height: 1.45; }
+.acct-switch { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--accent); }
+
+/* Tables */
+.acct-table-wrap { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-card); }
+.acct-table td { vertical-align: middle; }
+.acct-table .badge { white-space: nowrap; }
+.acct-person { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.acct-avatar { width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; background: var(--accent-glow); color: var(--accent-light); border: 1px solid var(--accent-border); }
+.acct-person-name { font-size: 13.5px; color: var(--text-main); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-person-sub { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acct-muted { color: var(--text-dim); font-size: 12px; }
+.acct-actions { display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.acct-empty { text-align: center; padding: 28px 16px !important; color: var(--text-dim); }
+.badge-pro { background: var(--accent-glow); color: var(--accent-light); border: 1px solid var(--accent-border); }
+
+/* User editor */
+.acct-editor-section { margin-top: 18px; }
+.acct-editor-section:first-child { margin-top: 0; }
+.acct-editor-heading { font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--text-muted); margin: 0 0 8px; }
+.acct-editor-note { font-size: 12px; color: var(--text-dim); margin: -2px 0 10px; line-height: 1.45; }
+.acct-grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; }
+.acct-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-normal); cursor: pointer; }
+.acct-check input { accent-color: var(--accent); width: 15px; height: 15px; flex-shrink: 0; }
+.acct-check.is-locked { color: var(--text-dim); cursor: not-allowed; }
+.acct-power-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 7px 14px; }
+.acct-app-group { margin-top: 12px; }
+.acct-app-group-title { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; color: var(--text-main); margin-bottom: 6px; }
+.acct-app-row { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); margin-bottom: 6px; background: var(--bg-alt); }
+.acct-app-row-head { display: flex; align-items: center; gap: 10px; padding: 8px 10px; }
+.acct-app-row-head .acct-check { flex: 1; min-width: 0; font-weight: 500; }
+.acct-app-row-body { padding: 4px 12px 12px 35px; }
+.acct-app-summary { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+
+/* App permissions tab */
+.acct-access-panel { display: flex; flex-direction: column; gap: 12px; max-width: 920px; }
+.acct-callout { padding: 10px 12px; border-radius: var(--radius-sm); font-size: 12.5px; line-height: 1.5; background: var(--accent-glow); color: var(--accent-light); border: 1px solid var(--accent-border); }
+.acct-add-row { display: flex; gap: 8px; }
+.acct-add-row select { flex: 1; }
+.acct-access-list { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-card); }
+.acct-access-item { border-bottom: 1px solid var(--border-subtle); }
+.acct-access-item:last-child { border-bottom: 0; }
+.acct-access-head { display: flex; align-items: center; gap: 12px; padding: 11px 14px; cursor: pointer; }
+.acct-access-head:hover { background: var(--bg-card-hover); }
+.acct-access-head .acct-person { flex: 1; }
+.acct-access-body { padding: 4px 14px 14px 56px; }
+.acct-chevron { color: var(--text-dim); transition: transform var(--transition-fast); }
+.acct-access-item.is-open .acct-chevron { transform: rotate(180deg); }
+
+/* My account: access summary */
+.acct-myaccess .acct-scope { padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
+.acct-myaccess .acct-scope:last-child { border-bottom: 0; }
+.acct-scope-title { font-size: 13px; color: var(--text-main); font-weight: 500; }
+.acct-chip-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.acct-chip { font-size: 11.5px; padding: 2px 8px; border-radius: var(--radius-xs); background: var(--ink-3); color: var(--text-muted); }
+
+/* Forced password change */
+.acct-force-overlay { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--bg-canvas); }
+.acct-force-card { width: 100%; max-width: 400px; padding: 28px; border-radius: var(--radius-lg); border: 1px solid var(--border-subtle); background: var(--bg-card); }
+.acct-force-card h2 { margin: 0 0 6px; font-size: 20px; font-weight: 500; color: var(--text-main); }
+.acct-force-card > p { margin: 0 0 18px; font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+
+@media (max-width: 640px) {
+  .acct-grid-2 { grid-template-columns: 1fr; }
+  .acct-access-body, .acct-app-row-body { padding-left: 14px; }
+  #users-search-input, #admin-audit-search { width: 100% !important; }
+}

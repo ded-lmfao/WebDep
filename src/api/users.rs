@@ -228,8 +228,10 @@ pub(crate) async fn create_user_handler(
     .await
     .map_err(db_error)?;
     if role != "admin" {
-        let mut set = grants::Grants::default();
-        set.panel = payload.panel_powers.iter().cloned().collect();
+        let mut set = grants::Grants {
+            panel: payload.panel_powers.iter().cloned().collect(),
+            ..Default::default()
+        };
         for (app, powers) in app_grants {
             app.map_mut(&mut set).insert(app.id, powers.into_iter().collect());
         }
@@ -307,8 +309,13 @@ pub(crate) async fn update_user_handler(
         }
     }
 
-    if let Some(raw) = payload.email.as_deref() {
-        let email = validate_email(raw)?;
+    if let Some(email) = payload
+        .email
+        .as_deref()
+        .map(validate_email)
+        .transpose()?
+        .filter(|e| e.as_deref().unwrap_or("") != target.email)
+    {
         sqlx::query("UPDATE users SET email = $1 WHERE id = $2")
             .bind(email)
             .bind(id)
@@ -318,8 +325,13 @@ pub(crate) async fn update_user_handler(
         changes.push("email");
     }
 
-    if let Some(raw) = payload.display_name.as_deref() {
-        let name = validate_display_name(raw)?;
+    if let Some(name) = payload
+        .display_name
+        .as_deref()
+        .map(validate_display_name)
+        .transpose()?
+        .filter(|n| *n != target.display_name)
+    {
         sqlx::query("UPDATE users SET display_name = $1 WHERE id = $2")
             .bind(name)
             .bind(id)
@@ -329,7 +341,10 @@ pub(crate) async fn update_user_handler(
         changes.push("name");
     }
 
-    if let Some(flag) = payload.must_change_password.filter(|_| !target.is_main_admin) {
+    if let Some(flag) = payload
+        .must_change_password
+        .filter(|f| !target.is_main_admin && *f != target.must_change_password)
+    {
         sqlx::query("UPDATE users SET must_change_password = $1 WHERE id = $2")
             .bind(flag)
             .bind(id)
@@ -339,7 +354,7 @@ pub(crate) async fn update_user_handler(
         changes.push("password policy");
     }
 
-    if let Some(disabled) = payload.disabled.filter(|_| !target.is_main_admin) {
+    if let Some(disabled) = payload.disabled.filter(|d| !target.is_main_admin && *d != target.disabled) {
         if target.id == actor.id {
             return Err(bad("You can't disable your own account."));
         }

@@ -145,7 +145,7 @@ function prefetchWebsiteWorkspace(projectId) {
     `/api/projects/${pid}/releases`,
     `/api/audit?projectId=${pid}&limit=500`,
   ];
-  if (typeof window.hasPower === 'function' ? window.hasPower('env') : false) endpoints.push(`/api/projects/${pid}/env`);
+  if (typeof window.hasPower === 'function' ? window.hasPower('env', { projectId: pid }) : false) endpoints.push(`/api/projects/${pid}/env`);
 
   // Run non-blocking background warm-up
   setTimeout(() => {
