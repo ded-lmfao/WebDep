@@ -377,14 +377,14 @@ function renderDatabaseWorkspaceHeader(banner) {
       actions.innerHTML = `
         <div class="ws-actions-group">
           ${canControl ? `
-            <button class="btn ${isRunning ? 'btn-secondary ws-btn-stop' : 'btn-success ws-btn-start'} btn-sm" id="ws-btn-db-toggle-${d.id}" onclick="toggleDatabaseState(${d.id})" ${(isStarting || isStopping) ? 'disabled' : ''}>
+            <button class="btn btn-sm btn-icon ${isRunning ? 'ws-btn-stop' : 'ws-btn-start'}" id="ws-btn-db-toggle-${d.id}" onclick="toggleDatabaseState(${d.id})" title="${isRunning ? 'Stop database' : isStarting ? 'Starting' : isStopping ? 'Stopping' : 'Start database'}" aria-label="${isRunning ? 'Stop database' : 'Start database'}" ${(isStarting || isStopping) ? 'disabled' : ''}>
               ${isRunning
-            ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="6" y="6" width="12" height="12"></rect></svg><span>Stop</span>`
+            ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="6" y="6" width="12" height="12"></rect></svg>`
             : isStarting
-              ? `<span class="btn-spinner"></span><span>Starting</span>`
+              ? `<span class="btn-spinner"></span>`
               : isStopping
-                ? `<span class="btn-spinner"></span><span>Stopping</span>`
-                : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg><span>Start</span>`}
+                ? `<span class="btn-spinner"></span>`
+                : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>`}
             </button>
             <button class="btn btn-sm btn-icon ws-btn-restart" onclick="restartDatabase(${d.id})" title="Restart PostgreSQL cluster" aria-label="Restart PostgreSQL cluster" ${(isStarting || isStopping) ? 'disabled' : ''}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"></path></svg>
@@ -394,13 +394,12 @@ function renderDatabaseWorkspaceHeader(banner) {
 
         <div class="ws-actions-group">
           ${canCreds ? `
-            <button class="btn btn-secondary btn-sm" onclick="showDatabaseDetails(${d.id})" title="Connection Strings &amp; Credentials">
+            <button class="btn btn-sm btn-icon ws-btn-settings" onclick="showDatabaseDetails(${d.id})" title="Connection details and credentials" aria-label="Connection details">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
-              <span>Creds</span>
             </button>
           ` : ''}
           ${canManage ? `
-            <button class="btn btn-sm ws-btn-delete" onclick="deleteDatabase(${d.id}, '${safeName}')" title="Delete Database">
+            <button class="btn btn-sm btn-icon ws-btn-delete" onclick="deleteDatabase(${d.id}, '${safeName}')" title="Delete database" aria-label="Delete database">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
             </button>
           ` : ''}
@@ -675,19 +674,19 @@ function renderWebsiteWorkspaceHeader() {
 
       actions.innerHTML = `
         <div class="ws-actions-group">
-          ${canDeploy ? `<button class="btn btn-primary btn-sm" onclick="deployProject(${p.id})" title="${localSource ? 'Deploy the files uploaded in the Files tab' : 'Pull the latest commit and deploy it'}">${I.deploy}<span>Deploy</span></button>` : ''}
+          ${canDeploy ? `<button class="btn btn-sm btn-icon ws-btn-deploy" onclick="deployProject(${p.id})" title="${localSource ? 'Deploy the files uploaded in the Files tab' : 'Pull the latest commit and deploy it'}" aria-label="Deploy">${I.deploy}</button>` : ''}
           ${canProcess ? `
             ${isOnline || isMaintenance
-              ? `<button class="btn btn-secondary btn-sm ws-btn-stop" onclick="stopProject(${p.id})" title="Stop the process">${I.stop}<span>Stop</span></button>`
-              : `<button class="btn btn-secondary btn-sm ws-btn-start" onclick="startProject(${p.id})" ${neverDeployed ? 'disabled title="Deploy this website once before starting it"' : 'title="Start the process"'}>${I.start}<span>Start</span></button>`}
+              ? `<button class="btn btn-sm btn-icon ws-btn-stop" onclick="stopProject(${p.id})" title="Stop the process" aria-label="Stop">${I.stop}</button>`
+              : `<button class="btn btn-sm btn-icon ws-btn-start" onclick="startProject(${p.id})" aria-label="Start" ${neverDeployed ? 'disabled title="Deploy this website once before starting it"' : 'title="Start the process"'}>${I.start}</button>`}
             ${isOnline ? `<button class="btn btn-sm btn-icon ws-btn-restart" onclick="restartProject(${p.id})" title="Restart the process" aria-label="Restart the process">${I.restart}</button>` : ''}
           ` : ''}
         </div>
         <div class="ws-actions-group">
           ${isMaintenance ? `<span class="badge badge-warning" title="Visitors see the maintenance page">${I.maint} Maintenance</span>` : ''}
-          ${canMaint ? `<button class="btn btn-secondary btn-sm" onclick="toggleMaintenanceMode(${p.id})" title="${isMaintenance ? 'Show the live site to visitors again' : 'Show visitors a maintenance page'}">${I.maint}<span>${isMaintenance ? 'Exit maintenance' : 'Maintenance'}</span></button>` : ''}
-          ${canDomains ? `<button class="btn btn-secondary btn-sm" onclick="openNginxModal(${p.id})" title="Domains and SSL certificates">${I.globe}<span>Domains</span></button>` : ''}
-          ${canManage ? `<button class="btn btn-secondary btn-sm" onclick="${settingsAction}" title="${isService ? 'Service settings' : 'Website settings'}">${I.gear}<span>Settings</span></button>` : ''}
+          ${canMaint ? `<button class="btn btn-sm btn-icon ws-btn-maint ${isMaintenance ? 'is-on' : ''}" onclick="toggleMaintenanceMode(${p.id})" title="${isMaintenance ? 'Exit maintenance mode' : 'Maintenance mode: show visitors a maintenance page'}" aria-label="${isMaintenance ? 'Exit maintenance mode' : 'Maintenance mode'}" aria-pressed="${isMaintenance ? 'true' : 'false'}">${I.maint}</button>` : ''}
+          ${canDomains ? `<button class="btn btn-sm btn-icon ws-btn-domains" onclick="openNginxModal(${p.id})" title="Domains and SSL certificates" aria-label="Domains and SSL">${I.globe}</button>` : ''}
+          ${canManage ? `<button class="btn btn-sm btn-icon ws-btn-settings" onclick="${settingsAction}" title="${isService ? 'Service settings' : 'Website settings'}" aria-label="Settings">${I.gear}</button>` : ''}
           ${canDelete ? `<button class="btn btn-sm btn-icon ws-btn-delete" onclick="deleteProject(${p.id})" title="Delete this ${isService ? 'service' : 'website'}" aria-label="Delete this ${isService ? 'service' : 'website'}">${I.trash}</button>` : ''}
         </div>
       `;
