@@ -3738,6 +3738,36 @@
     </div>
   </div>
 
+  <!-- MODAL: APP RESOURCE LIMITS -->
+  <div class="modal-overlay" id="modal-app-limits">
+    <div class="modal-container" style="max-width: 440px;">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title" id="limits-modal-title">Resource limits</h3>
+          <div style="font-size: 11.5px; color: var(--text-dim); margin-top: 2px;">0 means no limit. A running app restarts to apply them.</div>
+        </div>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="limits-cpu">CPU (% of one core)</label>
+          <input type="number" id="limits-cpu" class="form-control" min="0" max="6400" step="10" placeholder="Percent of one core">
+          <span class="form-hint">100 is one full core, 50 is half a core, 200 is two cores.</span>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="limits-memory">Memory (MB)</label>
+          <input type="number" id="limits-memory" class="form-control" min="0" step="64" placeholder="Megabytes">
+          <span class="form-hint">The app is stopped by the system if it uses more.</span>
+        </div>
+        <p class="acct-muted" style="margin:0">Limits are enforced on Linux servers. On other systems the app runs without them and its log says so.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-close-modal>Cancel</button>
+        <button class="btn btn-primary" id="limits-save">Save limits</button>
+      </div>
+    </div>
+  </div>
+
   <!-- MODAL: MOVE TO NODE & LIVE P2P SHIFT -->
   <div class="modal-overlay" id="modal-move-project-node">
     <div class="modal-container" style="max-width: 620px;">

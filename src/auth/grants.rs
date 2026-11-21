@@ -19,7 +19,25 @@ pub const APP_DELETE: &str = "app_delete";
 const LEGACY_MIGRATION_META_KEY: &str = "legacy_grants_migrated_at";
 
 /// Panel powers an admin (or a delegate holding them) can hand out from the user editor.
-pub const PANEL_ACCOUNT_POWERS: &[&str] = &["users_view", "users_create", "users_edit", "requests_review"];
+pub const PANEL_ACCOUNT_POWERS: &[&str] = &[
+    "users_view", "users_create", "users_edit", "requests_review",
+    "create_websites", "create_services", "create_databases",
+];
+
+/// Panel power that lets a user create apps of `kind` ("website", "service", "database").
+pub fn create_power(kind: &str) -> &'static str {
+    match kind {
+        "service" => "create_services",
+        "database" => "create_databases",
+        _ => "create_websites",
+    }
+}
+
+/// Makes `user_id` the owner of an app they just created: every power on that app.
+pub async fn grant_owner(db: &DbPool, user_id: i64, scope: &str, app_id: i64, kind: &str) -> Result<(), sqlx::Error> {
+    let powers: Vec<String> = kind_catalog(kind).iter().map(|p| p.to_string()).collect();
+    upsert(db, user_id, scope, Some(app_id), &powers, Some(user_id)).await
+}
 /// Powers a website or service grant may hold.
 pub const PROJECT_POWERS: &[&str] = &[
     "logs", "files", "files_write", "deploy", "process", "backups", "env", "domains",

@@ -65,3 +65,14 @@ doesn't read.
 - **Notifications**: set a webhook URL (Discord, Slack, or anything that accepts JSON) to hear
   about new account requests, a VPS going offline or coming back, a node running low on free
   ports, and failed backups. **Send test** checks the URL.
+- **Creating apps is a permission**: give a user *Create websites*, *Create services*, or
+  *Create databases* in **Users › Edit**. They own every app they create (all permissions on
+  it, including delete). Users who could create apps before keep that ability.
+- **Several IPs per VPS** (**Admin Panel › IP Addresses**): add the public IPs a VPS has, then
+  choose one for each website or service. Caddy then serves its domains on that IP only; apps
+  without a choice are served on every IP, as before. Moving an app to another VPS clears the
+  choice. An IP can only be removed once no app uses it.
+- **Resource limits** (**IP Addresses › Limits** on an app): cap CPU (100% = one core) and
+  memory per app. Limits are enforced with cgroups v2 on Linux and need WebDep to run as root
+  (or with write access to `/sys/fs/cgroup`). Elsewhere the app runs without limits and its log
+  says why. A running app restarts when its limits change.

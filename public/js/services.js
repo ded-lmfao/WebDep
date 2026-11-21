@@ -136,7 +136,7 @@ export function renderServicesList() {
         <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 20px;">
           ${q ? 'No services match your search filter.' : 'Add your first service to deploy it directly to your VM.'}
         </p>
-        ${hasPower('services_manage', 'panel') ? '<button class="btn btn-primary" onclick="openAddServiceModal()">Add New Service</button>' : ''}
+        ${window.canCreate('service') ? '<button class="btn btn-primary" onclick="openAddServiceModal()">Add New Service</button>' : ''}
       </div>
     `);
     return;

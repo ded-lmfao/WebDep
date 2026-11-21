@@ -126,7 +126,7 @@ function renderProjectsList() {
       <div style="grid-column: 1 / -1; text-align: center; padding: 48px; background: var(--bg-card); border-radius: var(--radius-lg); border: 1px dashed var(--border-medium);">
         <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">No hosted websites found</p>
         <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 20px;">Add your first website to deploy it directly to your VM.</p>
-        ${hasPower('projects_manage', 'panel') ? '<button class="btn btn-primary" onclick="openAddWebsiteModal()">Add New Website</button>' : ''}
+        ${window.canCreate('website') ? '<button class="btn btn-primary" onclick="openAddWebsiteModal()">Add New Website</button>' : ''}
       </div>
     `);
     return;

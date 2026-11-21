@@ -1093,6 +1093,8 @@ function appPortText(p) {
 }
 
 const ipsPools = new Map();
+/** nodeId -> [{ id, ip, label, apps: [{ id, name }] }] */
+const ipsAddrs = new Map();
 const ipsUi = {
   nodeId: null,
   selected: new Set(),
@@ -1103,13 +1105,91 @@ const ipsUi = {
 
 async function loadNodePool(nodeId) {
   try {
-    const res = await api(`/api/cluster/nodes/${nodeId}/ports`, { noCache: true });
+    const [res, addrs] = await Promise.all([
+      api(`/api/cluster/nodes/${nodeId}/ports`, { noCache: true }),
+      api(`/api/cluster/nodes/${nodeId}/ips`, { noCache: true }).catch(() => ({ ips: [] })),
+    ]);
     ipsPools.set(Number(nodeId), res);
+    ipsAddrs.set(Number(nodeId), addrs.ips || []);
     if (res.firewallNote) toast(res.firewallNote, 'warning');
   } catch (err) {
     ipsPools.set(Number(nodeId), { error: err.message });
   }
 }
+
+function projectById(id) {
+  return (state.projects || []).find((p) => Number(p.id) === Number(id)) || null;
+}
+
+function limitsText(p) {
+  if (!p) return '';
+  const parts = [];
+  if (Number(p.cpu_limit) > 0) parts.push(`CPU ${p.cpu_limit}%`);
+  if (Number(p.memory_limit_mb) > 0) parts.push(`${p.memory_limit_mb} MB`);
+  return parts.join(' &middot; ');
+}
+
+function renderIpAddresses(nid) {
+  const list = ipsAddrs.get(nid) || [];
+  return `<div class="ipx-addrs">
+    <div class="ipx-section-title">IP addresses <span class="acct-muted">${list.length}</span></div>
+    <p class="acct-muted" style="margin:0 0 8px">Add the public IPs this VPS has, then choose one per website or service below. Apps without a choice are served on every IP.</p>
+    <div class="ipx-addr-list">${list.map((a) => `<div class="ipx-addr">
+        <span class="ipx-addr-ip">${escapeHtml(a.ip)}</span>
+        ${a.label ? `<span class="acct-muted">${escapeHtml(a.label)}</span>` : ''}
+        <span class="badge ${a.apps.length ? 'badge-info' : 'badge-neutral'}" title="${escapeHtml(a.apps.map((x) => x.name).join(', '))}">${a.apps.length} app${a.apps.length === 1 ? '' : 's'}</span>
+        <button type="button" class="btn btn-secondary btn-sm btn-icon" data-ipx-act="ip-remove" data-ip-id="${a.id}" title="Remove ${escapeHtml(a.ip)}" ${a.apps.length ? 'disabled' : ''}>&times;</button>
+      </div>`).join('') || '<span class="acct-muted">None added yet.</span>'}</div>
+    <div class="ipx-inline" style="margin-top:8px">
+      <input type="text" class="form-control" id="ip-add-${nid}" placeholder="IP address" autocomplete="off" aria-label="IP address to add">
+      <input type="text" class="form-control" id="ip-label-${nid}" placeholder="Label (optional)" autocomplete="off" aria-label="Label for the IP address">
+      <button class="btn btn-secondary btn-sm" data-ipx-act="ip-add">Add IP</button>
+    </div>
+  </div>`;
+}
+
+function appIpSelect(appId, nid) {
+  const list = ipsAddrs.get(nid) || [];
+  const current = projectById(appId)?.bind_ip || '';
+  if (!list.length && !current) return '<span class="acct-muted">Every IP</span>';
+  const opts = [`<option value="">Every IP</option>`]
+    .concat(list.map((a) => `<option value="${escapeHtml(a.ip)}" ${a.ip === current ? 'selected' : ''}>${escapeHtml(a.ip)}${a.label ? ` (${escapeHtml(a.label)})` : ''}</option>`));
+  if (current && !list.some((a) => a.ip === current)) opts.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`);
+  return `<select class="form-control ipx-ip-select" data-app="${appId}" aria-label="IP the app is served on">${opts.join('')}</select>`;
+}
+
+let limitsAppId = null;
+
+function openLimitsModal(appId) {
+  const p = projectById(appId);
+  limitsAppId = appId;
+  document.getElementById('limits-modal-title').textContent = p ? `Resource limits: ${p.name}` : 'Resource limits';
+  document.getElementById('limits-cpu').value = p ? Number(p.cpu_limit || 0) : 0;
+  document.getElementById('limits-memory').value = p ? Number(p.memory_limit_mb || 0) : 0;
+  openModal('modal-app-limits');
+}
+
+document.getElementById('limits-save')?.addEventListener('click', async (e) => {
+  if (!limitsAppId) return;
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try {
+    await api(`/api/projects/${limitsAppId}/limits`, {
+      method: 'PUT',
+      body: {
+        cpu: Number(document.getElementById('limits-cpu').value || 0),
+        memoryMb: Number(document.getElementById('limits-memory').value || 0),
+      },
+    });
+    closeModal('modal-app-limits');
+    toast('Limits saved.', 'success');
+    await loadIpsView(true);
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 /** in-use | extra | free | closed */
 function portState(p) {
@@ -1195,6 +1275,7 @@ function renderPortMap(ports) {
 function appActionButtons(appId, running, others) {
   return `<button class="btn btn-secondary btn-sm" data-ipx-act="app-port" data-app="${appId}">Change port</button>
     <button class="btn btn-secondary btn-sm" data-ipx-act="app-extra" data-app="${appId}">Extra ports</button>
+    <button class="btn btn-secondary btn-sm" data-ipx-act="app-limits" data-app="${appId}">Limits</button>
     <button class="btn btn-sm ${running ? 'ipx-btn-stop' : 'ipx-btn-start'}" data-ipx-act="${running ? 'app-stop' : 'app-start'}" data-app="${appId}">${running ? 'Stop' : 'Start'}</button>
     ${others.length ? `<select class="form-control ipx-move" data-app="${appId}" aria-label="Move to another node">
       <option value="">Move to node</option>${others.map((t) => `<option value="${t.id}">${escapeHtml(nodeLabel(t))}</option>`).join('')}
@@ -1274,10 +1355,11 @@ function renderAppsTable(ports, others) {
   return `<div class="ipx-apps">
     <div class="ipx-section-title">Apps on this node <span class="acct-muted">${list.length}</span></div>
     <div class="table-responsive"><table class="table acct-table">
-      <thead><tr><th>App</th><th>Port</th><th>Extra ports</th><th>Status</th><th style="text-align:right">Actions</th></tr></thead>
+      <thead><tr><th>App</th><th>Port</th><th>IP</th><th>Extra ports</th><th>Status</th><th style="text-align:right">Actions</th></tr></thead>
       <tbody>${list.map((a) => `<tr>
-        <td><div class="acct-person-name">${escapeHtml(a.name)}</div><div class="acct-person-sub">${kindLabel(a.kind)}</div></td>
+        <td><div class="acct-person-name">${escapeHtml(a.name)}</div><div class="acct-person-sub">${kindLabel(a.kind)}${a.kind !== 'database' && limitsText(projectById(a.id)) ? ` &middot; ${limitsText(projectById(a.id))}` : ''}</div></td>
         <td>${a.main ? `<button type="button" class="ipx-port-link" data-ipx-jump="${a.main}">${a.main}</button>` : '-'}</td>
+        <td>${a.kind !== 'database' ? appIpSelect(a.id, Number(ipsUi.nodeId)) : '<span class="acct-muted">-</span>'}</td>
         <td>${a.extra.length ? a.extra.map((x) => `<button type="button" class="ipx-port-link" data-ipx-jump="${x}">${x}</button>`).join(' ') : '<span class="acct-muted">None</span>'}</td>
         <td>${a.running ? '<span class="badge badge-success">Running</span>' : '<span class="badge badge-neutral">Stopped</span>'}</td>
         <td><div class="acct-actions">${a.kind !== 'database' ? appActionButtons(a.id, a.running, others) : '<span class="acct-muted">Fixed port</span>'}</div></td>
@@ -1372,6 +1454,7 @@ export async function loadIpsView(reloadPools = true) {
       ${renderUsageBar(c)}
       ${renderFirewallBanner(pool, data)}
       ${renderPortSettings(nid, pool, data)}
+      ${renderIpAddresses(nid)}
       <div class="ipx-toolbar">
         <div class="filter-pills">${pill('all', 'All', c.total)}${pill('used', 'In use', c.used + c.extra)}${pill('free', 'Free', c.free)}${pill('closed', 'Closed', c.closed)}</div>
         <div class="ipx-toolbar-right">
@@ -1494,6 +1577,24 @@ async function runIpxAction(act, el) {
       toast('Extra ports saved. Restart the app to use them.', 'success');
       return loadIpsView(true);
     }
+    case 'app-limits':
+      openLimitsModal(appId);
+      return undefined;
+    case 'ip-add': {
+      const ip = (document.getElementById(`ip-add-${nid}`)?.value || '').trim();
+      const label = (document.getElementById(`ip-label-${nid}`)?.value || '').trim();
+      if (!ip) return toast('Enter an IP address.', 'warning');
+      const res = await api(`/api/cluster/nodes/${nid}/ips`, { method: 'POST', body: { ip, label } });
+      ipsAddrs.set(nid, res.ips || []);
+      toast(`${ip} added.`, 'success');
+      return loadIpsView(false);
+    }
+    case 'ip-remove': {
+      const res = await api(`/api/cluster/nodes/${nid}/ips/${el.dataset.ipId}`, { method: 'DELETE' });
+      ipsAddrs.set(nid, res.ips || []);
+      toast('IP address removed.', 'success');
+      return loadIpsView(false);
+    }
     case 'app-stop':
     case 'app-start':
       await api(`/api/projects/${appId}/${act === 'app-stop' ? 'stop' : 'start'}`, { method: 'POST' });
@@ -1613,3 +1714,17 @@ Nothing was created.`
 window.handleNoFreePort = handleNoFreePort;
 window.loadIpsView = loadIpsView;
 window.loadMovesView = loadMovesView;
+
+document.getElementById('ips-view-body')?.addEventListener('change', async (e) => {
+  const sel = e.target.closest('.ipx-ip-select');
+  if (!sel) return;
+  sel.disabled = true;
+  try {
+    await api(`/api/projects/${sel.dataset.app}/ip`, { method: 'PUT', body: { ip: sel.value } });
+    toast(sel.value ? `Now served on ${sel.value}. Caddy updated.` : 'Now served on every IP. Caddy updated.', 'success');
+    await loadIpsView(true);
+  } catch (err) {
+    toast(err.message, 'error');
+    await loadIpsView(false);
+  }
+});

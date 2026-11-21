@@ -787,4 +787,85 @@ mod tests {
         let (st, _) = call(&router, Method::GET, "/api/projects", temp_s, json!({})).await;
         assert_eq!(st, StatusCode::OK);
     }
+
+    #[tokio::test]
+    async fn create_permissions_ownership_ips_and_limits() {
+        let state = crate::api::common::tests_state_helper().await;
+        let router = crate::api::create_router(state.clone());
+        let admin = state.auth.create_session(1).await.unwrap();
+        let admin_s = Some((admin.id.as_str(), admin.csrf_token.as_str()));
+        let node: i64 = sqlx::query_scalar(
+            "INSERT INTO nodes(name, region, tags_json, status, is_local, public_ip, mesh_ip, wg_pubkey, wg_endpoint,
+                node_token_hash, node_version, capabilities_json, metrics_json, last_seen_at, created_at, updated_at)
+             VALUES('core', 'default', '[]', 'online', TRUE, '', '10.200.0.1', '', '', 'h', 'v', '{}', '{}', 0, 0, 0)
+             RETURNING id",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+
+        let (st, u) = call(&router, Method::POST, "/api/users", admin_s,
+            json!({"username": "maker", "password": "MakerPass123", "mustChangePassword": false, "panelPowers": ["create_services"]})).await;
+        assert_eq!(st, StatusCode::OK, "{u}");
+        let uid = u["id"].as_i64().unwrap();
+        let sess = state.auth.create_session(uid).await.unwrap();
+        let s = Some((sess.id.as_str(), sess.csrf_token.as_str()));
+
+        // Only the kinds they were given.
+        let (st, _) = call(&router, Method::POST, "/api/projects", s,
+            json!({"name": "Site", "slug": "maker-site", "repo_url": "", "project_kind": "website"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = call(&router, Method::POST, "/api/databases", s,
+            json!({"name": "makerdb", "dbName": "makerdb", "dbUser": "maker", "dbPassword": "MakerDbPass1"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, svc) = call(&router, Method::POST, "/api/projects", s,
+            json!({"name": "Api", "slug": "maker-api", "repo_url": "", "project_kind": "service"})).await;
+        assert_eq!(st, StatusCode::OK, "{svc}");
+        let svc_id = svc["id"].as_i64().unwrap();
+
+        // The creator owns it: every service power, including delete.
+        let powers: Vec<String> = sqlx::query_scalar(
+            "SELECT powers_json FROM access_grants WHERE user_id = $1 AND scope_type = 'project' AND scope_id = $2",
+        )
+        .bind(uid)
+        .bind(svc_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(powers.len(), 1);
+        assert!(powers[0].contains("app_delete") && powers[0].contains("services_manage"), "{}", powers[0]);
+        let (st, _) = call(&router, Method::GET, &format!("/api/projects/{svc_id}"), s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // Node IPs and the app's IP: admin only, must be one of the node's addresses.
+        let (st, _) = call(&router, Method::POST, &format!("/api/cluster/nodes/{node}/ips"), s, json!({"ip": "203.0.113.7"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, ips) = call(&router, Method::POST, &format!("/api/cluster/nodes/{node}/ips"), admin_s, json!({"ip": "203.0.113.7", "label": "main"})).await;
+        assert_eq!(st, StatusCode::OK, "{ips}");
+        let ip_id = ips["ips"][0]["id"].as_i64().unwrap();
+        let (st, _) = call(&router, Method::POST, &format!("/api/cluster/nodes/{node}/ips"), admin_s, json!({"ip": "not-an-ip"})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{svc_id}/ip"), admin_s, json!({"ip": "198.51.100.1"})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{svc_id}/ip"), s, json!({"ip": "203.0.113.7"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, app) = call(&router, Method::PUT, &format!("/api/projects/{svc_id}/ip"), admin_s, json!({"ip": "203.0.113.7"})).await;
+        assert_eq!(st, StatusCode::OK, "{app}");
+        assert_eq!(app["bind_ip"], "203.0.113.7");
+        let (st, _) = call(&router, Method::DELETE, &format!("/api/cluster/nodes/{node}/ips/{ip_id}"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "an IP in use can't be removed");
+        call(&router, Method::PUT, &format!("/api/projects/{svc_id}/ip"), admin_s, json!({"ip": ""})).await;
+        let (st, _) = call(&router, Method::DELETE, &format!("/api/cluster/nodes/{node}/ips/{ip_id}"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // Resource limits: admin only, validated.
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{svc_id}/limits"), s, json!({"cpu": 50})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{svc_id}/limits"), admin_s, json!({"cpu": -5})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, app) = call(&router, Method::PUT, &format!("/api/projects/{svc_id}/limits"), admin_s, json!({"cpu": 150, "memoryMb": 512})).await;
+        assert_eq!(st, StatusCode::OK, "{app}");
+        assert_eq!(app["cpu_limit"], 150);
+        assert_eq!(app["memory_limit_mb"], 512);
+    }
 }

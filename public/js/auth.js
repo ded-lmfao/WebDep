@@ -28,7 +28,7 @@ import { loadProjects } from './websites.js';
 import { loadDatabases } from './databases.js';
 import { navigateTo, handleHashRoute } from './workspace.js';
 import { renderSecurityStatusSummary } from './settings.js';
-import { hasPower, hasAnyPower, isAdmin } from './permissions.js';
+import { hasPower, hasAnyPower, isAdmin, canCreate } from './permissions.js';
 import {
   applyAccountChrome,
   requirePasswordChange,
@@ -348,19 +348,20 @@ export async function onAuthenticated(isFreshLogin = false) {
   };
   Object.entries(navPowerMap).forEach(([view, pwrs]) => {
     const navEl = document.querySelector(`.nav-item[data-view="${view}"]`);
-    if (navEl) navEl.style.display = hasAnyPower(pwrs) ? '' : 'none';
+    const show = hasAnyPower(pwrs) || (view === 'databases' && canCreate('database'));
+    if (navEl) navEl.style.display = show ? '' : 'none';
   });
 
   const addSiteBtn = document.getElementById('add-website-header-btn');
-  if (addSiteBtn) addSiteBtn.style.display = hasPower('projects_manage', 'panel') ? '' : 'none';
+  if (addSiteBtn) addSiteBtn.style.display = canCreate('website') ? '' : 'none';
   const addSvcBtn = document.getElementById('add-service-header-btn');
-  if (addSvcBtn) addSvcBtn.style.display = hasPower('services_manage', 'panel') ? '' : 'none';
+  if (addSvcBtn) addSvcBtn.style.display = canCreate('service') ? '' : 'none';
   const addDbBtn = document.getElementById('add-database-header-btn');
-  if (addDbBtn) addDbBtn.style.display = hasPower('databases_manage', 'panel') ? '' : 'none';
+  if (addDbBtn) addDbBtn.style.display = canCreate('database') ? '' : 'none';
   const addNodeBtn = document.getElementById('add-node-header-btn');
   if (addNodeBtn) addNodeBtn.style.display = isAdmin() ? '' : 'none';
 
-  const shouldLoadDbs = hasAnyPower(['databases', 'databases_manage']);
+  const shouldLoadDbs = hasAnyPower(['databases', 'databases_manage']) || canCreate('database');
   await Promise.all([
     typeof loadProjects === 'function' ? loadProjects() : (window.loadProjects ? window.loadProjects() : Promise.resolve()),
     shouldLoadDbs
@@ -787,6 +788,7 @@ window.stopLoginCanvasAnimation = stopLoginCanvasAnimation;
 window.togglePasswordField = togglePasswordField;
 window.toggleLoginPasswordVisibility = toggleLoginPasswordVisibility;
 window.hasPower = hasPower;
+window.canCreate = canCreate;
 window.hasAnyPower = hasAnyPower;
 window.openSecurityModal = openSecurityModal;
 window.switchSecurityTab = switchSecurityTab;

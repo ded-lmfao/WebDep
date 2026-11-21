@@ -2969,6 +2969,9 @@ mod tests {
             node_id: Some(2),
             placement_version: 1,
             assigned_port: Some(4123),
+            bind_ip: String::new(),
+            cpu_limit: 0,
+            memory_limit_mb: 0,
         }
     }
 

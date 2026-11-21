@@ -203,10 +203,27 @@ pub(crate) async fn create_database_handler(
     headers: HeaderMap,
     Json(payload): Json<crate::databases::CreateDatabaseInput>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
-    let user = verify_power(&state, &headers, "databases_manage", payload.linked_project_id).await?;
+    let user = require_current_user(&state, &headers).await?;
+    if user.disabled || !user.has_any_power(&["create_databases", "databases_manage"]) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You don't have permission to create databases. Ask an admin for \"Create databases\".".to_string(),
+        ));
+    }
+    if let Some(pid) = payload.linked_project_id {
+        if !state.auth.can_access_project_for_user(&user, pid).await {
+            return Err((StatusCode::FORBIDDEN, "You can only link a database to an app you can open.".to_string()));
+        }
+    }
     let db = state.databases.create(payload)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if !user.is_admin {
+        crate::auth::grants::grant_owner(&state.db, user.id, crate::auth::grants::SCOPE_DATABASE, db.id, "database")
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        super::access::after_change(&state, user.id, "Created a database").await;
+    }
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
     log_audit(&state, &user.username, "database.create", Some(&db.name), Some(&format!("Created PostgreSQL database '{}' on port {}", db.db_name, db.port))).await;

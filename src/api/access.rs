@@ -360,7 +360,7 @@ async fn log_access_change(state: &AppState, actor: &User, app: AppRef, info: &A
     }
 }
 
-async fn after_change(state: &AppState, user_id: i64, reason: &str) {
+pub(crate) async fn after_change(state: &AppState, user_id: i64, reason: &str) {
     state
         .auth
         .notify_revocation(crate::auth::manager::AccessRevocationEvent {

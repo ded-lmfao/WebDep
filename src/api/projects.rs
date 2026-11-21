@@ -178,8 +178,17 @@ pub(crate) async fn create_project_handler(
     headers: HeaderMap,
     Json(mut p): Json<Project>,
 ) -> Result<Json<Project>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, manage_power_for_kind(&p.project_kind), None).await?;
     let is_service = p.project_kind == "service";
+    let actor = require_current_user(&state, &headers).await?;
+    let kind = if is_service { "service" } else { "website" };
+    if actor.disabled
+        || !actor.has_any_power(&[crate::auth::grants::create_power(kind), manage_power_for_kind(&p.project_kind)])
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("You don't have permission to create {kind}s. Ask an admin for \"Create {kind}s\"."),
+        ));
+    }
     if p.name.trim().is_empty() || p.slug.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Name and slug are required".into()));
     }
@@ -255,6 +264,14 @@ pub(crate) async fn create_project_handler(
         .create(&p)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    if !actor.is_admin {
+        // The creator owns what they create.
+        crate::auth::grants::grant_owner(&state.db, actor.id, crate::auth::grants::SCOPE_PROJECT, id, kind)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        super::access::after_change(&state, actor.id, "Created an app").await;
+    }
 
     let audit_action = if is_service { "service.create" } else { "website.create" };
     let audit_desc = if is_service {

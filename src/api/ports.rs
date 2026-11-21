@@ -10,6 +10,11 @@
 //! - `POST   /api/cluster/nodes/:id/firewall-sync`   re-apply open/closed ports to the firewall
 //! - `PUT    /api/projects/:id/port`                 `{ port }` move an app to another port (empty = next free)
 //! - `PUT    /api/projects/:id/extra-ports`          `{ ports: "..." }` extra ports for an app
+//! - `GET    /api/cluster/nodes/:id/ips`             the node's IP addresses and the apps on each
+//! - `POST   /api/cluster/nodes/:id/ips`             `{ ip, label }` add an IP address
+//! - `DELETE /api/cluster/nodes/:id/ips/:ip_id`      remove an IP no app uses
+//! - `PUT    /api/projects/:id/ip`                   `{ ip }` serve an app on one IP ("" = every IP)
+//! - `PUT    /api/projects/:id/limits`               `{ cpu, memoryMb }` CPU (% of a core) and memory limits
 
 use axum::{
     extract::{Path as AxPath, State},
@@ -345,4 +350,156 @@ pub(crate) async fn set_extra_ports_handler(
     .await;
     state.cache.invalidate_all();
     Ok(Json(serde_json::json!({ "ok": true, "extraPorts": list, "firewallNote": note })))
+}
+
+
+// ---------------------------------------------------------------------------
+// Node IP addresses and per-app IP / resource limits
+// ---------------------------------------------------------------------------
+
+async fn ips_response(state: &AppState, node_id: i64) -> Result<Json<serde_json::Value>, ApiError> {
+    let ips = crate::cluster::node_ips::list(&state.db, node_id).await.map_err(internal)?;
+    Ok(Json(serde_json::json!({ "ips": ips })))
+}
+
+pub(crate) async fn list_node_ips_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(node_id): AxPath<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    verify_admin(&state, &headers).await?;
+    load_node(&state, node_id).await?;
+    ips_response(&state, node_id).await
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AddIpPayload {
+    ip: String,
+    #[serde(default)]
+    label: String,
+}
+
+pub(crate) async fn add_node_ip_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(node_id): AxPath<i64>,
+    Json(p): Json<AddIpPayload>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let actor = verify_admin(&state, &headers).await?;
+    let node = load_node(&state, node_id).await?;
+    let ip = crate::cluster::node_ips::add(&state.db, node_id, &p.ip, &p.label).await.map_err(bad)?;
+    log_audit(&state, &actor.username, "ip.add", Some(&node.name), Some(&format!("Added IP address {ip}"))).await;
+    ips_response(&state, node_id).await
+}
+
+pub(crate) async fn remove_node_ip_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath((node_id, ip_id)): AxPath<(i64, i64)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let actor = verify_admin(&state, &headers).await?;
+    let node = load_node(&state, node_id).await?;
+    let ip = crate::cluster::node_ips::remove(&state.db, node_id, ip_id).await.map_err(bad)?;
+    log_audit(&state, &actor.username, "ip.remove", Some(&node.name), Some(&format!("Removed IP address {ip}"))).await;
+    ips_response(&state, node_id).await
+}
+
+async fn load_app(state: &AppState, id: i64) -> Result<crate::projects::Project, ApiError> {
+    state
+        .projects
+        .get(id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "App not found".to_string()))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AppIpPayload {
+    #[serde(default)]
+    ip: String,
+}
+
+/// Serves an app's domains on one of its node's IPs (or every IP), then rewrites Caddy.
+pub(crate) async fn set_app_ip_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+    Json(p): Json<AppIpPayload>,
+) -> Result<Json<crate::projects::Project>, ApiError> {
+    let actor = verify_admin(&state, &headers).await?;
+    let prev = load_app(&state, id).await?;
+    let node = app_node(&state, &prev).await?;
+    let ip = if p.ip.trim().is_empty() {
+        String::new()
+    } else {
+        crate::cluster::node_ips::normalize_ip(&p.ip).map_err(bad)?
+    };
+    crate::cluster::node_ips::check_assignable(&state.db, node.id, &ip).await.map_err(bad)?;
+    if ip == prev.bind_ip {
+        return Ok(Json(prev));
+    }
+    sqlx::query("UPDATE projects SET bind_ip = $1 WHERE id = $2")
+        .bind(&ip)
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    let updated = load_app(&state, id).await?;
+    super::projects::propagate_project_change(&state, Some(&prev), &updated).await?;
+    let shown = if ip.is_empty() { "every IP address".to_string() } else { ip.clone() };
+    log_audit_project(&state, Some(id), &actor.username, "app.ip", Some(&updated.name), Some(&format!("Now served on {shown}"))).await;
+    state.cache.invalidate_all();
+    Ok(Json(updated))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppLimitsPayload {
+    #[serde(default)]
+    cpu: i32,
+    #[serde(default)]
+    memory_mb: i32,
+}
+
+/// Sets an app's CPU and memory limits; a running app restarts so they take effect.
+pub(crate) async fn set_app_limits_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+    Json(p): Json<AppLimitsPayload>,
+) -> Result<Json<crate::projects::Project>, ApiError> {
+    let actor = verify_admin(&state, &headers).await?;
+    crate::runtime::limits::validate(p.cpu, p.memory_mb).map_err(bad)?;
+    let prev = load_app(&state, id).await?;
+    if prev.cpu_limit == p.cpu && prev.memory_limit_mb == p.memory_mb {
+        return Ok(Json(prev));
+    }
+    sqlx::query("UPDATE projects SET cpu_limit = $1, memory_limit_mb = $2 WHERE id = $3")
+        .bind(p.cpu)
+        .bind(p.memory_mb)
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    let updated = load_app(&state, id).await?;
+    super::projects::propagate_project_change(&state, Some(&prev), &updated).await?;
+    if prev.app_status == "running" || prev.app_status == "maintenance" {
+        super::projects::restart_project_internal(&state, &actor, &updated).await?;
+    }
+    let describe = |cpu: i32, mem: i32| {
+        let c = if cpu > 0 { format!("CPU {cpu}%") } else { "CPU unlimited".into() };
+        let m = if mem > 0 { format!("memory {mem} MB") } else { "memory unlimited".into() };
+        format!("{c}, {m}")
+    };
+    log_audit_project(
+        &state,
+        Some(id),
+        &actor.username,
+        "app.limits",
+        Some(&updated.name),
+        Some(&format!("Limits: {}", describe(p.cpu, p.memory_mb))),
+    )
+    .await;
+    state.cache.invalidate_all();
+    Ok(Json(updated))
 }

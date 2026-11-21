@@ -149,9 +149,23 @@ pub async fn spawn_project_process_pure(
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(false);
 
+    let limits_procs = match crate::runtime::limits::prepare(p.id, p.cpu_limit, p.memory_limit_mb) {
+        Ok(path) => path,
+        Err(e) => {
+            log_cb("system", "warn", &format!("Resource limits not applied: {e}. The app runs without limits."));
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = &limits_procs;
+
     #[cfg(unix)]
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            if let Some(ref procs) = limits_procs {
+                crate::runtime::limits::join_in_child(procs)?;
+            }
             libc::setsid();
             libc::umask(0o027);
             let no_core = libc::rlimit {

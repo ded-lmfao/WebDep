@@ -838,6 +838,7 @@ pub async fn complete_migration_cutover(
     sqlx::query(
         "UPDATE projects
          SET node_id = $2,
+             bind_ip = '',
              port = $3,
              assigned_port = $3,
              deploy_dir = $4,
@@ -1294,6 +1295,9 @@ mod tests {
             node_id: Some(node_id),
             placement_version: 1,
             assigned_port: Some(port),
+            bind_ip: String::new(),
+            cpu_limit: 0,
+            memory_limit_mb: 0,
         }
     }
 

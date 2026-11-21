@@ -7,7 +7,10 @@
 
 import { state, WEBSITE_WORKSPACE_TABS } from './state.js';
 
-export const PANEL_ACCOUNT_POWERS = ['users_view', 'users_create', 'users_edit', 'requests_review'];
+export const PANEL_ACCOUNT_POWERS = [
+  'users_view', 'users_create', 'users_edit', 'requests_review',
+  'create_websites', 'create_services', 'create_databases',
+];
 
 /** Checklist per kind of app, in display order (mirrors the server's kind_catalog). */
 export const APP_POWER_CATALOG = {
@@ -38,6 +41,9 @@ const LABELS = {
   users_create: 'Create accounts',
   users_edit: 'Edit or disable users',
   requests_review: 'Approve or reject requests',
+  create_websites: 'Create websites',
+  create_services: 'Create services',
+  create_databases: 'Create databases',
   settings_manage: 'Platform settings (earlier)',
   system_manage: 'System and updates (earlier)',
   audit: 'Panel audit log (earlier)',
@@ -122,6 +128,13 @@ export function hasPower(power, scope) {
 
 export function hasAnyPower(powers, scope) {
   return Array.isArray(powers) && powers.some((p) => hasPower(p, scope));
+}
+
+/** Whether the user may create apps of `kind` (`website`, `service`, `database`). */
+export function canCreate(kind) {
+  const create = { website: 'create_websites', service: 'create_services', database: 'create_databases' }[kind];
+  const earlier = { website: 'projects_manage', service: 'services_manage', database: 'databases_manage' }[kind];
+  return hasPanelPower(create) || hasPanelPower(earlier);
 }
 
 export function databaseScope(db) {

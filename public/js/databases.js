@@ -23,7 +23,7 @@ export * from './databases_modal.js';
 export { DB_PIPELINE_STAGES };
 
 export async function loadDatabases(force = false) {
-  if (typeof window.hasAnyPower === 'function' && !window.hasAnyPower(['databases', 'databases_manage'])) {
+  if (typeof window.hasAnyPower === 'function' && !window.hasAnyPower(['databases', 'databases_manage']) && !window.canCreate?.('database')) {
     state.databases = [];
     const badge = document.getElementById('badge-databases-count');
     if (badge) badge.textContent = 0;
@@ -169,7 +169,7 @@ export function renderDatabasesList() {
         <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 20px;">
           ${q || filter !== 'all' ? 'No databases match your search or status filter.' : 'Deploy an isolated PostgreSQL database directly on your VM.'}
         </p>
-        ${hasPower('databases_manage', 'panel') ? '<button class="btn btn-primary" onclick="openCreateDatabaseModal()">Add New Database</button>' : ''}
+        ${window.canCreate('database') ? '<button class="btn btn-primary" onclick="openCreateDatabaseModal()">Add New Database</button>' : ''}
       </div>
     `);
     return;

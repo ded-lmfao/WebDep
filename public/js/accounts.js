@@ -799,7 +799,7 @@ function renderEditor() {
   const panel = section('Admin panel permissions', `<div class="acct-power-grid">${PANEL_ACCOUNT_POWERS.map((p) => {
     const ok = panelAllowed.includes(p);
     return `<label class="acct-check ${ok ? '' : 'is-locked'}"><input type="checkbox" data-panel-power value="${p}" ${panelHeld.includes(p) ? 'checked' : ''} ${ok ? '' : 'disabled'}> ${escapeHtml(powerLabel(p))}</label>`;
-  }).join('')}</div>${legacyHtml}`, 'Lets this user help run accounts. Nodes, VPS modules, and platform settings stay admin only.');
+  }).join('')}</div>${legacyHtml}`, 'Account tools and which kinds of app this user can create (they own what they create). Nodes, VPS modules, and platform settings stay admin only.');
 
   const apps = section('App access', `
       <div class="acct-search">

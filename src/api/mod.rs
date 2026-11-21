@@ -210,6 +210,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/cluster/nodes/:id/firewall-sync", post(sync_node_firewall_handler))
         .route("/api/projects/:id/port", put(set_app_port_handler))
         .route("/api/projects/:id/extra-ports", put(set_extra_ports_handler))
+        .route("/api/projects/:id/ip", put(set_app_ip_handler))
+        .route("/api/projects/:id/limits", put(set_app_limits_handler))
+        .route("/api/cluster/nodes/:id/ips", get(list_node_ips_handler).post(add_node_ip_handler))
+        .route("/api/cluster/nodes/:id/ips/:ip_id", delete(remove_node_ip_handler))
         .route(
             "/api/cluster/modules/install-fleet",
             post(install_fleet_modules_handler),
