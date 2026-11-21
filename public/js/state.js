@@ -642,6 +642,32 @@ function setBtnLoading(btn, loading, defaultText, loadingText = 'Saving') {
   }
 }
 
+/** Icon-only button: an icon and no visible words. */
+function isIconOnlyButton(btn) {
+  return btn.classList.contains('btn-icon') || (Boolean(btn.querySelector('svg')) && !btn.textContent.trim());
+}
+
+/**
+ * Shows a button as busy. Icon-only buttons keep their size and show just a spinner (their
+ * title names the action); buttons with words show the spinner and `label`. The original
+ * contents are remembered so `restoreButtonIdle` can put them back.
+ */
+function setButtonBusy(btn, label) {
+  if (!btn) return;
+  if (btn.dataset.idleHtml === undefined) btn.dataset.idleHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.innerHTML = isIconOnlyButton(btn) ? '<span class="btn-spinner"></span>' : `<span class="btn-spinner"></span> ${label}`;
+}
+
+function restoreButtonIdle(btn, fallbackHtml = '') {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.removeAttribute('aria-busy');
+  btn.innerHTML = btn.dataset.idleHtml !== undefined ? btn.dataset.idleHtml : fallbackHtml;
+  delete btn.dataset.idleHtml;
+}
+
 function getSelectedProject() {
   const list = state.projects || [];
   return list.find((p) => p.id === state.selectedProjectId) || list[0] || null;
@@ -845,6 +871,8 @@ export {
   formatRelativeTime,
   formatDuration,
   setBtnLoading,
+  setButtonBusy,
+  restoreButtonIdle,
   getSelectedProject,
   getSelectedDatabase,
   getFilesEntityContext,
