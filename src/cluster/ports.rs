@@ -38,6 +38,9 @@ pub struct PortUser {
     /// `main` (the app's own port) or `extra` (reserved additional port).
     pub role: String,
     pub running: bool,
+    /// The app's own access mode for its main port: `local`, `public`, or `allowlist`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,6 +48,9 @@ pub struct PortUser {
 pub struct PoolPort {
     pub port: u16,
     pub open: bool,
+    /// Reachable from the internet (firewall allows it). Private ports are only reachable
+    /// from this machine and the mesh, which is all Caddy needs.
+    pub public: bool,
     pub manual: bool,
     pub in_pool: bool,
     pub used_by: Option<PortUser>,
@@ -57,6 +63,16 @@ pub struct NodePool {
     pub port_min: Option<u16>,
     pub port_max: Option<u16>,
     pub ports: Vec<PoolPort>,
+    pub firewall: FirewallStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FirewallStatus {
+    /// `ok`, `pending` (changes not on the node yet), or `failed`.
+    pub state: String,
+    pub error: Option<String>,
+    pub synced_at: Option<i64>,
 }
 
 pub fn validate_range(min: u16, max: u16) -> Result<(), String> {
@@ -108,7 +124,7 @@ pub async fn has_pool(db: &DbPool, node_id: i64) -> bool {
 async fn usage_on_node(db: &DbPool, node_id: i64, local_node: bool) -> Result<HashMap<u16, PortUser>, sqlx::Error> {
     let mut used = HashMap::new();
     let projects = sqlx::query(
-        "SELECT id, name, project_kind, COALESCE(assigned_port, port), app_status FROM projects
+        "SELECT id, name, project_kind, COALESCE(assigned_port, port), app_status, access_mode FROM projects
          WHERE node_id = $1 OR ($2 AND node_id IS NULL)",
     )
     .bind(node_id)
@@ -128,6 +144,7 @@ async fn usage_on_node(db: &DbPool, node_id: i64, local_node: bool) -> Result<Ha
                     name: r.try_get(1)?,
                     role: "main".into(),
                     running: status == "running" || status == "maintenance",
+                    access: r.try_get::<Option<String>, _>(5)?,
                 },
             );
         }
@@ -145,7 +162,7 @@ async fn usage_on_node(db: &DbPool, node_id: i64, local_node: bool) -> Result<Ha
             let status: String = r.try_get(3)?;
             used.insert(
                 port,
-                PortUser { kind: "database".into(), id: r.try_get(0)?, name: r.try_get(1)?, role: "main".into(), running: status == "running" },
+                PortUser { kind: "database".into(), id: r.try_get(0)?, name: r.try_get(1)?, role: "main".into(), running: status == "running", access: None },
             );
         }
     }
@@ -169,6 +186,7 @@ async fn usage_on_node(db: &DbPool, node_id: i64, local_node: bool) -> Result<Ha
                     name: r.try_get(2)?,
                     role: "extra".into(),
                     running: status == "running" || status == "maintenance",
+                    access: None,
                 },
             );
         }
@@ -206,7 +224,7 @@ pub async fn load_pool(db: &DbPool, node_id: i64) -> Result<NodePool, sqlx::Erro
         .await?;
     let (min, max) = range.unwrap_or((None, None));
     let mut usage = usage_on_node(db, node_id, is_local(db, node_id).await).await?;
-    let rows = sqlx::query("SELECT port, is_open, manual FROM node_ports WHERE node_id = $1 ORDER BY port")
+    let rows = sqlx::query("SELECT port, is_open, manual, public FROM node_ports WHERE node_id = $1 ORDER BY port")
         .bind(node_id)
         .fetch_all(db)
         .await?;
@@ -217,6 +235,7 @@ pub async fn load_pool(db: &DbPool, node_id: i64) -> Result<NodePool, sqlx::Erro
         ports.push(PoolPort {
             port,
             open: r.try_get(1)?,
+            public: r.try_get(3)?,
             manual: r.try_get(2)?,
             in_pool: true,
             used_by: usage.remove(&port),
@@ -224,14 +243,21 @@ pub async fn load_pool(db: &DbPool, node_id: i64) -> Result<NodePool, sqlx::Erro
     }
     // Apps on ports outside the pool (set before the pool existed): still listed.
     for (port, user) in usage {
-        ports.push(PoolPort { port, open: true, manual: false, in_pool: false, used_by: Some(user) });
+        ports.push(PoolPort { port, open: true, public: false, manual: false, in_pool: false, used_by: Some(user) });
     }
     ports.sort_by_key(|p| p.port);
+    let fw: Option<(String, Option<String>, Option<i64>)> =
+        sqlx::query_as("SELECT firewall_state, firewall_error, firewall_synced_at FROM nodes WHERE id = $1")
+            .bind(node_id)
+            .fetch_optional(db)
+            .await?;
+    let (state, error, synced_at) = fw.unwrap_or_else(|| ("pending".into(), None, None));
     Ok(NodePool {
         node_id,
         port_min: min.and_then(|v| u16::try_from(v).ok()),
         port_max: max.and_then(|v| u16::try_from(v).ok()),
         ports,
+        firewall: FirewallStatus { state, error, synced_at },
     })
 }
 
@@ -273,7 +299,7 @@ pub async fn set_range(db: &DbPool, node_id: i64, min: u16, max: u16) -> Result<
     .fetch_all(&mut *tx)
     .await
     .map_err(err)?;
-    sqlx::query("UPDATE nodes SET port_min = $2, port_max = $3 WHERE id = $1")
+    sqlx::query("UPDATE nodes SET port_min = $2, port_max = $3, firewall_state = CASE WHEN firewall_state = 'ok' THEN 'pending' ELSE firewall_state END WHERE id = $1")
         .bind(node_id)
         .bind(i32::from(min))
         .bind(i32::from(max))
@@ -426,21 +452,149 @@ pub async fn set_extra_ports(db: &DbPool, node_id: i64, project_id: i64, ports: 
     tx.commit().await.map_err(|e| e.to_string())
 }
 
-/// Open and closed pool ports of a node (for firewall sync).
+/// Marks pool ports public (reachable from the internet) or private. Returns changed ports.
+pub async fn set_public(db: &DbPool, node_id: i64, ports: &[u16], public: bool) -> Result<Vec<u16>, String> {
+    let changed: Vec<i32> = sqlx::query_scalar(
+        "UPDATE node_ports SET public = $3, updated_at = $4 WHERE node_id = $1 AND port = ANY($2) AND public <> $3 RETURNING port",
+    )
+    .bind(node_id)
+    .bind(ports.iter().map(|p| i32::from(*p)).collect::<Vec<i32>>())
+    .bind(public)
+    .bind(now_secs())
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(changed.into_iter().filter_map(|p| u16::try_from(p).ok()).collect())
+}
+
+/// Splits ports into (allow, deny) firewall lists: allowed when open and public; denied
+/// otherwise (including ports no longer in the pool).
+pub async fn firewall_targets(db: &DbPool, node_id: i64, ports: &[u16]) -> (Vec<u16>, Vec<u16>) {
+    let rows: Vec<(i32, bool, bool)> =
+        sqlx::query_as("SELECT port, is_open, public FROM node_ports WHERE node_id = $1 AND port = ANY($2)")
+            .bind(node_id)
+            .bind(ports.iter().map(|p| i32::from(*p)).collect::<Vec<i32>>())
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+    let allowed: BTreeSet<u16> = rows
+        .into_iter()
+        .filter(|(_, open, public)| *open && *public)
+        .filter_map(|(p, _, _)| u16::try_from(p).ok())
+        .collect();
+    let deny = ports.iter().copied().filter(|p| !allowed.contains(p)).collect();
+    (allowed.into_iter().collect(), deny)
+}
+
+/// Every pool port of a node as (allow, deny) for a full firewall sync.
 pub async fn firewall_plan(db: &DbPool, node_id: i64) -> (Vec<u16>, Vec<u16>) {
-    let rows: Vec<(i32, bool)> = sqlx::query_as("SELECT port, is_open FROM node_ports WHERE node_id = $1")
+    let rows: Vec<(i32, bool, bool)> = sqlx::query_as("SELECT port, is_open, public FROM node_ports WHERE node_id = $1")
         .bind(node_id)
         .fetch_all(db)
         .await
         .unwrap_or_default();
-    let mut open = Vec::new();
-    let mut closed = Vec::new();
-    for (p, is_open) in rows {
+    let mut allow = Vec::new();
+    let mut deny = Vec::new();
+    for (p, open, public) in rows {
         if let Ok(p) = u16::try_from(p) {
-            if is_open { open.push(p) } else { closed.push(p) }
+            if open && public {
+                allow.push(p)
+            } else {
+                deny.push(p)
+            }
         }
     }
-    (open, closed)
+    (allow, deny)
+}
+
+pub async fn record_firewall_state(db: &DbPool, node_id: i64, result: &Result<(), String>) {
+    let (state, error) = match result {
+        Ok(()) => ("ok", None),
+        Err(e) if e.contains("offline") => ("pending", Some(e.as_str())),
+        Err(e) => ("failed", Some(e.as_str())),
+    };
+    let _ = sqlx::query(
+        "UPDATE nodes SET firewall_state = $2, firewall_error = $3,
+             firewall_synced_at = CASE WHEN $2 = 'ok' THEN $4 ELSE firewall_synced_at END WHERE id = $1",
+    )
+    .bind(node_id)
+    .bind(state)
+    .bind(error)
+    .bind(now_secs())
+    .execute(db)
+    .await;
+}
+
+/// Applies firewall changes on the node that owns the ports (locally or over RPC) and
+/// records the outcome on the node.
+pub async fn apply_on_node(
+    db: &DbPool,
+    cluster: &super::ClusterManager,
+    node: &super::ClusterNode,
+    allow: Vec<u16>,
+    deny: Vec<u16>,
+) -> Result<(), String> {
+    if allow.is_empty() && deny.is_empty() {
+        return Ok(());
+    }
+    let result = if node.is_local {
+        match tokio::task::spawn_blocking(move || crate::runtime::port::sync_firewall_ports(&allow, &deny)).await {
+            Ok(r) => r,
+            Err(e) => Err(e.to_string()),
+        }
+    } else if !cluster.is_node_connected(node.id).await {
+        Err(format!("{} is offline; its firewall updates automatically when it reconnects.", node.name))
+    } else {
+        cluster
+            .call_node(
+                node.id,
+                "firewall.ports",
+                serde_json::json!({ "open": allow, "close": deny }),
+                std::time::Duration::from_secs(120),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|(_, msg)| msg)
+    };
+    record_firewall_state(db, node.id, &result).await;
+    result
+}
+
+/// Full firewall sync when the node has a pool and its firewall isn't known to be in sync.
+pub async fn resync_if_needed(db: &DbPool, cluster: &super::ClusterManager, node: &super::ClusterNode) {
+    if !has_pool(db, node.id).await {
+        return;
+    }
+    let state: Option<String> = sqlx::query_scalar("SELECT firewall_state FROM nodes WHERE id = $1")
+        .bind(node.id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+    if state.as_deref() == Some("ok") {
+        return;
+    }
+    let (allow, deny) = firewall_plan(db, node.id).await;
+    if let Err(e) = apply_on_node(db, cluster, node, allow, deny).await {
+        tracing::warn!("Firewall sync for node #{} failed: {e}", node.id);
+    }
+}
+
+/// Whether an app's port should be opened to the internet when the app starts: always on
+/// nodes without a pool (original behaviour), only for public pool ports otherwise.
+pub async fn should_open_publicly(db: &DbPool, node_id: Option<i64>, port: u16) -> bool {
+    let Some(node_id) = node_id else { return true };
+    if !has_pool(db, node_id).await {
+        return true;
+    }
+    sqlx::query_scalar::<_, bool>("SELECT public FROM node_ports WHERE node_id = $1 AND port = $2")
+        .bind(node_id)
+        .bind(i32::from(port))
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -485,6 +639,17 @@ mod tests {
         check_assignable(&db, node_id, 9500, None).await.unwrap();
         assert_eq!(remove_ports(&db, node_id, &[9500, 9101]).await.unwrap(), vec![9101, 9500]);
         assert!(check_assignable(&db, node_id, 9101, None).await.is_err(), "removed ports are gone");
+
+        // Open ports stay private until marked public; closed beats public.
+        let (allow, deny) = firewall_targets(&db, node_id, &[9103, 9104]).await;
+        assert!(allow.is_empty() && deny == vec![9103, 9104]);
+        set_public(&db, node_id, &[9103], true).await.unwrap();
+        let (allow, _) = firewall_targets(&db, node_id, &[9103, 9104]).await;
+        assert_eq!(allow, vec![9103]);
+        set_open(&db, node_id, &[9103], false).await.unwrap();
+        let (allow, deny) = firewall_targets(&db, node_id, &[9103]).await;
+        assert!(allow.is_empty() && deny == vec![9103]);
+        set_open(&db, node_id, &[9103], true).await.unwrap();
 
         // Shrinking keeps hand-added ports and drops unused range ports.
         add_ports(&db, node_id, &[9600]).await.unwrap();

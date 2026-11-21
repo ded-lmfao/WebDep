@@ -40,28 +40,16 @@ async fn load_node(state: &AppState, node_id: i64) -> Result<crate::cluster::Clu
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Node #{node_id} not found")))
 }
 
-/// Applies firewall changes on the node that owns the ports (locally or over RPC).
-/// Best effort: an unreachable node is reported, the pool change itself still stands.
-async fn apply_firewall(state: &AppState, node: &crate::cluster::ClusterNode, open: Vec<u16>, close: Vec<u16>) -> Option<String> {
-    if open.is_empty() && close.is_empty() {
+/// Brings the node's firewall in line with the pool for `changed` ports: open and public
+/// ports are allowed, everything else loses WebDep's allow rule. Returns a note when the
+/// change couldn't be applied yet (offline node, firewall error); the pool change stands and
+/// the node shows as out of sync until it is applied.
+async fn sync_ports(state: &AppState, node: &crate::cluster::ClusterNode, changed: Vec<u16>) -> Option<String> {
+    if changed.is_empty() {
         return None;
     }
-    if node.is_local {
-        return match tokio::task::spawn_blocking(move || crate::runtime::port::sync_firewall_ports(&open, &close)).await {
-            Ok(Ok(())) => None,
-            Ok(Err(e)) => Some(e),
-            Err(e) => Some(e.to_string()),
-        };
-    }
-    if !state.cluster.is_node_connected(node.id).await {
-        return Some(format!("{} is offline; its firewall updates when you sync it again.", node.name));
-    }
-    state
-        .cluster
-        .call_node(node.id, "firewall.ports", serde_json::json!({ "open": open, "close": close }), std::time::Duration::from_secs(60))
-        .await
-        .err()
-        .map(|(_, msg)| msg)
+    let (allow, deny) = ports::firewall_targets(&state.db, node.id, &changed).await;
+    ports::apply_on_node(&state.db, &state.cluster, node, allow, deny).await.err()
 }
 
 async fn pool_response(state: &AppState, node_id: i64, firewall_note: Option<String>) -> Result<Json<serde_json::Value>, ApiError> {
@@ -98,7 +86,7 @@ pub(crate) async fn set_port_range_handler(
     let actor = verify_admin(&state, &headers).await?;
     let node = load_node(&state, node_id).await?;
     let (added, removed) = ports::set_range(&state.db, node_id, p.min, p.max).await.map_err(bad)?;
-    let note = apply_firewall(&state, &node, added.clone(), removed.clone()).await;
+    let note = sync_ports(&state, &node, added.iter().chain(removed.iter()).copied().collect()).await;
     log_audit(
         &state,
         &actor.username,
@@ -115,6 +103,9 @@ pub(crate) struct PortsPayload {
     ports: String,
     #[serde(default)]
     open: Option<bool>,
+    /// Make the ports reachable from the internet (true) or private (false).
+    #[serde(default)]
+    public: Option<bool>,
 }
 
 pub(crate) async fn add_node_ports_handler(
@@ -127,11 +118,12 @@ pub(crate) async fn add_node_ports_handler(
     let node = load_node(&state, node_id).await?;
     let list = ports::parse_port_list(&p.ports).map_err(bad)?;
     let added = ports::add_ports(&state.db, node_id, &list).await.map_err(bad)?;
-    let note = apply_firewall(&state, &node, added.clone(), Vec::new()).await;
+    let note = sync_ports(&state, &node, added.clone()).await;
     log_audit(&state, &actor.username, "ports.add", Some(&node.name), Some(&format!("Added {} port(s): {}", added.len(), p.ports.trim()))).await;
     pool_response(&state, node_id, note).await
 }
 
+/// `PATCH /api/cluster/nodes/:id/ports` with `{ ports, open }` and/or `{ ports, public }`.
 pub(crate) async fn set_node_ports_open_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -140,22 +132,36 @@ pub(crate) async fn set_node_ports_open_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = verify_admin(&state, &headers).await?;
     let node = load_node(&state, node_id).await?;
-    let open = p.open.ok_or_else(|| bad("Say whether to open or close the ports."))?;
+    if p.open.is_none() && p.public.is_none() {
+        return Err(bad("Say whether to open, close, or change who can reach the ports."));
+    }
     let list = ports::parse_port_list(&p.ports).map_err(bad)?;
-    let changed = ports::set_open(&state.db, node_id, &list, open).await.map_err(bad)?;
-    let note = if open {
-        apply_firewall(&state, &node, changed.clone(), Vec::new()).await
-    } else {
-        apply_firewall(&state, &node, Vec::new(), changed.clone()).await
-    };
-    log_audit(
-        &state,
-        &actor.username,
-        if open { "ports.open" } else { "ports.close" },
-        Some(&node.name),
-        Some(&format!("{} {} port(s): {}", if open { "Opened" } else { "Closed" }, changed.len(), p.ports.trim())),
-    )
-    .await;
+    let mut changed = std::collections::BTreeSet::new();
+    if let Some(open) = p.open {
+        let c = ports::set_open(&state.db, node_id, &list, open).await.map_err(bad)?;
+        log_audit(
+            &state,
+            &actor.username,
+            if open { "ports.open" } else { "ports.close" },
+            Some(&node.name),
+            Some(&format!("{} {} port(s): {}", if open { "Opened" } else { "Closed" }, c.len(), p.ports.trim())),
+        )
+        .await;
+        changed.extend(c);
+    }
+    if let Some(public) = p.public {
+        let c = ports::set_public(&state.db, node_id, &list, public).await.map_err(bad)?;
+        log_audit(
+            &state,
+            &actor.username,
+            if public { "ports.public" } else { "ports.private" },
+            Some(&node.name),
+            Some(&format!("Made {} port(s) {}: {}", c.len(), if public { "public" } else { "private" }, p.ports.trim())),
+        )
+        .await;
+        changed.extend(c);
+    }
+    let note = sync_ports(&state, &node, changed.into_iter().collect()).await;
     pool_response(&state, node_id, note).await
 }
 
@@ -182,7 +188,7 @@ async fn remove_ports_common(state: &AppState, headers: &HeaderMap, node_id: i64
     let actor = verify_admin(state, headers).await?;
     let node = load_node(state, node_id).await?;
     let removed = ports::remove_ports(&state.db, node_id, list).await.map_err(bad)?;
-    let note = apply_firewall(state, &node, Vec::new(), removed.clone()).await;
+    let note = sync_ports(state, &node, removed.clone()).await;
     let shown = removed.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
     log_audit(state, &actor.username, "ports.remove", Some(&node.name), Some(&format!("Removed {} port(s): {shown}", removed.len()))).await;
     pool_response(state, node_id, note).await
@@ -195,8 +201,8 @@ pub(crate) async fn sync_node_firewall_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     verify_admin(&state, &headers).await?;
     let node = load_node(&state, node_id).await?;
-    let (open, closed) = ports::firewall_plan(&state.db, node_id).await;
-    let note = apply_firewall(&state, &node, open, closed).await;
+    let (allow, deny) = ports::firewall_plan(&state.db, node_id).await;
+    let note = ports::apply_on_node(&state.db, &state.cluster, &node, allow, deny).await.err();
     pool_response(&state, node_id, note).await
 }
 
@@ -272,19 +278,10 @@ pub(crate) async fn set_app_port_handler(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "App not found".to_string()))?;
 
     super::projects::propagate_project_change(&state, Some(&prev), &updated).await?;
-    // Saving drops the old port's firewall rule; a pool port that is still open keeps it.
+    // Saving applied the app's access mode to the new port and dropped the old port's rules;
+    // put the old port back to what the pool says (private unless marked public).
     if let Some(old) = current.filter(|_| pooled) {
-        let still_open: bool = sqlx::query_scalar("SELECT is_open FROM node_ports WHERE node_id = $1 AND port = $2")
-            .bind(node.id)
-            .bind(i32::from(old))
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(false);
-        if still_open {
-            let _ = apply_firewall(&state, &node, vec![old, target], Vec::new()).await;
-        }
+        let _ = sync_ports(&state, &node, vec![old]).await;
     }
     if prev.app_status == "running" || prev.app_status == "maintenance" {
         super::projects::restart_project_internal(&state, &actor, &updated).await?;
@@ -336,7 +333,7 @@ pub(crate) async fn set_extra_ports_handler(
     } else {
         state.projects.set_env_var(id, "EXTRA_PORTS", &value, false).await.map_err(internal)?;
     }
-    let note = apply_firewall(&state, &node, list.clone(), Vec::new()).await;
+    let note = sync_ports(&state, &node, list.clone()).await;
     log_audit_project(
         &state,
         Some(id),

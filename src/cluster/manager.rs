@@ -101,6 +101,10 @@ pub struct ClusterManager {
 }
 
 impl ClusterManager {
+    pub fn db_pool(&self) -> DbPool {
+        self.db.clone()
+    }
+
     pub fn new(db: DbPool, data_dir: PathBuf) -> Self {
         Self {
             db,

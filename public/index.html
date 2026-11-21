@@ -3531,7 +3531,7 @@
               <input type="number" class="form-control" id="add-node-port-max" min="1024" max="65535" placeholder="Highest port">
             </div>
           </div>
-          <p class="acct-editor-note" style="margin-top:-4px">The panel opens only these ports on the new VPS and gives them to apps in order, lowest first. Leave both empty to keep automatic ports; you can set a range later in Admin Panel &rsaquo; IP Addresses.</p>
+          <p class="acct-editor-note" style="margin-top:-4px">Apps on the new VPS get these ports in order, lowest first. They stay private (only Caddy and other nodes reach them) until you make one public, and the VPS firewall is updated as soon as it connects. Leave both empty to keep automatic ports; you can set a range later in Admin Panel &rsaquo; IP Addresses.</p>
 
           <div class="form-group" style="margin-bottom: 0;">
             <label class="form-label" for="add-node-core-url">This panel's address <span style="color: var(--text-dim); font-weight: 400;">(the new VPS must reach it)</span></label>

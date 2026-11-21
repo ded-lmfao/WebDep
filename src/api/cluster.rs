@@ -768,6 +768,14 @@ pub(crate) async fn node_ws_handler(
                                     .await;
                                 cluster.apply_remote_workloads_heartbeat(node_id, &workloads).await;
                                 cluster.broadcast_peer_sync().await;
+                                // Apply port pool changes made while the node was away (or
+                                // the range chosen when it was added).
+                                if let Ok(Some(node)) = cluster.get_node(node_id).await {
+                                    let (db, cl) = (cluster.db_pool(), cluster.clone());
+                                    tokio::spawn(async move {
+                                        crate::cluster::ports::resync_if_needed(&db, &cl, &node).await;
+                                    });
+                                }
                             }
                             ClusterWsMessage::Heartbeat { metrics, workloads, .. } => {
                                 let _ = cluster.update_node_metrics(node_id, &metrics).await;

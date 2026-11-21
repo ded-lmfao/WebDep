@@ -234,6 +234,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
     let updater = Arc::new(Updater::with_db(db.clone()));
     let cluster = Arc::new(ClusterManager::new(db.clone(), config.data_dir.clone()));
+    {
+        // Apply this host's port pool to its firewall if it isn't known to be in sync.
+        let (db, cl) = (db.clone(), cluster.clone());
+        tokio::spawn(async move {
+            if let Ok(nodes) = cl.list_nodes().await {
+                for node in nodes.into_iter().filter(|n| n.is_local) {
+                    crate::cluster::ports::resync_if_needed(&db, &cl, &node).await;
+                }
+            }
+        });
+    }
 
     let local_core_http = format!("http://127.0.0.1:{}", config.port);
     let local_core_ws = format!("ws://127.0.0.1:{}/api/cluster/node-ws", config.port);

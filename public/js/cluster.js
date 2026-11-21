@@ -1117,6 +1117,18 @@ function portState(p) {
   return p.open ? 'free' : 'closed';
 }
 
+/** Reachable from the internet: the app's access mode for its main port, the pool flag otherwise. */
+function portIsPublic(p) {
+  if (p.usedBy && p.usedBy.role === 'main' && p.usedBy.access) return p.usedBy.access === 'public';
+  return Boolean(p.public) && p.open;
+}
+
+const ACCESS_TEXT = {
+  public: 'Public: anyone on the internet can reach it',
+  local: 'Private: only this VPS, Caddy, and the mesh',
+  allowlist: 'Allowlist: only the IPs set in the app',
+};
+
 function poolCounts(ports) {
   const c = { used: 0, extra: 0, free: 0, closed: 0, total: ports.length };
   ports.forEach((p) => { c[portState(p)] += 1; });
@@ -1171,9 +1183,10 @@ function renderPortMap(ports) {
     const tip = p.usedBy
       ? `${p.port}: ${p.usedBy.name}${p.usedBy.role === 'extra' ? ' (extra)' : ''}`
       : `${p.port}: ${st === 'free' ? 'free' : 'closed'}${p.inPool ? '' : ', outside range'}`;
-    return `<button type="button" class="ipx-tile is-${st} ${sel ? 'is-selected' : ''} ${dim ? 'is-dim' : ''} ${p.inPool ? '' : 'is-outside'}"
+    const pub = portIsPublic(p);
+    return `<button type="button" class="ipx-tile is-${st} ${sel ? 'is-selected' : ''} ${dim ? 'is-dim' : ''} ${p.inPool ? '' : 'is-outside'} ${pub ? 'is-public' : ''}"
       data-ipx-port="${p.port}" title="${escapeHtml(tip)}" aria-pressed="${sel}">
-      <span class="ipx-tile-port">${p.port}</span>
+      <span class="ipx-tile-port">${p.port}${pub ? '<span class="ipx-globe" title="Public">&#9679;</span>' : ''}</span>
       ${p.usedBy ? `<span class="ipx-tile-app">${escapeHtml(p.usedBy.name)}</span>` : ''}
     </button>`;
   }).join('')}</div>`;
@@ -1201,11 +1214,16 @@ function renderDetail(ports, others) {
     const openable = picked.filter((p) => !p.open).length;
     const busy = picked.filter((p) => p.usedBy).length;
     const removable = picked.length - busy;
+    const free = picked.filter((p) => !p.usedBy);
+    const canPublic = free.filter((p) => !p.public).length;
+    const canPrivate = free.filter((p) => p.public).length;
     return `<div class="ipx-detail-title">${picked.length} ports selected</div>
       <p class="acct-muted">${busy ? `${busy} in use (left unchanged). ` : ''}${closable} can be closed, ${openable} can be opened, ${removable} can be removed.</p>
       <div class="ipx-detail-actions">
         <button class="btn btn-secondary btn-sm" data-ipx-act="bulk-open" ${openable ? '' : 'disabled'}>Open ${openable || ''}</button>
         <button class="btn btn-secondary btn-sm" data-ipx-act="bulk-close" ${closable ? '' : 'disabled'}>Close ${closable || ''}</button>
+        <button class="btn btn-secondary btn-sm" data-ipx-act="bulk-public" ${canPublic ? '' : 'disabled'}>Make public ${canPublic || ''}</button>
+        <button class="btn btn-secondary btn-sm" data-ipx-act="bulk-private" ${canPrivate ? '' : 'disabled'}>Make private ${canPrivate || ''}</button>
         <button class="btn btn-sm ipx-btn-remove" data-ipx-act="bulk-remove" ${removable ? '' : 'disabled'}>Remove ${removable || ''}</button>
         <button class="btn btn-secondary btn-sm" data-ipx-act="clear">Clear selection</button>
       </div>`;
@@ -1220,14 +1238,17 @@ function renderDetail(ports, others) {
         <div class="acct-person-name">${escapeHtml(u.name)}</div>
         <div class="acct-person-sub">${kindLabel(u.kind)} &middot; ${u.running ? 'Running' : 'Stopped'}${u.role === 'extra' ? ' &middot; extra port' : ''}</div>
       </div>
+      ${u.role === 'main' && u.access ? `<p class="ipx-access"><strong>${escapeHtml((ACCESS_TEXT[u.access] || u.access).split(':')[0])}</strong>: ${escapeHtml((ACCESS_TEXT[u.access] || '').split(': ')[1] || '')}. Change it in the app's settings.</p>` : ''}
       ${u.role === 'main' && u.kind !== 'database'
         ? `<div class="ipx-detail-actions">${appActionButtons(u.id, u.running, others)}</div>`
         : `<p class="acct-muted">${u.kind === 'database' ? 'Databases keep their port.' : 'Change extra ports from the app\'s main port.'}</p>`}`;
   } else {
     body = `<div class="ipx-detail-actions">
         ${p.open ? '<button class="btn btn-secondary btn-sm" data-ipx-act="close-one">Close port</button>' : '<button class="btn btn-secondary btn-sm" data-ipx-act="open-one">Open port</button>'}
+        ${p.public ? '<button class="btn btn-secondary btn-sm" data-ipx-act="private-one">Make private</button>' : '<button class="btn btn-secondary btn-sm" data-ipx-act="public-one">Make public</button>'}
         <button class="btn btn-sm ipx-btn-remove" data-ipx-act="remove-one">Remove port</button>
       </div>
+      <p class="ipx-access"><strong>${p.public ? 'Public' : 'Private'}</strong>: ${p.public ? 'anyone on the internet can reach it while it is open' : 'only this VPS, Caddy, and the mesh can reach it'}.</p>
       <p class="acct-muted">${p.open ? 'The next new or moved app on this node takes the lowest free port.' : 'Closed ports are blocked in the firewall and never handed out.'} Removing takes the port off this node's list; saving the range again adds range ports back.</p>`;
   }
   return `<div class="ipx-detail-head"><span class="ipx-detail-port">${p.port}</span><span class="badge ${badge[0]}">${badge[1]}</span></div>
@@ -1265,6 +1286,19 @@ function renderAppsTable(ports, others) {
   </div>`;
 }
 
+function renderFirewallBanner(pool, data) {
+  if (!data.firewallManaged || !(pool.ports || []).some((p) => p.inPool)) return '';
+  const fw = pool.firewall || {};
+  if (fw.state === 'ok') {
+    return `<div class="ipx-fw is-ok">Firewall in sync${fw.syncedAt ? ` &middot; ${escapeHtml(formatRelativeTime(fw.syncedAt))}` : ''}</div>`;
+  }
+  const failed = fw.state === 'failed';
+  return `<div class="ipx-fw ${failed ? 'is-failed' : 'is-pending'}">
+    <span>${failed ? 'Firewall changes failed on this VPS' : 'Firewall changes are waiting to reach this VPS'}${fw.error ? `: ${escapeHtml(fw.error)}` : '.'}</span>
+    <button class="btn btn-secondary btn-sm" data-ipx-act="sync">Sync now</button>
+  </div>`;
+}
+
 function renderPortSettings(nid, pool, data) {
   return `<details class="ipx-settings" ${ipsUi.settingsOpen ? 'open' : ''} data-ipx-settings>
     <summary>Port settings</summary>
@@ -1277,7 +1311,7 @@ function renderPortSettings(nid, pool, data) {
           <input type="number" class="form-control" id="pool-max-${nid}" min="1024" max="65535" value="${pool.portMax ?? ''}" placeholder="Highest port">
           <button class="btn btn-primary btn-sm" data-ipx-act="range">Save range</button>
         </div>
-        <p class="acct-muted">New ports open in the firewall. Ports dropped from the range are removed unless an app uses them.</p>
+        <p class="acct-muted">New ports are handed to apps lowest first and stay private (only Caddy and other nodes reach them) until you make them public. Ports dropped from the range are removed unless an app uses them.</p>
       </div>
       <div class="ipx-field">
         <label class="form-label">Add ports outside the range</label>
@@ -1336,11 +1370,12 @@ export async function loadIpsView(reloadPools = true) {
         </div>
       </div>
       ${renderUsageBar(c)}
+      ${renderFirewallBanner(pool, data)}
       ${renderPortSettings(nid, pool, data)}
       <div class="ipx-toolbar">
         <div class="filter-pills">${pill('all', 'All', c.total)}${pill('used', 'In use', c.used + c.extra)}${pill('free', 'Free', c.free)}${pill('closed', 'Closed', c.closed)}</div>
         <div class="ipx-toolbar-right">
-          <div class="ipx-legend" aria-hidden="true"><span class="is-used"></span>In use<span class="is-extra"></span>Extra<span class="is-free"></span>Free<span class="is-closed"></span>Closed</div>
+          <div class="ipx-legend" aria-hidden="true"><span class="is-used"></span>In use<span class="is-extra"></span>Extra<span class="is-free"></span>Free<span class="is-closed"></span>Closed<i class="ipx-globe">&#9679;</i>Public</div>
           <button type="button" class="btn btn-sm ${ipsUi.selectMode ? 'btn-primary' : 'btn-secondary'}" data-ipx-act="toggle-select" aria-pressed="${ipsUi.selectMode}">${ipsUi.selectMode ? 'Selecting' : 'Select'}</button>
         </div>
       </div>
@@ -1409,6 +1444,18 @@ async function runIpxAction(act, el) {
       await portRequest(nid, 'POST', '/ports/remove', { ports: targets.join(',') });
       targets.forEach((p) => ipsUi.selected.delete(p));
       return toast(`${targets.length} port${targets.length === 1 ? '' : 's'} removed.`, 'success');
+    }
+    case 'public-one':
+    case 'private-one':
+      await portRequest(nid, 'PATCH', '/ports', { ports: String(one.port), public: act === 'public-one' });
+      return toast(`Port ${one.port} is now ${act === 'public-one' ? 'public' : 'private'}.`, 'success');
+    case 'bulk-public':
+    case 'bulk-private': {
+      const pub = act === 'bulk-public';
+      const targets = picked.filter((p) => !p.usedBy && Boolean(p.public) !== pub).map((p) => p.port);
+      if (!targets.length) return undefined;
+      await portRequest(nid, 'PATCH', '/ports', { ports: targets.join(','), public: pub });
+      return toast(`${targets.length} port${targets.length === 1 ? '' : 's'} made ${pub ? 'public' : 'private'}.`, 'success');
     }
     case 'bulk-open':
     case 'bulk-close': {
