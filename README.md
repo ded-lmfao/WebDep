@@ -238,14 +238,27 @@ Move a website or backend service from one VPS to another directly from its work
 | **Services** | 24/7 background daemons (Lavalink/Java, Python workers, Node bots, Go/Rust binaries) with live PID tracking and log streaming. |
 | **Databases** | Isolated native PostgreSQL clusters on any node with SCRAM-SHA-256 auth, local/mesh/CIDR/public rules, and 1-click `DATABASE_URL` linking. |
 | **My Account** | Every user's own profile (name, email), password, passkeys, TOTP 2FA, sessions, and a read-only list of the apps they can access. |
-| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
+| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **IP Addresses**, **Move Apps**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
 
 #### Accounts & Permissions
 - **Sign-up requests**: people create an account request from the sign-in page; it waits in **Admin Panel › Requests** and an account exists only after approval. Admins can also create accounts directly (with a temporary password the user must change). Self-registration can be switched off in **Platform Settings › Accounts**.
 - **Roles**: the **Main Admin** (from `.env`) can make other users **Admin** (full access). Everyone else starts with no access.
 - **Per-app permissions**: every website, service, and database has a **Permissions** tab. Pick people and tick exactly what they can do there (logs, files, deploy, start/stop, backups, env, domains, settings, activity, connection details, and so on).
+- **Creating apps**: the panel permissions *Create websites*, *Create services*, and *Create databases* let a user add apps of that kind. They own what they create (every permission on it, including delete).
 - **Delegation**: **Manage access** on an app, and the panel permissions *View users*, *Create accounts*, *Edit or disable users*, and *Approve or reject requests*, let trusted users help. Nobody can give a permission they don't hold, and every change is written to the audit log.
+- **Account security** (**Platform Settings › Accounts**): limit sign-up requests to certain email domains, require 2FA for admins or everyone, create one-time password reset links, and see or end any user's sessions. The sign-up form has a built-in bot check.
 - **Nodes** (topology, `+ Add Node`, drain/evacuate, `Update Fleet`), **VPS Modules** (runtime installs), and **Platform Settings** (GitHub tokens, Core/Fleet updates, cache/restart, themes) live in the Admin Panel.
+
+#### Ports, IPs, and limits (Admin Panel › IP Addresses)
+- **Port ranges per node**: new apps take the lowest free port in the node's range. Ports stay private (only Caddy and the mesh reach them) until made public, and the firewall follows automatically. If a node has no free port, the app isn't created and the panel says so.
+- **Several IPs per VPS**: add the VPS's public IPs and choose one per website or service; Caddy then serves its domains on that IP only.
+- **Resource limits**: cap an app's CPU (100% = one core) and memory. Enforced with cgroups v2 on Linux when WebDep runs as root.
+- **Move Apps** moves a website or service to another node (admins only).
+
+#### Maintenance (Platform Settings › Maintenance)
+- Daily backups of the control database (seven kept by default), **Back up now**, and downloads.
+- Audit history retention (365 days by default), with server-side search and CSV export on the Audit page.
+- Optional webhook notifications (Discord, Slack, or any JSON endpoint) for new account requests, a VPS going offline or back online, low free ports, and failed backups.
 
 The panel is fully responsive: on phones and tablets the sidebar becomes a drawer with a bottom tab bar, and data tables turn into compact cards.
 
@@ -341,6 +354,7 @@ WebDep loads configuration from `.env` in the process's current working director
 | `PUBLIC_IP` | *(auto-detected)* | Optional override for Core panel IP returned by `/api/cluster/panel-info`. |
 | `WEBDEP_NODE_P2P_BIND` | `0.0.0.0` | Bind address for Web-Node's direct P2P archive receiver. |
 | `WEBDEP_NODE_P2P_PORT` | `0` *(ephemeral)* | TCP port for Web-Node's direct P2P HTTP receiver (`0` picks a free port). |
+| `WEBDEP_SKIP_DB_BACKUP` | `false` | Set to `1` to skip the automatic control-database backup taken before an upgrade applies new migrations. Only if you back up yourself. |
 | `WEBDEP_MANAGE_FIREWALL` | `true` | Set to `false` to stop WebDep from editing UFW/iptables (panel, app, database and WireGuard mesh rules). Use it when the host firewall is managed elsewhere. |
 | `RUST_LOG` | `webdep=info` | Tracing log filter (`debug`, `info`, `warn`, `error`). |
 

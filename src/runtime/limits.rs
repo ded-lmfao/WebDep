@@ -119,4 +119,34 @@ mod tests {
     fn apps_without_limits_need_no_cgroup() {
         assert_eq!(prepare(1, 0, 0).unwrap(), None);
     }
+
+    /// Real cgroup round trip; needs root on a cgroups v2 host, otherwise it is skipped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_joins_its_cgroup_with_limits() {
+        use std::os::unix::process::CommandExt;
+        use std::path::Path;
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 || !Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
+            eprintln!("skipped: needs root and cgroups v2");
+            return;
+        }
+        let id = 990_000 + i64::from(std::process::id() % 10_000);
+        let procs = prepare(id, 50, 64).expect("prepare").expect("limits set");
+        let dir = Path::new("/sys/fs/cgroup/webdep").join(format!("app-{id}"));
+        assert_eq!(std::fs::read_to_string(dir.join("cpu.max")).unwrap().trim(), "50000 100000");
+        assert_eq!(std::fs::read_to_string(dir.join("memory.max")).unwrap().trim(), "67108864");
+
+        let mut cmd = std::process::Command::new("cat");
+        cmd.arg("/proc/self/cgroup");
+        // SAFETY: join_in_child only uses async-signal-safe calls.
+        unsafe {
+            cmd.pre_exec(move || join_in_child(&procs));
+        }
+        let out = cmd.output().expect("run child");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains(&format!("/webdep/app-{id}")), "child cgroup: {text}");
+        let _ = std::fs::remove_dir(&dir);
+    }
 }

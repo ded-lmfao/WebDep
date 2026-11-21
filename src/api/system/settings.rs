@@ -478,41 +478,6 @@ pub(crate) async fn update_settings_handler(
     Ok(StatusCode::OK)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_theme_id_and_asset_parity() {
-        assert_eq!(ALLOWED_THEME_IDS.len(), 15);
-        assert_eq!(normalize_theme_id("nordic-frost"), "nordic-frost");
-        assert_eq!(normalize_theme_id(" DAYLIGHT-CRISP "), "daylight-crisp");
-        assert_eq!(normalize_theme_id("unknown-theme"), "midnight-ink");
-        assert_eq!(normalize_theme_id(""), "midnight-ink");
-
-        let css = std::fs::read_to_string("public/css/themes.css").expect("public/css/themes.css");
-        let js = std::fs::read_to_string("public/js/themes.js").expect("public/js/themes.js");
-        let html = std::fs::read_to_string("public/index.html").expect("public/index.html");
-        assert!(html.contains("id=\"settings-theme-card\""));
-        assert!(html.contains("id=\"settings-theme-grid\""));
-
-        for id in ALLOWED_THEME_IDS {
-            assert!(
-                css.contains(&format!("data-theme=\"{}\"", id)),
-                "Missing CSS selector for theme '{}'",
-                id
-            );
-            assert!(
-                js.contains(&format!("['{}', ", id)),
-                "Missing JS preset definition for theme '{}'",
-                id
-            );
-        }
-    }
-}
-
-
-
 // ---------------------------------------------------------------------------
 // Control database backups (Platform Settings › Maintenance)
 // ---------------------------------------------------------------------------
@@ -522,7 +487,7 @@ pub(crate) async fn list_db_backups_handler(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_admin(&state, &headers).await?;
-    Ok(Json(serde_json::json!({ "backups": crate::maintenance::list_backups(&state.cluster.data_dir().to_path_buf()) })))
+    Ok(Json(serde_json::json!({ "backups": crate::maintenance::list_backups(state.cluster.data_dir()) })))
 }
 
 pub(crate) async fn create_db_backup_handler(
@@ -572,4 +537,37 @@ pub(crate) async fn test_webhook_handler(
     }
     crate::maintenance::send_webhook(url, "test".into(), format!("WebDep: test notification sent by {}.", actor.username));
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_theme_id_and_asset_parity() {
+        assert_eq!(ALLOWED_THEME_IDS.len(), 15);
+        assert_eq!(normalize_theme_id("nordic-frost"), "nordic-frost");
+        assert_eq!(normalize_theme_id(" DAYLIGHT-CRISP "), "daylight-crisp");
+        assert_eq!(normalize_theme_id("unknown-theme"), "midnight-ink");
+        assert_eq!(normalize_theme_id(""), "midnight-ink");
+
+        let css = std::fs::read_to_string("public/css/themes.css").expect("public/css/themes.css");
+        let js = std::fs::read_to_string("public/js/themes.js").expect("public/js/themes.js");
+        let html = std::fs::read_to_string("public/index.html").expect("public/index.html");
+        assert!(html.contains("id=\"settings-theme-card\""));
+        assert!(html.contains("id=\"settings-theme-grid\""));
+
+        for id in ALLOWED_THEME_IDS {
+            assert!(
+                css.contains(&format!("data-theme=\"{}\"", id)),
+                "Missing CSS selector for theme '{}'",
+                id
+            );
+            assert!(
+                js.contains(&format!("['{}', ", id)),
+                "Missing JS preset definition for theme '{}'",
+                id
+            );
+        }
+    }
 }
