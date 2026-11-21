@@ -471,10 +471,9 @@ pub(crate) async fn restore_backup_handler(
             return Err((StatusCode::CONFLICT, "This backup isn't complete, so it can't be restored.".into()));
         }
         if !archive.is_empty() {
-            // Moving the app to another node can already use the archive; restoring in place
-            // (replacing the current files) comes with the new restore engine.
+            // Restoring in place replaces the app's files; a target node moves the app there.
             if payload.target_node_id.is_none() {
-                return Err((StatusCode::CONFLICT, "Restoring backups in the new format is not available yet.".into()));
+                return start_archive_restore(&state, &actor, &p, payload.backup_id).await;
             }
             archive_for_cross_node = archive;
         }
@@ -912,6 +911,9 @@ async fn create_archive_backup(
     if running > 0 {
         return Err((StatusCode::CONFLICT, "A backup of this app is already being created. Wait for it to finish.".into()));
     }
+    if crate::backups::is_restoring(p.id) {
+        return Err((StatusCode::CONFLICT, "This app is being restored. Wait for the restore to finish before backing it up.".into()));
+    }
 
     let root = crate::api::files::service_root(p)?;
     let data_dir = state.cluster.data_dir().to_path_buf();
@@ -1013,4 +1015,204 @@ async fn run_archive_backup(
         }
     }
     state.cache.invalidate_project(p.id);
+}
+
+// ---------------------------------------------------------------------------
+// Restore: replace the app's files with a backup
+// ---------------------------------------------------------------------------
+
+/// Starts restoring an archive backup in place and returns at once. Progress is reported by
+/// `GET /api/projects/:id/backups/restore-status`.
+async fn start_archive_restore(
+    state: &AppState,
+    actor: &crate::auth::User,
+    p: &Project,
+    backup_id: i64,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if state
+        .cluster
+        .should_proxy_to_node(p.node_id)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+        .is_some()
+    {
+        return Err((StatusCode::CONFLICT, "Restoring this kind of backup on another VPS isn't available yet.".into()));
+    }
+    let row = sqlx::query(
+        "SELECT archive_path, checksum_sha256, file_count, note FROM backups WHERE id = $1 AND project_id = $2 AND status = 'complete'",
+    )
+    .bind(backup_id)
+    .bind(p.id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .ok_or((StatusCode::NOT_FOUND, format!("Backup #{backup_id} not found")))?;
+    let archive = PathBuf::from(row.get::<String, _>(0));
+    let sha: String = row.get(1);
+    let files = row.get::<i64, _>(2).max(0) as u64;
+    let note: String = row.get(3);
+
+    if !tokio::fs::try_exists(&archive).await.unwrap_or(false) {
+        return Err((StatusCode::CONFLICT, "The backup file is missing from this server, so it can't be restored.".into()));
+    }
+    let building: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM backups WHERE project_id = $1 AND status = 'running'")
+        .bind(p.id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+    if building > 0 {
+        return Err((StatusCode::CONFLICT, "A backup of this app is being created. Wait for it to finish, then restore.".into()));
+    }
+    if state.deployer.has_active_deployment(p.id).await {
+        return Err((StatusCode::CONFLICT, format!("A deployment of '{}' is in progress. Wait for it to finish, then restore.", p.name)));
+    }
+    if !crate::backups::begin_restore(p.id, backup_id) {
+        return Err((StatusCode::CONFLICT, "A restore of this app is already running.".into()));
+    }
+
+    log_audit_project(state, Some(p.id), &actor.username, "backup.restore", Some(&p.name), Some(&format!("Started restoring backup #{backup_id}"))).await;
+
+    let (state, p, actor_name) = (state.clone(), p.clone(), actor.username.clone());
+    tokio::spawn(async move {
+        // If the restore task panics, don't leave the app locked as "restoring".
+        let project_id = p.id;
+        let task = tokio::spawn(run_archive_restore(state, p, actor_name, backup_id, archive, sha, files, note));
+        if let Err(e) = task.await {
+            crate::backups::finish_restore(project_id, false, format!("The restore stopped unexpectedly: {e}"));
+        }
+    });
+
+    Ok(Json(serde_json::json!({ "ok": true, "status": "running", "backupId": backup_id })))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_archive_restore(
+    state: AppState,
+    p: Project,
+    actor: String,
+    backup_id: i64,
+    archive: PathBuf,
+    sha: String,
+    files: u64,
+    note: String,
+) {
+    match restore_archive_in_place(&state, &p, backup_id, &archive, &sha, files).await {
+        Ok(message) => {
+            crate::backups::finish_restore(p.id, true, message.clone());
+            state.logs.add(Some(p.id), None, "backup", "info", &format!("Restored backup #{backup_id} ({note}). {message}"));
+            log_audit_project(&state, Some(p.id), &actor, "backup.restore", Some(&p.name), Some(&format!("Restored backup #{backup_id} ({note})"))).await;
+        }
+        Err(error) => {
+            crate::backups::finish_restore(p.id, false, error.clone());
+            state.logs.add(Some(p.id), None, "backup", "error", &format!("Restore of backup #{backup_id} failed: {error}"));
+            log_audit_project(&state, Some(p.id), &actor, "backup.restore_failed", Some(&p.name), Some(&error)).await;
+        }
+    }
+    state.cache.invalidate_all();
+}
+
+/// The restore itself. The backup is proven good and unpacked before the app is touched; the
+/// swap is two renames with rollback, so the app is never left half restored.
+async fn restore_archive_in_place(
+    state: &AppState,
+    p: &Project,
+    backup_id: i64,
+    archive: &std::path::Path,
+    sha: &str,
+    files: u64,
+) -> Result<String, String> {
+    let root = crate::api::files::service_root(p).map_err(|(_, e)| e)?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let work = crate::backups::deploy_base(&p.deploy_dir, &cwd);
+    let real_root = crate::backups::resolve_real_root(&root);
+    let label = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "app".to_string());
+
+    // 1-2. Verify the checksum and unpack into a staging folder. Nothing live changes yet.
+    let (archive_c, sha_c, work_c) = (archive.to_path_buf(), sha.to_string(), work.clone());
+    let staged = tokio::task::spawn_blocking(move || {
+        crate::backups::verify_archive(&archive_c, &sha_c)?;
+        crate::backups::stage_archive(&archive_c, &work_c, backup_id, files)
+    })
+    .await
+    .map_err(|e| format!("The restore stopped unexpectedly: {e}"))??;
+
+    // 3. Stop the app (remembering whether it was running).
+    let fresh = state.projects.get(p.id).await.ok().flatten().unwrap_or_else(|| p.clone());
+    let was_running = matches!(fresh.app_status.as_str(), "running" | "maintenance");
+    if was_running {
+        let _ = state.runtime.stop_project(&fresh).await;
+    }
+
+    // 4. Swap the folders.
+    let (real_c, new_c, work_c, label_c) = (real_root, staged.new_root.clone(), work.clone(), label);
+    let swapped = tokio::task::spawn_blocking(move || crate::backups::swap_in(&real_c, &new_c, &work_c, &label_c))
+        .await
+        .map_err(|e| format!("The restore stopped unexpectedly: {e}"))?;
+    if let Err(e) = swapped {
+        crate::backups::discard_staged(&staged);
+        if was_running {
+            let env = state.projects.get_env_map(p.id).await;
+            let _ = state.runtime.start_project(&fresh, env, None).await;
+        }
+        let tail = if e.contains("old files back") { "" } else { " Your files were not changed." };
+        return Err(format!("{e}{tail}"));
+    }
+
+    // 5. Environment variables come back exactly as they were in the backup.
+    let mut notes: Vec<String> = Vec::new();
+    if let Some(env) = &staged.env {
+        if let Err(e) = state.projects.set_bulk_env(p.id, env, true, true).await {
+            notes.push(format!("the environment variables were not restored ({e})"));
+        }
+    }
+
+    // 6. Start the app again if it was running.
+    if was_running {
+        let env = state.projects.get_env_map(p.id).await;
+        if let Err(e) = state.runtime.start_project(&fresh, env, None).await {
+            notes.push(format!("the app didn't start again ({e})"));
+        }
+    }
+
+    let mut message = "Restored. Files that weren't in the backup were removed; the previous files are kept for 24 hours.".to_string();
+    if !notes.is_empty() {
+        message.push_str(&format!(" Note: {}.", notes.join("; ")));
+    }
+    Ok(message)
+}
+
+pub(crate) async fn restore_status_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_power(&state, &headers, "backups", Some(id)).await?;
+    Ok(Json(match crate::backups::restore_status(id) {
+        Some(status) => serde_json::json!(status),
+        None => serde_json::json!({ "state": "idle" }),
+    }))
+}
+
+/// Removes undo copies older than a day (and, at startup, staging folders left by a restore
+/// that was cut off).
+pub(crate) async fn undo_housekeeping(state: &AppState, at_startup: bool) {
+    let Ok(projects) = state.projects.list().await else { return };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    for p in projects {
+        if crate::backups::is_restoring(p.id) {
+            continue;
+        }
+        let work = crate::backups::deploy_base(&p.deploy_dir, &cwd);
+        tokio::task::spawn_blocking(move || {
+            if at_startup {
+                crate::backups::remove_stale_staging(&work);
+            }
+            crate::backups::prune_undo_copies(&work, crate::backups::UNDO_KEEP_SECS);
+        })
+        .await
+        .ok();
+    }
 }

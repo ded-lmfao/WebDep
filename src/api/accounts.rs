@@ -993,10 +993,6 @@ mod tests {
         assert!(archive.is_file());
         assert!(!archive.starts_with(&deploy));
 
-        // New-format backups can't be restored yet.
-        let (st, _) = call(&router, Method::POST, &format!("/api/projects/{id}/backups/restore"), admin_s, json!({"backupId": bid})).await;
-        assert_eq!(st, StatusCode::CONFLICT);
-
         // A locked backup can't be deleted; once unlocked, deleting removes the archive too.
         sqlx::query("UPDATE backups SET locked = TRUE WHERE id = $1").bind(bid).execute(&state.db).await.unwrap();
         let (st, _) = call(&router, Method::DELETE, &format!("/api/projects/{id}/backups/{bid}"), admin_s, json!({})).await;
@@ -1010,6 +1006,94 @@ mod tests {
         // Only one backup runs at a time.
         sqlx::query("INSERT INTO backups(project_id, status, created_at) VALUES($1, 'running', 1)").bind(id).execute(&state.db).await.unwrap();
         let (st, _) = call(&router, Method::POST, &format!("/api/projects/{id}/backup"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        let _ = std::fs::remove_dir_all(&deploy);
+    }
+
+    #[tokio::test]
+    async fn restoring_a_backup_replaces_files_and_env_and_refuses_damaged_archives() {
+        let state = crate::api::common::tests_state_helper().await;
+        let router = crate::api::create_router(state.clone());
+        let admin = state.auth.create_session(1).await.unwrap();
+        let admin_s = Some((admin.id.as_str(), admin.csrf_token.as_str()));
+
+        let (st, site) = call(&router, Method::POST, "/api/projects", admin_s,
+            json!({"name": "Rs", "slug": "rs-restore", "repo_url": ""})).await;
+        assert_eq!(st, StatusCode::OK, "{site}");
+        let id = site["id"].as_i64().unwrap();
+        let deploy = std::path::PathBuf::from(site["deploy_dir"].as_str().unwrap());
+        let app = deploy.join("app");
+        std::fs::create_dir_all(app.join("keep")).unwrap();
+        std::fs::write(app.join("hello.txt"), "v1").unwrap();
+        std::fs::write(app.join("keep/inner.txt"), "inner").unwrap();
+        state.projects.set_env_var(id, "FOO", "1", true).await.unwrap();
+
+        // Back up.
+        let (_, started) = call(&router, Method::POST, &format!("/api/projects/{id}/backup"), admin_s, json!({})).await;
+        let bid = started["backupId"].as_i64().unwrap();
+        for _ in 0..50 {
+            let (_, list) = call(&router, Method::GET, &format!("/api/projects/{id}/backups"), admin_s, json!({})).await;
+            if list.as_array().unwrap().iter().any(|b| b["id"] == bid && b["status"] == "complete") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // The app changes after the backup: edit, add, delete, and a new env var.
+        std::fs::write(app.join("hello.txt"), "v2").unwrap();
+        std::fs::write(app.join("extra.txt"), "added later").unwrap();
+        std::fs::remove_file(app.join("keep/inner.txt")).unwrap();
+        state.projects.set_env_var(id, "BAR", "2", true).await.unwrap();
+
+        async fn wait_restore(router: &axum::Router, id: i64, admin_s: Option<(&str, &str)>) -> serde_json::Value {
+            let mut last = serde_json::Value::Null;
+            for _ in 0..100 {
+                let (_, status) = call(router, Method::GET, &format!("/api/projects/{id}/backups/restore-status"), admin_s, json!({})).await;
+                if status["state"] == "done" || status["state"] == "failed" {
+                    return status;
+                }
+                last = status;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            last
+        }
+
+        // Restore: replaces everything.
+        let (st, res) = call(&router, Method::POST, &format!("/api/projects/{id}/backups/restore"), admin_s, json!({"backupId": bid})).await;
+        assert_eq!(st, StatusCode::OK, "{res}");
+        assert_eq!(res["status"], "running");
+        let done = wait_restore(&router, id, admin_s).await;
+        assert_eq!(done["state"], "done", "{done}");
+        assert_eq!(std::fs::read_to_string(app.join("hello.txt")).unwrap(), "v1");
+        assert_eq!(std::fs::read_to_string(app.join("keep/inner.txt")).unwrap(), "inner");
+        assert!(!app.join("extra.txt").exists(), "files that weren't in the backup are removed");
+        let env = state.projects.get_env_map(id).await;
+        assert!(env.contains_key("FOO") && !env.contains_key("BAR"), "env is replaced, not merged");
+        let undo: Vec<_> = std::fs::read_dir(deploy.join(".pre-restore")).unwrap().flatten().collect();
+        assert_eq!(undo.len(), 1);
+        assert_eq!(std::fs::read_to_string(undo[0].path().join("extra.txt")).unwrap(), "added later", "the previous state is kept for undo");
+
+        // A damaged archive is refused and the live files are not touched.
+        std::fs::write(app.join("hello.txt"), "live").unwrap();
+        let archive = crate::backups::archive_path(state.cluster.data_dir(), id, bid);
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&archive, &bytes).unwrap();
+        let (st, _) = call(&router, Method::POST, &format!("/api/projects/{id}/backups/restore"), admin_s, json!({"backupId": bid})).await;
+        assert_eq!(st, StatusCode::OK);
+        let failed = wait_restore(&router, id, admin_s).await;
+        assert_eq!(failed["state"], "failed", "{failed}");
+        assert!(failed["message"].as_str().unwrap().contains("damaged"), "{failed}");
+        assert_eq!(std::fs::read_to_string(app.join("hello.txt")).unwrap(), "live", "live files untouched");
+
+        // An incomplete backup can't be restored.
+        let running: i64 = sqlx::query_scalar("INSERT INTO backups(project_id, status, created_at) VALUES($1, 'failed', 1) RETURNING id")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        let (st, _) = call(&router, Method::POST, &format!("/api/projects/{id}/backups/restore"), admin_s, json!({"backupId": running})).await;
         assert_eq!(st, StatusCode::CONFLICT);
         let _ = std::fs::remove_dir_all(&deploy);
     }

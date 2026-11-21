@@ -141,7 +141,7 @@ async function loadProjectBackupsTable(p) {
           <td>
             <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
               ${isOffNode && onlineNodes.length && state.user?.isAdmin ? `<select id="backup-restore-node-${b.id}" class="form-control" style="width:130px; height:28px; font-size:11.5px; padding:2px 6px;">${nodeOptions}</select>` : ''}
-              ${hasPower('backups') && b.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})" ${b.format === 'archive' ? 'disabled title="Restoring these backups is not available yet"' : ''}>Restore</button>` : ''}
+              ${hasPower('backups') && b.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})">Restore</button>` : ''}
               ${hasPower('backups') ? `<button class="btn btn-danger btn-sm" onclick="deleteProjectBackup(${p.id}, ${b.id})" ${b.status === 'running' ? 'disabled' : ''} ${b.locked ? 'title="Locked: unlock it before deleting"' : ''}>Delete</button>` : ''}
             </div>
           </td>
@@ -182,6 +182,24 @@ async function createProjectBackupSnapshot() {
   }
 }
 
+/** Waits for an in-place restore to finish, then reports how it went. */
+async function waitForRestore(projectId, backupId) {
+  for (let i = 0; i < 800; i += 1) {
+    await new Promise((r) => setTimeout(r, 1500));
+    const status = await api(`/api/projects/${projectId}/backups/restore-status`, { noCache: true });
+    if (status.state === 'done') {
+      toast(status.message || `Restored backup #${backupId}`, 'success');
+      return true;
+    }
+    if (status.state === 'failed') {
+      toast(`Restore failed: ${status.message}`, 'error');
+      return false;
+    }
+  }
+  toast('The restore is taking longer than expected. Check the backups list.', 'warning');
+  return false;
+}
+
 async function restoreProjectBackup(projectId, backupId, isOffNode) {
   const sel = document.getElementById(`backup-restore-node-${backupId}`);
   const targetNodeId = isOffNode && sel && sel.value ? Number(sel.value) : null;
@@ -189,15 +207,20 @@ async function restoreProjectBackup(projectId, backupId, isOffNode) {
     title: `Restore Backup #${backupId}`,
     message: targetNodeId
       ? `Restore off-node backup #${backupId} onto Node #${targetNodeId}?`
-      : `Restore backup #${backupId} on the active node?`,
+      : `Replace ALL current files with backup #${backupId}? Files added or changed since the backup are removed (the current files are kept for 24 hours so you can undo). The app is stopped during the restore and started again if it was running.`,
     confirmText: 'Restore Backup',
     danger: true,
   });
   if (!ok) return;
   try {
     const body = targetNodeId ? { backupId, targetNodeId } : { backupId };
-    await api(`/api/projects/${projectId}/backups/restore`, { method: 'POST', body });
-    toast(`Restored backup #${backupId}`, 'success');
+    const res = await api(`/api/projects/${projectId}/backups/restore`, { method: 'POST', body });
+    if (res && res.status === 'running') {
+      toast(`Restoring backup #${backupId}. The app is stopped until it finishes.`, 'info');
+      await waitForRestore(projectId, backupId);
+    } else {
+      toast(`Restored backup #${backupId}`, 'success');
+    }
     if (typeof window.refreshProjects === 'function') await window.refreshProjects();
     await loadReleasesView();
   } catch (err) {

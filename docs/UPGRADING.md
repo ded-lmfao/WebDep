@@ -73,9 +73,11 @@ doesn't read.
   choice. An IP can only be removed once no app uses it.
 - **Resource limits** (set when creating a website, service, or database; changed later by
   admins in **Admin Panel › App Limits**): CPU (100% = one core), memory, disk, and number of
-  backups. Empty or 0 means no limit. CPU and memory use cgroups v2 on Linux and need WebDep to
-  run as root (or with write access to `/sys/fs/cgroup`); elsewhere the app runs without them and
-  its log says why. Disk is a soft limit checked every five minutes on this server: an app over
+  backups. Empty or 0 means no limit. CPU and memory are enforced with cgroups v2 on Linux
+  (WebDep must run as root, or have write access to `/sys/fs/cgroup`) and with Job Objects on
+  Windows (a hard CPU cap and a memory limit for the app and everything it starts). Where limits
+  can't be enforced, the App Limits page says why and the app's log notes it. Disk is a soft
+  limit checked every minute on this server: an app over
   it is stopped and can't be started until it is under the limit or an admin raises it (apps on
   other nodes are not measured yet). The backup limit refuses a new backup once the app holds
   that many; databases have no backups.
@@ -85,7 +87,12 @@ doesn't read.
   the background and includes everything under the app's Files folder (including `node_modules`
   and `.git`) plus its environment variables. A backup cut off by a restart is marked Failed and
   its unfinished file is removed. Backups made before this release still work and still restore.
-  Restoring the new archives in place arrives in the next update; moving an app to another node
-  from one already works.
+- **Restoring a backup replaces the app's files; it never merges.** WebDep checks the backup's
+  checksum, unpacks it beside the app, stops the app, swaps the folders, restores the saved
+  environment variables (replacing the current ones), and starts the app again if it was
+  running. Files that weren't in the backup are removed. If anything fails before the swap,
+  nothing changes; if the swap itself fails, the old files are put back. The files that were
+  replaced are kept for 24 hours in `.pre-restore/` inside the app's folder so you can undo.
+  Restoring and deploying can't run at the same time for one app.
 - **Audit history per app** keeps the newest 50 entries for each website or service; older ones
   are deleted as new ones arrive. Panel-wide entries keep the days-based retention.

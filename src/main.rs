@@ -427,13 +427,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     {
-        // Disk limits are soft: every few minutes, stop local apps that grew past theirs.
+        // Clean up after a restore that a restart cut off.
+        let startup_state = state.clone();
+        tokio::spawn(async move {
+            crate::api::projects::backups::undo_housekeeping(&startup_state, true).await;
+        });
+
+        // Disk limits are soft: every minute, stop local apps that grew past theirs. Expired
+        // restore undo copies are cleaned up every fifth minute.
         let state = state.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut tick = 0u64;
             loop {
                 interval.tick().await;
+                tick += 1;
                 crate::api::limits::enforce_disk_limits(&state).await;
+                if tick % 5 == 0 {
+                    crate::api::projects::backups::undo_housekeeping(&state, false).await;
+                }
             }
         });
     }
