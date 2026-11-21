@@ -50,8 +50,34 @@ function formatUptimeShort(secs) {
 
 export { matchesNodeFilter, getNodeDisplayName };
 
+function versionParts(v) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(v || ''));
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** True when a worker runs an older WebDep than this panel (newer commands may not work on it). */
+export function nodeIsOlder(n) {
+  const a = versionParts(n?.nodeVersion);
+  const b = versionParts(state.coreVersion);
+  if (!a || !b || n?.isLocal) return false;
+  for (let i = 0; i < 3; i += 1) {
+    if (a[i] !== b[i]) return a[i] < b[i];
+  }
+  return false;
+}
+window.nodeIsOlder = nodeIsOlder;
+
+async function loadCoreVersion() {
+  if (state.coreVersion) return;
+  try {
+    const res = await fetch('/healthz', { credentials: 'same-origin' });
+    state.coreVersion = res.headers.get('X-WebDep-Version') || '';
+  } catch (_) { /* version badge is best-effort */ }
+}
+
 export async function loadNodes(force = false) {
   try {
+    void loadCoreVersion();
     const list = await api('/api/cluster/nodes', force ? { noCache: true } : {});
     state.nodes = Array.isArray(list) ? list : [];
     const current = String(state.selectedNodeFilter || 'all');
@@ -196,7 +222,7 @@ export function renderNodesView(enrollTokens = null) {
               </div>
             </div>
             <div style="text-align: right; font-size: 11.5px; color: var(--text-dim); white-space: nowrap;">
-              <div style="color: var(--text-muted); font-family: var(--font-mono);">v${escapeHtml(n.nodeVersion || '--')}</div>
+              <div style="color: var(--text-muted); font-family: var(--font-mono);">v${escapeHtml(n.nodeVersion || '--')}${nodeIsOlder(n) ? ' <span class="badge badge-warning" title="This worker runs an older WebDep than the panel. Use Update Fleet.">Update needed</span>' : ''}</div>
               <div>${n.lastSeenAt ? `Seen ${formatRelativeTime(n.lastSeenAt)}` : 'Never seen'}</div>
             </div>
           </div>
@@ -1119,6 +1145,7 @@ function renderNodeChips(nodes) {
       <span class="status-dot ${n.status === 'online' ? 'online' : 'offline'}"></span>
       <span class="ipx-chip-name">${escapeHtml(nodeLabel(n))}</span>
       <span class="ipx-chip-meta">${ports.length ? `${c.used + c.extra}/${c.total}` : 'No range'}</span>
+      ${nodeIsOlder(n) ? '<span class="badge badge-warning" title="Older WebDep: update this worker">Update</span>' : ''}
     </button>`;
   }).join('')}</div>`;
 }

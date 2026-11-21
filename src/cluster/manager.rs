@@ -1063,12 +1063,19 @@ impl ClusterManager {
             Ok(reply.result)
         } else {
             let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
-            Err((
-                status,
-                reply
-                    .error
-                    .unwrap_or_else(|| format!("Remote '{op}' failed on Web-Node #{node_id}")),
-            ))
+            let message = reply
+                .error
+                .unwrap_or_else(|| format!("Remote '{op}' failed on Web-Node #{node_id}"));
+            // An older worker doesn't know newer commands: say so instead of a bare 404.
+            if message.starts_with("Unknown remote RPC op") {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "Web-Node #{node_id} runs an older WebDep that doesn't support '{op}'. Update it with Update Fleet in Admin Panel > Nodes, then try again."
+                    ),
+                ));
+            }
+            Err((status, message))
         }
     }
 

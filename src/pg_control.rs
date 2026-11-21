@@ -4,7 +4,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::databases::binaries::{ensure_pg_permissions, make_pg_server_command, PgBinaries};
 use crate::databases::security::{
@@ -69,7 +69,9 @@ fn build_migrator() -> sqlx::migrate::Migrator {
                 false,
             ),
         ]),
-        ignore_missing: false,
+        // A database already migrated by a newer WebDep keeps working when an older build is
+        // started on it (rollback): unknown newer migrations are tolerated, not fatal.
+        ignore_missing: true,
         locking: true,
         no_tx: false,
     }
@@ -135,6 +137,103 @@ fn make_pg_connect_options(host: &str, port: u16, user: &str, password: &str, da
         .password(password)
         .database(database)
         .disable_statement_logging()
+}
+
+/// Newest migration version this build knows.
+pub fn latest_migration_version() -> i64 {
+    build_migrator().migrations.iter().map(|m| m.version).max().unwrap_or(0)
+}
+
+/// `Some(applied_version)` when the database already holds migrated data that is older than
+/// this build (so applying migrations changes an existing install); `None` for a fresh
+/// database or one that is already current.
+pub fn pending_upgrade_from(applied: Option<i64>, latest: i64) -> Option<i64> {
+    applied.filter(|v| *v > 0 && *v < latest)
+}
+
+async fn applied_migration_version(pool: &PgPool) -> Option<i64> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+    if !exists {
+        return None;
+    }
+    sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+        .fetch_one(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// How many pre-upgrade dumps to keep.
+const KEEP_PRE_UPGRADE_DUMPS: usize = 5;
+
+/// Dump file name for an upgrade from `from` to `to` at unix time `ts`.
+pub fn pre_upgrade_dump_name(from: i64, to: i64, ts: u64) -> String {
+    format!("pre-upgrade-v{from:04}-to-v{to:04}-{ts}.dump")
+}
+
+/// Deletes the oldest pre-upgrade dumps beyond `keep`.
+pub fn prune_pre_upgrade_dumps(dir: &Path, keep: usize) {
+    let mut dumps: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("pre-upgrade-") && e.path().extension().is_some_and(|x| x == "dump"))
+        .collect();
+    dumps.sort_by_key(|e| e.file_name());
+    while dumps.len() > keep {
+        let old = dumps.remove(0);
+        let _ = std::fs::remove_file(old.path());
+    }
+}
+
+/// Takes a `pg_dump` of the control database before pending migrations change it, so an
+/// upgrade can always be undone by restoring the dump. A missing `pg_dump` only warns; a dump
+/// that runs and fails stops the upgrade (set `WEBDEP_SKIP_DB_BACKUP=1` to override).
+async fn backup_before_migrate(
+    pool: &PgPool,
+    bins: &PgBinaries,
+    cfg: &ControlPgConfig,
+    data_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let latest = latest_migration_version();
+    let Some(from) = pending_upgrade_from(applied_migration_version(pool).await, latest) else {
+        return Ok(());
+    };
+    if std::env::var("WEBDEP_SKIP_DB_BACKUP").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")) {
+        warn!("Skipping the pre-upgrade database backup (WEBDEP_SKIP_DB_BACKUP is set)");
+        return Ok(());
+    }
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let pg_dump = bins.psql.with_file_name(format!("pg_dump{ext}"));
+    if !pg_dump.is_file() {
+        warn!("pg_dump not found next to psql; upgrading the control database without a backup");
+        return Ok(());
+    }
+    let dir = data_dir.join("backups").join("control-db");
+    tokio::fs::create_dir_all(&dir).await?;
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let file = dir.join(pre_upgrade_dump_name(from, latest, ts));
+    let out = tokio::process::Command::new(&pg_dump)
+        .args(["-h", "127.0.0.1", "-p", &cfg.port.to_string(), "-U", &cfg.user, "-d", &cfg.database, "-F", "c", "-f"])
+        .arg(&file)
+        .env("PGPASSWORD", &cfg.password)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await?;
+    if !out.status.success() {
+        let _ = tokio::fs::remove_file(&file).await;
+        return Err(format!(
+            "Could not back up the control database before upgrading it (v{from} to v{latest}): {}. Nothing was changed. Fix the problem or set WEBDEP_SKIP_DB_BACKUP=1 to upgrade without a backup.",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into());
+    }
+    prune_pre_upgrade_dumps(&dir, KEEP_PRE_UPGRADE_DUMPS);
+    info!("Backed up the control database before upgrading (v{from} to v{latest}): {}", file.display());
+    Ok(())
 }
 
 /// Ensure migrations run on any connected PostgreSQL pool.
@@ -370,6 +469,7 @@ pub async fn ensure_local_pg_with_port(
         .connect_with(app_opts)
         .await?;
 
+    backup_before_migrate(&pool, &bins, &cfg, data_dir).await?;
     run_migrations(&pool).await?;
 
     let handle = ControlPgHandle {
@@ -467,5 +567,36 @@ pub mod test_db {
 
         run_migrations(&pool).await.expect("migrations failed");
         pool
+    }
+}
+
+#[cfg(test)]
+mod upgrade_backup_tests {
+    use super::*;
+
+    #[test]
+    fn detects_only_real_upgrades() {
+        assert_eq!(pending_upgrade_from(None, 7), None, "fresh database");
+        assert_eq!(pending_upgrade_from(Some(7), 7), None, "already current");
+        assert_eq!(pending_upgrade_from(Some(9), 7), None, "newer database, older build");
+        assert_eq!(pending_upgrade_from(Some(5), 7), Some(5));
+        assert!(latest_migration_version() >= 7);
+    }
+
+    #[test]
+    fn keeps_only_the_newest_dumps() {
+        let dir = std::env::temp_dir().join(format!("webdep-dump-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for ts in 100..108u64 {
+            std::fs::write(dir.join(pre_upgrade_dump_name(5, 7, ts)), b"x").unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), b"keep").unwrap();
+        prune_pre_upgrade_dumps(&dir, 5);
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(names.iter().filter(|n| n.ends_with(".dump")).count(), 5);
+        assert!(names.contains(&"notes.txt".to_string()));
+        assert!(names.contains(&pre_upgrade_dump_name(5, 7, 107)));
+        assert!(!names.contains(&pre_upgrade_dump_name(5, 7, 100)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

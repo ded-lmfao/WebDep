@@ -200,6 +200,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // successful boot retries the conversion; the main admin is unaffected.
         Err(e) => tracing::error!("Failed to convert legacy permissions into access grants (will retry next start): {e}"),
     }
+    match crate::auth::grants::grant_legacy_delete_once(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Carried the app delete right over to {n} access grant(s)"),
+        Err(e) => tracing::error!("Could not carry over the app delete right (will retry next start): {e}"),
+    }
     auth.start_revocation_listener();
     let projects = Arc::new(Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(Logs::new(db.clone()));

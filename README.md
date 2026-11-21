@@ -274,6 +274,10 @@ Everything WebDep stores lives under `DATA_DIR` (default `./data` inside the ins
 
 Do not copy these folders while PostgreSQL is running; use panel backups or stop WebDep first.
 
+### Upgrading and rolling back
+
+WebDep backs up its control database before every upgrade that changes it. See [docs/UPGRADING.md](docs/UPGRADING.md) for what each release changes, how the backup works, and how to roll back.
+
 ### Upgrading from 2.x (SQLite → PostgreSQL)
 
 On the first 3.x start, Web-Core imports `data/webdep.sqlite` into PostgreSQL in a single transaction (the SQLite file is opened read-only). If the import fails, WebDep stops without changing anything; fix the cause and restart, or retry with `webdep --import-sqlite`. It never imports twice.

@@ -38,13 +38,18 @@ const LABELS = {
   users_create: 'Create accounts',
   users_edit: 'Edit or disable users',
   requests_review: 'Approve or reject requests',
+  settings_manage: 'Platform settings (earlier)',
+  system_manage: 'System and updates (earlier)',
+  audit: 'Panel audit log (earlier)',
+  monitor: 'Monitoring (earlier)',
+  nodes_manage: 'Nodes (earlier)',
 };
 
 export function powerLabel(power, kind = '') {
   if (power === 'env' && (kind === 'database' || kind === 'all-databases')) return 'See connection details';
   if (power === 'services_manage' && kind === 'all-projects') return 'Edit service settings';
   if (power === 'projects_manage' && kind === 'all-projects') return 'Edit website settings';
-  return LABELS[power] || power;
+  return LABELS[power] || `${String(power).replace(/_/g, ' ')} (earlier)`;
 }
 
 export function isAdmin() {

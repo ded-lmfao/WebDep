@@ -15,6 +15,7 @@ use sqlx::{PgConnection, Row};
 use crate::db::DbPool;
 
 pub const ALL_POWERS: &str = "*";
+pub const APP_DELETE: &str = "app_delete";
 const LEGACY_MIGRATION_META_KEY: &str = "legacy_grants_migrated_at";
 
 /// Panel powers an admin (or a delegate holding them) can hand out from the user editor.
@@ -145,15 +146,25 @@ impl Grants {
             panel: powers.clone(),
             ..Default::default()
         };
+        // Deleting an app used to need the manage power; it is now its own per-app power.
+        // Carry it over so nobody loses what they could do before the upgrade.
+        let mut project_powers = powers.clone();
+        if set_has_any(&powers, &["projects_manage", "services_manage"]) {
+            project_powers.insert(APP_DELETE.to_string());
+        }
+        let mut database_powers = powers.clone();
+        if set_has_any(&powers, &["databases_manage"]) {
+            database_powers.insert(APP_DELETE.to_string());
+        }
         if all_projects {
-            out.projects.insert(None, powers.clone());
+            out.projects.insert(None, project_powers);
         } else {
             for pid in allowed_projects {
-                out.projects.insert(Some(*pid), powers.clone());
+                out.projects.insert(Some(*pid), project_powers.clone());
             }
         }
         if all_projects || set_has_any(&powers, &["databases_manage"]) {
-            out.databases.insert(None, powers);
+            out.databases.insert(None, database_powers);
         }
         out
     }
@@ -400,6 +411,66 @@ pub async fn migrate_legacy_once(db: &DbPool) -> Result<usize, sqlx::Error> {
     Ok(migrated)
 }
 
+/// Adds `app_delete` to the project and database grants of users who could delete apps
+/// before it became its own power (they held the matching manage power). Idempotent and
+/// guarded by a marker, so installs converted by an earlier build are brought up to date.
+pub async fn grant_legacy_delete_once(db: &DbPool) -> Result<usize, sqlx::Error> {
+    const MARKER: &str = "legacy_delete_grants_migrated_at";
+    let mut tx = db.begin().await?;
+    sqlx::query("LOCK TABLE _meta IN SHARE ROW EXCLUSIVE MODE").execute(&mut *tx).await?;
+    let done: Option<String> = sqlx::query_scalar("SELECT value FROM _meta WHERE key = $1")
+        .bind(MARKER)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if done.is_some() {
+        return Ok(0);
+    }
+    let users = sqlx::query("SELECT id, username, permissions FROM users").fetch_all(&mut *tx).await?;
+    let mut changed = 0;
+    for row in users {
+        let id: i64 = row.try_get(0)?;
+        let username: String = row.try_get(1)?;
+        if super::user::User::is_main_admin_identity(id, &username) {
+            continue;
+        }
+        let legacy: HashSet<String> = parse_legacy_permissions(&row.try_get::<Option<String>, _>(2)?.unwrap_or_default())
+            .into_iter()
+            .collect();
+        let for_projects = set_has_any(&legacy, &["projects_manage", "services_manage"]);
+        let for_databases = set_has_any(&legacy, &["databases_manage"]);
+        if !for_projects && !for_databases {
+            continue;
+        }
+        let grants = sqlx::query("SELECT id, scope_type, powers_json FROM access_grants WHERE user_id = $1")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+        for g in grants {
+            let scope: String = g.try_get(1)?;
+            let wanted = (scope == SCOPE_PROJECT && for_projects) || (scope == SCOPE_DATABASE && for_databases);
+            if !wanted {
+                continue;
+            }
+            let mut powers = parse_legacy_permissions(&g.try_get::<String, _>(2)?);
+            if powers.iter().any(|p| p == APP_DELETE || p == ALL_POWERS) {
+                continue;
+            }
+            powers.push(APP_DELETE.to_string());
+            powers.sort();
+            sqlx::query("UPDATE access_grants SET powers_json = $1, updated_at = $2 WHERE id = $3")
+                .bind(serde_json::to_string(&powers).unwrap_or_else(|_| "[]".into()))
+                .bind(now_ms())
+                .bind(g.try_get::<i64, _>(0)?)
+                .execute(&mut *tx)
+                .await?;
+            changed += 1;
+        }
+    }
+    sqlx::query("INSERT INTO _meta(key, value) VALUES($1, $2)").bind(MARKER).bind(now_ms().to_string()).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +487,16 @@ mod tests {
         assert!(!g.project_has_any(42, &["env"]));
         assert!(g.panel_has_any(&["logs"]));
         assert!(g.databases.contains_key(&None));
+    }
+
+    #[test]
+    fn manage_powers_carry_the_delete_right() {
+        let g = Grants::from_legacy(&perms(&["projects_manage", "files"]), false, &[4]);
+        assert!(g.project_has_any(4, &[APP_DELETE]));
+        let none = Grants::from_legacy(&perms(&["deploy"]), true, &[]);
+        assert!(!none.project_has_any(1, &[APP_DELETE]), "no manage power, no delete");
+        let db = Grants::from_legacy(&perms(&["databases_manage"]), false, &[]);
+        assert!(db.database_has_any(9, &[APP_DELETE]));
     }
 
     #[test]

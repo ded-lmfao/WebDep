@@ -7,7 +7,6 @@
 //!   `users_create` creates them, `users_edit` edits or disables non-admin accounts;
 //! - nobody can give powers they do not hold (see `access::ensure_can_grant`).
 
-use std::collections::HashSet;
 
 use axum::{
     extract::{Path as AxPath, State},
@@ -390,19 +389,29 @@ pub(crate) async fn update_user_handler(
     }
 
     if let Some(powers) = payload.panel_powers.as_ref().filter(|_| !target.is_admin) {
-        validate_panel_powers(powers)?;
         let current = &target.grants.panel;
-        let editable: HashSet<&str> = PANEL_ACCOUNT_POWERS.iter().copied().collect();
-        // A delegate may only add or remove account powers they hold themselves.
-        let touched: Vec<String> = editable
+        let desired: std::collections::BTreeSet<&String> = powers.iter().collect();
+        // New powers must be account powers. Powers from earlier versions can only be removed.
+        if let Some(p) = desired
             .iter()
-            .filter(|p| current.contains(**p) != powers.iter().any(|x| x == **p))
-            .map(|p| p.to_string())
+            .find(|p| !PANEL_ACCOUNT_POWERS.contains(&p.as_str()) && !current.contains(**p))
+        {
+            return Err(bad(format!("Unknown panel permission '{p}'.")));
+        }
+        let account: Vec<String> = PANEL_ACCOUNT_POWERS.iter().map(|p| p.to_string()).collect();
+        let touched_account: Vec<String> = account
+            .iter()
+            .filter(|p| current.contains(*p) != desired.contains(p))
+            .cloned()
             .collect();
-        ensure_can_grant(&actor, SCOPE_GLOBAL, None, &touched)?;
-        // Panel powers outside the editor (legacy settings/system/app copies) are kept.
-        let mut next: Vec<String> = current.iter().filter(|p| !editable.contains(p.as_str())).cloned().collect();
-        next.extend(powers.iter().cloned());
+        ensure_can_grant(&actor, SCOPE_GLOBAL, None, &touched_account)?;
+        let removing_legacy = current
+            .iter()
+            .any(|p| !PANEL_ACCOUNT_POWERS.contains(&p.as_str()) && !desired.contains(p));
+        if removing_legacy && !actor.is_admin {
+            return Err(forbidden("Only an admin can remove a user's earlier permissions."));
+        }
+        let next: Vec<String> = desired.into_iter().cloned().collect();
         if next.is_empty() {
             grants::remove(&state.db, id, SCOPE_GLOBAL, None).await.map_err(db_error)?;
         } else {
