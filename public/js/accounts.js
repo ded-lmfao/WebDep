@@ -26,7 +26,7 @@ import {
   databaseScope,
 } from './permissions.js';
 
-const ADMIN_VIEWS = ['users', 'requests', 'nodes', 'modules', 'settings', 'admin-audit'];
+const ADMIN_VIEWS = ['users', 'requests', 'nodes', 'ips', 'moves', 'modules', 'settings', 'admin-audit'];
 const USER_LIST_POWERS = ['users_view', 'users_create', 'users_edit', 'requests_review'];
 
 const nav = (view, param) => window.navigateTo?.(view, param);
@@ -64,6 +64,8 @@ function adminViewAllowed(view) {
     case 'requests': return hasPanelPower('requests_review');
     case 'nodes':
     case 'modules': return hasPanelPower('system_manage');
+    case 'ips':
+    case 'moves': return isAdmin();
     case 'settings': return hasPanelPower('settings_manage') || hasPanelPower('system_manage');
     case 'admin-audit': return hasPanelPower('audit');
     default: return false;

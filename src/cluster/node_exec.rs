@@ -2023,7 +2023,12 @@ pub async fn execute_rpc(
         "modules.status" => {
             let p2p_port = exec.p2p_port.load(Ordering::Relaxed);
             let port_opt = if p2p_port > 0 { Some(p2p_port) } else { None };
-            let caps = tokio::task::spawn_blocking(move || detect_capabilities_with_p2p(port_opt))
+            let custom = crate::cluster::modules::custom_modules_from_params(&params);
+            let caps = tokio::task::spawn_blocking(move || {
+                let mut c = detect_capabilities_with_p2p(port_opt);
+                crate::cluster::modules::merge_custom_statuses(&mut c.modules, &custom);
+                c
+            })
                 .await
                 .map_err(|e| e.to_string());
             match caps {
@@ -2068,9 +2073,19 @@ pub async fn execute_rpc(
                 "info",
                 &format!("Installing VPS modules [{ids_log}]..."),
             );
+            let custom = crate::cluster::modules::custom_modules_from_params(&params);
             let res = tokio::task::spawn_blocking(move || {
-                let (results, _snap) = crate::cluster::modules::install_node_modules_sync(&module_ids);
-                let caps = detect_capabilities_with_p2p(port_opt);
+                let (custom_ids, builtin_ids): (Vec<String>, Vec<String>) = module_ids
+                    .into_iter()
+                    .partition(|id| id.starts_with(crate::cluster::modules::CUSTOM_MODULE_PREFIX));
+                let mut results = if builtin_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    crate::cluster::modules::install_node_modules_sync(&builtin_ids).0
+                };
+                results.extend(crate::cluster::modules::apply_custom_modules_sync(&custom, &custom_ids, true));
+                let mut caps = detect_capabilities_with_p2p(port_opt);
+                crate::cluster::modules::merge_custom_statuses(&mut caps.modules, &custom);
                 (results, caps)
             })
             .await;
@@ -2111,9 +2126,19 @@ pub async fn execute_rpc(
                 "info",
                 &format!("Uninstalling VPS modules [{ids_log}]..."),
             );
+            let custom = crate::cluster::modules::custom_modules_from_params(&params);
             let res = tokio::task::spawn_blocking(move || {
-                let (results, _snap) = crate::cluster::modules::uninstall_node_modules_sync(&module_ids);
-                let caps = detect_capabilities_with_p2p(port_opt);
+                let (custom_ids, builtin_ids): (Vec<String>, Vec<String>) = module_ids
+                    .into_iter()
+                    .partition(|id| id.starts_with(crate::cluster::modules::CUSTOM_MODULE_PREFIX));
+                let mut results = if builtin_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    crate::cluster::modules::uninstall_node_modules_sync(&builtin_ids).0
+                };
+                results.extend(crate::cluster::modules::apply_custom_modules_sync(&custom, &custom_ids, false));
+                let mut caps = detect_capabilities_with_p2p(port_opt);
+                crate::cluster::modules::merge_custom_statuses(&mut caps.modules, &custom);
                 (results, caps)
             })
             .await;

@@ -116,8 +116,6 @@ export function renderNodesView(enrollTokens = null) {
 
   const addBtn = document.getElementById('add-node-header-btn');
   if (addBtn) addBtn.style.display = isMainAdmin ? '' : 'none';
-  const moveBtn = document.getElementById('move-app-header-btn');
-  if (moveBtn) moveBtn.style.display = isMainAdmin && (state.projects || []).length ? '' : 'none';
   const genTokenBtn = document.getElementById('nodes-generate-token-btn');
   if (genTokenBtn) genTokenBtn.style.display = isMainAdmin ? '' : 'none';
   const fleetBtn = document.getElementById('fleet-update-header-btn');
@@ -732,7 +730,7 @@ function renderShiftModalState(mig, historyList = [], opts = {}) {
   }
 }
 
-export async function openMoveToNodeModal(projectId) {
+export async function openMoveToNodeModal(projectId, targetNodeId = null) {
   const pid = Number(projectId || state.selectedProjectId);
   const proj = (state.projects || []).find((x) => x.id === pid);
   if (!proj) {
@@ -754,6 +752,7 @@ export async function openMoveToNodeModal(projectId) {
     sel.innerHTML = candidates.length
       ? candidates.map((n) => `<option value="${n.id}">${escapeHtml(nodeLabel(n))} (${escapeHtml(n.region || 'default')} &bull; ${escapeHtml(n.meshIp || 'Worker')})</option>`).join('')
       : '<option value="">No other healthy online nodes available</option>';
+    if (targetNodeId && candidates.some((n) => Number(n.id) === Number(targetNodeId))) sel.value = String(targetNodeId);
   }
 
   let history = [];
@@ -1017,48 +1016,132 @@ window.removeClusterNode = removeClusterNode;
 window.triggerFleetUpdate = triggerFleetUpdate;
 window.openMoveToNodeModal = openMoveToNodeModal;
 
-// "Move an app" picker on the Nodes page (admins only; the server enforces it too).
-function renderMoveAppResults(q) {
-  const box = document.getElementById('move-app-results');
-  if (!box) return;
-  const query = (q || '').trim().toLowerCase();
-  if (!query) {
-    box.hidden = true;
-    box.innerHTML = '';
-    return;
-  }
-  const hits = (state.projects || [])
-    .filter((p) => (p.name || '').toLowerCase().includes(query) || (p.slug || '').toLowerCase().includes(query))
-    .slice(0, 8);
-  box.innerHTML = hits.length
-    ? hits.map((p) => `<button type="button" class="acct-search-item" role="option" data-move-app="${p.id}">
-        <span class="acct-person-name" style="flex:1">${escapeHtml(p.name)}</span>
-        <span class="badge badge-neutral">${p.project_kind === 'service' ? 'Service' : 'Website'}</span>
-        <span class="acct-muted">${escapeHtml(getAppNodeLabel(p.node_id))}</span>
-        <span class="acct-search-add">Move</span>
-      </button>`).join('')
-    : '<p class="acct-search-empty">No matching website or service.</p>';
-  box.hidden = false;
-}
-
-export function openMoveAppPicker() {
-  const input = document.getElementById('move-app-search');
-  if (input) input.value = '';
-  renderMoveAppResults('');
-  openModal('modal-move-app-picker');
-  setTimeout(() => input?.focus(), 60);
-}
-window.openMoveAppPicker = openMoveAppPicker;
-
-document.getElementById('move-app-search')?.addEventListener('input', (e) => renderMoveAppResults(e.target.value));
-document.getElementById('move-app-results')?.addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-move-app]');
-  if (!btn) return;
-  closeModal('modal-move-app-picker');
-  void openMoveToNodeModal(Number(btn.getAttribute('data-move-app')));
-});
 window.confirmStartProjectShift = confirmStartProjectShift;
 window.checkShiftDns = checkShiftDns;
 window.completeShiftCutover = completeShiftCutover;
 window.abortShiftMigration = abortShiftMigration;
 window.closeAddNodeModal = () => closeModal('modal-add-node');
+
+// ============================================================================
+// Admin panel: IP addresses and Move apps
+// ============================================================================
+function localNodeId() {
+  const local = (state.nodes || []).find((n) => n.isLocal);
+  return local ? Number(local.id) : null;
+}
+
+/** Node an app runs on (apps without a node run on the local Core node). */
+function appNodeId(item) {
+  const raw = item.node_id ?? item.nodeId;
+  return raw === null || raw === undefined || raw === '' ? localNodeId() : Number(raw);
+}
+
+function nodeIpLabel(n) {
+  return getNodeEffectivePublicIp(n) || n.publicIp || 'No public IP';
+}
+
+async function refreshInfraData() {
+  await Promise.all([
+    loadNodes(true),
+    window.loadProjects ? window.loadProjects().catch(() => {}) : Promise.resolve(),
+    window.loadDatabases ? window.loadDatabases().catch(() => {}) : Promise.resolve(),
+  ]);
+}
+
+function appPortText(p) {
+  return p.port || p.assigned_port || '';
+}
+
+export async function loadIpsView() {
+  const body = document.getElementById('ips-view-body');
+  if (!body) return;
+  await refreshInfraData();
+  const nodes = state.nodes || [];
+  if (!nodes.length) {
+    body.innerHTML = '<p class="acct-muted">No nodes yet.</p>';
+    return;
+  }
+  const online = nodes.filter((n) => n.status === 'online');
+  const q = (document.getElementById('ips-search')?.value || '').trim().toLowerCase();
+
+  body.innerHTML = nodes.map((n) => {
+    const nid = Number(n.id);
+    const ip = nodeIpLabel(n);
+    const apps = (state.projects || []).filter((p) => appNodeId(p) === nid);
+    const dbs = (state.databases || []).filter((d) => appNodeId(d) === nid);
+    const matches = (name) => !q || name.toLowerCase().includes(q) || ip.toLowerCase().includes(q);
+    const appRows = apps.filter((p) => matches(p.name)).map((p) => {
+      const targets = online.filter((t) => Number(t.id) !== nid);
+      const domains = Array.isArray(p.domains) && p.domains.length ? p.domains.join(', ') : '';
+      return `<tr>
+        <td><div class="acct-person-name">${escapeHtml(p.name)}</div><div class="acct-person-sub">${domains ? escapeHtml(domains) : 'No domain'}</div></td>
+        <td><span class="badge badge-neutral">${p.project_kind === 'service' ? 'Service' : 'Website'}</span></td>
+        <td><code>${escapeHtml(ip)}${appPortText(p) ? `:${appPortText(p)}` : ''}</code></td>
+        <td>${targets.length ? `<div class="acct-actions" style="justify-content:flex-start">
+            <select class="form-control ip-change-select" data-ip-app="${p.id}" style="height:30px; max-width:230px; font-size:12.5px;">
+              <option value="">Change IP</option>
+              ${targets.map((t) => `<option value="${t.id}">${escapeHtml(nodeIpLabel(t))} (${escapeHtml(nodeLabel(t))})</option>`).join('')}
+            </select></div>` : '<span class="acct-muted">No other online IP</span>'}</td>
+      </tr>`;
+    }).join('');
+    const dbRows = dbs.filter((d) => matches(d.name)).map((d) => `<tr>
+        <td><div class="acct-person-name">${escapeHtml(d.name)}</div><div class="acct-person-sub">PostgreSQL</div></td>
+        <td><span class="badge badge-neutral">Database</span></td>
+        <td><code>${escapeHtml(ip)}${d.port ? `:${d.port}` : ''}</code></td>
+        <td><span class="acct-muted" title="Databases stay on the node they were created on">Fixed to this node</span></td>
+      </tr>`).join('');
+    const rows = appRows + dbRows;
+    if (q && !rows) return '';
+    return `<div class="project-card ip-node-card">
+      <div class="ip-node-head">
+        <div>
+          <div class="ip-node-ip"><code>${escapeHtml(ip)}</code> <span class="badge ${n.status === 'online' ? 'badge-success' : 'badge-danger'}">${n.status === 'online' ? 'Online' : escapeHtml(n.status || 'Offline')}</span></div>
+          <div class="acct-muted">${escapeHtml(nodeLabel(n))}${n.isLocal ? ' (Core)' : ''} &middot; mesh ${escapeHtml(n.meshIp || '-')} &middot; ${apps.length} app${apps.length === 1 ? '' : 's'}, ${dbs.length} database${dbs.length === 1 ? '' : 's'}</div>
+        </div>
+      </div>
+      ${rows ? `<div class="table-responsive"><table class="table acct-table"><thead><tr><th>App</th><th>Type</th><th>Address</th><th>Assign</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        : '<p class="acct-muted" style="margin:6px 0 0">Nothing is using this IP.</p>'}
+    </div>`;
+  }).join('') || '<p class="acct-muted">Nothing matches your search.</p>';
+}
+
+document.getElementById('ips-view-body')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-ip-app]');
+  if (!sel || !sel.value) return;
+  const pid = Number(sel.getAttribute('data-ip-app'));
+  const target = Number(sel.value);
+  sel.value = '';
+  void openMoveToNodeModal(pid, target);
+});
+document.getElementById('ips-search')?.addEventListener('input', () => void loadIpsView());
+
+export async function loadMovesView() {
+  const tbody = document.getElementById('moves-list-body');
+  if (!tbody) return;
+  await refreshInfraData();
+  const q = (document.getElementById('moves-search')?.value || '').trim().toLowerCase();
+  const nodesById = new Map((state.nodes || []).map((n) => [Number(n.id), n]));
+  const list = (state.projects || []).filter((p) => !q
+    || (p.name || '').toLowerCase().includes(q)
+    || (p.slug || '').toLowerCase().includes(q)
+    || nodeIpLabel(nodesById.get(appNodeId(p)) || {}).toLowerCase().includes(q));
+  const otherOnline = (p) => (state.nodes || []).some((n) => n.status === 'online' && Number(n.id) !== appNodeId(p));
+  tbody.innerHTML = list.length ? list.map((p) => {
+    const node = nodesById.get(appNodeId(p));
+    const running = p.app_status === 'running';
+    return `<tr>
+      <td><div class="acct-person-name">${escapeHtml(p.name)}</div><div class="acct-person-sub">${escapeHtml(p.slug || '')}</div></td>
+      <td><span class="badge badge-neutral">${p.project_kind === 'service' ? 'Service' : 'Website'}</span></td>
+      <td>${node ? escapeHtml(nodeLabel(node)) : '<span class="acct-muted">Unknown</span>'}</td>
+      <td><code>${escapeHtml(node ? nodeIpLabel(node) : '-')}</code></td>
+      <td>${running ? '<span class="badge badge-success">Running</span>' : '<span class="badge badge-neutral">Stopped</span>'}</td>
+      <td><div class="acct-actions">${otherOnline(p)
+        ? `<button class="btn btn-secondary btn-sm" onclick="openMoveToNodeModal(${p.id})">Move</button>`
+        : '<span class="acct-muted" title="Add or bring another node online to move apps">No other node</span>'}</div></td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="6" class="acct-empty">${q ? 'Nothing matches your search.' : 'No websites or services yet.'}</td></tr>`;
+}
+document.getElementById('moves-search')?.addEventListener('input', () => void loadMovesView());
+
+window.loadIpsView = loadIpsView;
+window.loadMovesView = loadMovesView;

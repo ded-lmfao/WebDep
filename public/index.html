@@ -338,6 +338,23 @@
           </svg>
           <span>VPS Modules</span>
         </a>
+        <a class="nav-item" data-view="ips">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path>
+            <path d="M2 12h20"></path>
+          </svg>
+          <span>IP Addresses</span>
+        </a>
+        <a class="nav-item" data-view="moves">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M8 3 4 7l4 4"></path>
+            <path d="M4 7h16"></path>
+            <path d="m16 21 4-4-4-4"></path>
+            <path d="M20 17H4"></path>
+          </svg>
+          <span>Move Apps</span>
+        </a>
         <a class="nav-item" data-view="settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <circle cx="12" cy="12" r="3"></circle>
@@ -2170,6 +2187,42 @@
           </div>
         </section>
 
+        <!-- ==================== ADMIN: IP ADDRESSES VIEW ==================== -->
+        <section id="view-ips" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>IP Addresses</h1>
+              <p>Every node IP and the apps using it. Changing an app's IP moves it to the node with that IP.</p>
+            </div>
+            <div class="view-actions">
+              <input type="text" id="ips-search" class="form-control" placeholder="Search an IP or app" style="width: 220px;" autocomplete="off">
+              <button class="btn btn-secondary btn-sm" onclick="window.loadIpsView && window.loadIpsView()">Refresh</button>
+            </div>
+          </div>
+          <div id="ips-view-body" class="ip-view-body"></div>
+        </section>
+
+        <!-- ==================== ADMIN: MOVE APPS VIEW ==================== -->
+        <section id="view-moves" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Move Apps</h1>
+              <p>Move a website or service to another node. Only admins can do this.</p>
+            </div>
+            <div class="view-actions">
+              <input type="text" id="moves-search" class="form-control" placeholder="Search apps, nodes, or IPs" style="width: 240px;" autocomplete="off">
+            </div>
+          </div>
+          <div class="table-responsive acct-table-wrap">
+            <table class="table acct-table">
+              <thead>
+                <tr><th>App</th><th>Type</th><th>Node</th><th>IP</th><th>Status</th><th style="text-align: right;">Action</th></tr>
+              </thead>
+              <tbody id="moves-list-body"></tbody>
+            </table>
+          </div>
+        </section>
+
         <!-- ==================== APP PERMISSIONS TAB ==================== -->
         <section id="view-access" class="view-section">
           <div class="view-header">
@@ -2191,7 +2244,6 @@
             <div class="view-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
               <button class="btn btn-secondary btn-sm" onclick="window.loadNodesView && window.loadNodesView(true)">Refresh</button>
               <button class="btn btn-secondary btn-sm" id="fleet-update-header-btn" onclick="window.triggerFleetUpdate && window.triggerFleetUpdate()" style="display: none;">Update Fleet</button>
-              <button class="btn btn-secondary btn-sm" id="move-app-header-btn" onclick="openMoveAppPicker()" style="display: none;">Move an app</button>
               <button class="btn btn-primary btn-sm" id="add-node-header-btn" onclick="openAddNodeModal()" style="display: none;">+ Add Node</button>
             </div>
           </div>
@@ -2252,6 +2304,7 @@
             </div>
             <div class="view-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
               <button class="btn btn-secondary btn-sm" onclick="window.loadModulesView && window.loadModulesView(true)">Rescan</button>
+              <button class="btn btn-primary btn-sm" id="modules-add-btn" onclick="window.openCustomModuleEditor && window.openCustomModuleEditor()" style="display: none;">Add module</button>
             </div>
           </div>
 
@@ -2830,19 +2883,47 @@
     </div>
   </div>
 
-  <!-- MOVE AN APP: pick the website or service to move (admin panel › Nodes) -->
-  <div class="modal-overlay" id="modal-move-app-picker">
-    <div class="modal-container" style="max-width: 560px;">
+  <!-- CUSTOM MODULE EDITOR (Admin Panel > VPS Modules) -->
+  <div class="modal-overlay" id="modal-custom-module">
+    <div class="modal-container" style="max-width: 620px;">
       <div class="modal-header">
-        <h3 class="modal-title">Move an app to another node</h3>
+        <h3 class="modal-title" id="custom-module-title">Add module</h3>
         <button class="modal-close" data-close-modal>&times;</button>
       </div>
       <div class="modal-body">
-        <p class="acct-editor-note" style="margin-top:0">Find the website or service to move. Only admins can move apps between nodes.</p>
-        <div class="acct-search">
-          <input type="search" id="move-app-search" class="form-control" placeholder="Type a website or service name" autocomplete="off" aria-label="Find an app to move">
-          <div id="move-app-results" class="acct-search-results" role="listbox" hidden></div>
-        </div>
+        <form id="custom-module-form" autocomplete="off">
+          <input type="hidden" id="cm-id">
+          <p class="acct-editor-note" style="margin-top:0">Adds a tool to the module list on every VPS. The panel installs it with the server's own package manager and checks it by running the command below.</p>
+          <div class="acct-grid-2">
+            <div class="form-group"><label class="form-label" for="cm-name">Name</label>
+              <input id="cm-name" class="form-control" maxlength="40" placeholder="FFmpeg" required></div>
+            <div class="form-group"><label class="form-label" for="cm-command">Check command</label>
+              <input id="cm-command" class="form-control" maxlength="64" placeholder="ffmpeg" required></div>
+            <div class="form-group"><label class="form-label" for="cm-version">Version flag</label>
+              <input id="cm-version" class="form-control" maxlength="80" placeholder="-version"></div>
+            <div class="form-group"><label class="form-label" for="cm-desc">Description</label>
+              <input id="cm-desc" class="form-control" maxlength="200" placeholder="Video and audio converter"></div>
+          </div>
+          <div class="acct-editor-heading" style="margin-top:6px">Package names</div>
+          <p class="acct-editor-note">Fill in the managers your servers use. Separate several packages with spaces.</p>
+          <div class="acct-grid-2">
+            <div class="form-group"><label class="form-label" for="cm-pkg-apt">apt (Debian, Ubuntu)</label>
+              <input id="cm-pkg-apt" class="form-control" placeholder="ffmpeg"></div>
+            <div class="form-group"><label class="form-label" for="cm-pkg-dnf">dnf / yum (Fedora, RHEL)</label>
+              <input id="cm-pkg-dnf" class="form-control" placeholder="ffmpeg-free"></div>
+            <div class="form-group"><label class="form-label" for="cm-pkg-apk">apk (Alpine)</label>
+              <input id="cm-pkg-apk" class="form-control" placeholder="ffmpeg"></div>
+            <div class="form-group"><label class="form-label" for="cm-pkg-pacman">pacman (Arch)</label>
+              <input id="cm-pkg-pacman" class="form-control" placeholder="ffmpeg"></div>
+            <div class="form-group"><label class="form-label" for="cm-pkg-winget">winget (Windows)</label>
+              <input id="cm-pkg-winget" class="form-control" placeholder="Gyan.FFmpeg"></div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-danger" id="cm-delete" style="margin-right:auto; display:none;">Remove from list</button>
+        <button class="btn btn-secondary" data-close-modal>Cancel</button>
+        <button class="btn btn-primary" id="cm-save">Save module</button>
       </div>
     </div>
   </div>

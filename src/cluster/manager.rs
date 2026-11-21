@@ -650,7 +650,20 @@ impl ClusterManager {
         capabilities: &NodeCapabilities,
     ) -> Result<(), String> {
         let now = now_secs();
-        let caps_json = serde_json::to_string(capabilities).unwrap_or_else(|_| "{}".to_string());
+        let mut capabilities = capabilities.clone();
+        let prefix = crate::cluster::modules::CUSTOM_MODULE_PREFIX;
+        if !capabilities.modules.iter().any(|m| m.id.starts_with(prefix)) {
+            let previous: Option<String> = sqlx::query_scalar("SELECT capabilities_json FROM nodes WHERE id = $1")
+                .bind(node_id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
+            if let Some(prev) = previous.and_then(|raw| serde_json::from_str::<NodeCapabilities>(&raw).ok()) {
+                capabilities.modules.extend(prev.modules.into_iter().filter(|m| m.id.starts_with(prefix)));
+            }
+        }
+        let caps_json = serde_json::to_string(&capabilities).unwrap_or_else(|_| "{}".to_string());
         sqlx::query(
             "UPDATE nodes
              SET capabilities_json = $2,

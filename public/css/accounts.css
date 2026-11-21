@@ -117,3 +117,15 @@
 .acct-admin-toggle strong { display: block; font-weight: 500; color: var(--text-main); }
 .acct-admin-toggle small { display: block; margin-top: 3px; font-size: 12px; color: var(--text-dim); line-height: 1.45; }
 .acct-app-rows { margin-top: 10px; }
+
+/* Admin: IP addresses */
+.ip-view-body { display: flex; flex-direction: column; gap: 12px; }
+.ip-node-card { padding: 14px 16px; }
+.ip-node-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
+.ip-node-ip { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--text-main); margin-bottom: 2px; }
+.ip-node-ip code { font-size: 14px; }
+
+/* VPS Modules: custom modules */
+.modules-custom-tag { margin-left: 6px; font-size: 10px; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--accent-glow); color: var(--accent-light); border: 1px solid var(--accent-border); }
+.modules-edit-btn { margin-left: auto; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text-dim); cursor: pointer; }
+.modules-edit-btn:hover { background: var(--bg-card-hover); color: var(--text-main); }

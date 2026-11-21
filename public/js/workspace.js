@@ -271,6 +271,8 @@ function updateBreadcrumbs() {
       users: 'Admin Panel › Users',
       requests: 'Admin Panel › Requests',
       'admin-audit': 'Admin Panel › Audit',
+      ips: 'Admin Panel › IP Addresses',
+      moves: 'Admin Panel › Move Apps',
     };
     secEl.textContent = globalLabels[state.currentView] || state.currentView;
   }
@@ -853,6 +855,8 @@ function renderCurrentView() {
     case 'audit': void loadAuditView(); break;
     case 'nodes': if (window.loadNodesView) void window.loadNodesView(); break;
     case 'modules': if (window.loadModulesView) void window.loadModulesView(); break;
+    case 'ips': if (window.loadIpsView) void window.loadIpsView(); break;
+    case 'moves': if (window.loadMovesView) void window.loadMovesView(); break;
     case 'account':
     case 'users':
     case 'requests':

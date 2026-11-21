@@ -890,22 +890,118 @@ fn build_node_modules_view(
     })
 }
 
+const CUSTOM_MODULES_SETTING: &str = "custom_modules";
+
+/// Admin-defined modules stored on Web-Core.
+async fn load_custom_modules(state: &AppState) -> Vec<crate::cluster::modules::CustomModule> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = $1")
+        .bind(CUSTOM_MODULES_SETTING)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+async fn save_custom_modules(
+    state: &AppState,
+    defs: &[crate::cluster::modules::CustomModule],
+) -> Result<(), (StatusCode, String)> {
+    sqlx::query(
+        "INSERT INTO settings(key, value) VALUES($1, $2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(CUSTOM_MODULES_SETTING)
+    .bind(serde_json::to_string(defs).unwrap_or_else(|_| "[]".into()))
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(())
+}
+
+/// Built-in catalog plus the admin's custom modules.
+async fn full_module_catalog(state: &AppState) -> Vec<crate::cluster::modules::ModuleCatalogEntry> {
+    let mut catalog = crate::cluster::modules::module_catalog();
+    catalog.extend(load_custom_modules(state).await.iter().map(|m| m.catalog_entry()));
+    catalog
+}
+
+pub(crate) async fn list_custom_modules_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::cluster::modules::CustomModule>>, (StatusCode, String)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(load_custom_modules(&state).await))
+}
+
+/// Creates a custom module, or updates the one with the same id.
+pub(crate) async fn save_custom_module_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut input): Json<crate::cluster::modules::CustomModule>,
+) -> Result<Json<crate::cluster::modules::CustomModule>, (StatusCode, String)> {
+    let actor = verify_admin(&state, &headers).await?;
+    input.validate().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if crate::cluster::modules::module_catalog().iter().any(|m| m.name.eq_ignore_ascii_case(&input.name)) {
+        return Err((StatusCode::CONFLICT, "A built-in module already has that name.".into()));
+    }
+    let mut defs = load_custom_modules(&state).await;
+    let existed = defs.iter().any(|d| d.id == input.id);
+    if !existed && defs.len() >= 50 {
+        return Err((StatusCode::BAD_REQUEST, "You can add up to 50 custom modules.".into()));
+    }
+    defs.retain(|d| d.id != input.id);
+    defs.push(input.clone());
+    save_custom_modules(&state, &defs).await?;
+    log_audit(
+        &state,
+        &actor.username,
+        if existed { "module.custom_update" } else { "module.custom_create" },
+        Some(&input.name),
+        Some(&format!("Custom module checks `{}`", input.command)),
+    )
+    .await;
+    Ok(Json(input))
+}
+
+pub(crate) async fn delete_custom_module_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_admin(&state, &headers).await?;
+    let mut defs = load_custom_modules(&state).await;
+    let before = defs.len();
+    defs.retain(|d| d.id != id);
+    if defs.len() == before {
+        return Err((StatusCode::NOT_FOUND, "Custom module not found".into()));
+    }
+    save_custom_modules(&state, &defs).await?;
+    log_audit(&state, &actor.username, "module.custom_delete", Some(&id), Some("Removed custom module from the catalog (packages stay installed)")).await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 async fn refresh_single_node_caps(
     state: &AppState,
     node: &ClusterNode,
 ) -> Result<crate::cluster::models::NodeCapabilities, (StatusCode, String)> {
+    let custom = load_custom_modules(state).await;
     let updated_caps = if node.is_local {
         let p2p_port = node.capabilities.p2p_port;
-        tokio::task::spawn_blocking(move || crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port))
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        tokio::task::spawn_blocking(move || {
+            let mut c = crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port);
+            crate::cluster::modules::merge_custom_statuses(&mut c.modules, &custom);
+            c
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     } else {
         let rpc_res = state
             .cluster
             .call_node(
                 node.id,
                 "modules.status",
-                serde_json::json!({}),
+                serde_json::json!({ "customModules": custom }),
                 std::time::Duration::from_secs(20),
             )
             .await?;
@@ -953,11 +1049,29 @@ impl ModuleAction {
         }
     }
 
-    fn run_local(self, ids: &[String]) -> Vec<crate::cluster::modules::ModuleInstallResult> {
-        match self {
-            ModuleAction::Install => crate::cluster::modules::install_node_modules_sync(ids).0,
-            ModuleAction::Uninstall => crate::cluster::modules::uninstall_node_modules_sync(ids).0,
-        }
+    fn run_local(
+        self,
+        ids: &[String],
+        custom: &[crate::cluster::modules::CustomModule],
+    ) -> Vec<crate::cluster::modules::ModuleInstallResult> {
+        let (custom_ids, builtin_ids): (Vec<String>, Vec<String>) = ids
+            .iter()
+            .cloned()
+            .partition(|id| id.starts_with(crate::cluster::modules::CUSTOM_MODULE_PREFIX));
+        let mut results = if builtin_ids.is_empty() {
+            Vec::new()
+        } else {
+            match self {
+                ModuleAction::Install => crate::cluster::modules::install_node_modules_sync(&builtin_ids).0,
+                ModuleAction::Uninstall => crate::cluster::modules::uninstall_node_modules_sync(&builtin_ids).0,
+            }
+        };
+        results.extend(crate::cluster::modules::apply_custom_modules_sync(
+            custom,
+            &custom_ids,
+            matches!(self, ModuleAction::Install),
+        ));
+        results
     }
 }
 
@@ -971,12 +1085,14 @@ async fn apply_modules_action(
     target_ids: &[String],
     action: ModuleAction,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
+    let custom = load_custom_modules(state).await;
     let (results, updated_caps) = if node.is_local {
         let ids_c = target_ids.to_vec();
         let p2p_port = node.capabilities.p2p_port;
         tokio::task::spawn_blocking(move || {
-            let results = action.run_local(&ids_c);
-            let caps = crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port);
+            let results = action.run_local(&ids_c, &custom);
+            let mut caps = crate::cluster::mesh::detect_capabilities_with_p2p(p2p_port);
+            crate::cluster::modules::merge_custom_statuses(&mut caps.modules, &custom);
             (results, caps)
         })
         .await
@@ -987,7 +1103,7 @@ async fn apply_modules_action(
             .call_node(
                 node.id,
                 action.rpc_method(),
-                serde_json::json!({ "moduleIds": target_ids }),
+                serde_json::json!({ "moduleIds": target_ids, "customModules": custom }),
                 std::time::Duration::from_secs(600),
             )
             .await?;
@@ -1092,14 +1208,18 @@ pub(crate) async fn list_cluster_modules_handler(
     // Read-only readiness view (no network details) is available to every signed-in user;
     // installing packages stays Main Admin only.
     let _user = require_current_user(&state, &headers).await?;
-    let catalog = crate::cluster::modules::module_catalog();
+    let catalog = full_module_catalog(&state).await;
     let mut nodes = state
         .cluster
         .list_nodes()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    let custom = load_custom_modules(&state).await;
     for n in &mut nodes {
+        if n.is_local && !custom.is_empty() {
+            crate::cluster::modules::merge_custom_statuses(&mut n.capabilities.modules, &custom);
+        }
         if n.is_local && n.capabilities.modules.is_empty() {
             if let Ok(caps) = refresh_single_node_caps(&state, n).await {
                 n.capabilities = caps;
@@ -1115,6 +1235,7 @@ pub(crate) async fn list_cluster_modules_handler(
     Ok(Json(serde_json::json!({
         "catalog": catalog,
         "nodes": node_views,
+        "customModules": custom,
     })))
 }
 
@@ -1132,7 +1253,7 @@ pub(crate) async fn refresh_node_modules_handler(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Node #{node_id} not found")))?;
     let caps = refresh_single_node_caps(&state, &node).await?;
     node.capabilities = caps;
-    let catalog = crate::cluster::modules::module_catalog();
+    let catalog = full_module_catalog(&state).await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "node": build_node_modules_view(&node, &catalog),
@@ -1164,7 +1285,7 @@ pub(crate) async fn install_node_modules_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let actor = verify_admin(&state, &headers).await?;
     let node = reachable_node(&state, node_id).await?;
-    let catalog = crate::cluster::modules::module_catalog();
+    let catalog = full_module_catalog(&state).await;
     let res =
         run_install_on_single_node(&state, &actor.username, &node, &catalog, &input.module_ids)
             .await?;
@@ -1198,7 +1319,7 @@ pub(crate) async fn uninstall_node_modules_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let actor = verify_admin(&state, &headers).await?;
     let node = reachable_node(&state, node_id).await?;
-    let catalog = crate::cluster::modules::module_catalog();
+    let catalog = full_module_catalog(&state).await;
     let res =
         run_uninstall_on_single_node(&state, &actor.username, &node, &catalog, &input.module_ids)
             .await?;
@@ -1216,7 +1337,7 @@ pub(crate) async fn install_fleet_modules_handler(
         .list_nodes()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let catalog = crate::cluster::modules::module_catalog();
+    let catalog = full_module_catalog(&state).await;
 
     let mut per_node = Vec::new();
     for node in nodes {
