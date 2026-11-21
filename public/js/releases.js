@@ -105,7 +105,7 @@ async function loadProjectBackupsTable(p) {
           <td>${formatDate(b.ts)}</td>
           <td>
             <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-              ${isOffNode && onlineNodes.length ? `<select id="backup-restore-node-${b.id}" class="form-control" style="width:130px; height:28px; font-size:11.5px; padding:2px 6px;">${nodeOptions}</select>` : ''}
+              ${isOffNode && onlineNodes.length && state.user?.isAdmin ? `<select id="backup-restore-node-${b.id}" class="form-control" style="width:130px; height:28px; font-size:11.5px; padding:2px 6px;">${nodeOptions}</select>` : ''}
               ${hasPower('backups') ? `<button class="btn btn-primary btn-sm" onclick="restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})">Restore</button>` : ''}
               ${hasPower('backups') ? `<button class="btn btn-danger btn-sm" onclick="deleteProjectBackup(${p.id}, ${b.id})">Delete</button>` : ''}
             </div>

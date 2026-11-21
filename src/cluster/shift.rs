@@ -82,42 +82,21 @@ pub struct EvacuateNodeResult {
     pub failed: Vec<(i64, String)>,
 }
 
-/// Enforces cross-node shift RBAC: caller must hold project deploy/manage powers AND
-/// have access to the destination node (`target_node_id`).
+/// Moving an app to another node (live shift, cutover, or restoring a backup onto a
+/// different node) is an infrastructure action: only admins and the main admin may do it.
 pub async fn verify_cross_node_shift_rbac(
-    state: &AppState,
+    _state: &AppState,
     user: &User,
-    project_id: i64,
-    target_node_id: i64,
+    _project_id: i64,
+    _target_node_id: i64,
 ) -> Result<(), (StatusCode, String)> {
-    let has_project_power = state
-        .auth
-        .has_any_power_for_scope(
-            user,
-            &["deploy", "projects_manage", "services_manage"],
-            "project",
-            Some(project_id),
-        )
-        .await;
-    if !has_project_power {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Insufficient project permission to shift workload".to_string(),
-        ));
-    }
-    if user.is_admin {
+    if user.is_admin && !user.disabled {
         return Ok(());
     }
-    let _ = target_node_id;
-    let has_target_node = !user.disabled
-        && user.has_any_power(&["nodes_manage", "projects_manage", "deploy", "*"]);
-    if !has_target_node {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Cross-node shift denied: missing deploy/manage permission".to_string(),
-        ));
-    }
-    Ok(())
+    Err((
+        StatusCode::FORBIDDEN,
+        "Only an admin can move apps between nodes.".to_string(),
+    ))
 }
 
 pub async fn list_project_migrations(
@@ -1535,13 +1514,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(rbac_err.0, StatusCode::FORBIDDEN);
 
-        // Assigning project access on user allows cross-node shift
-        sqlx::query("UPDATE users SET allowed_projects = $1 WHERE id = $2")
-            .bind(format!("[{}]", proj.id))
-            .bind(dev_id)
-            .execute(&state.db)
-            .await
-            .unwrap();
+        // Even with project access and deploy/manage powers, only admins may move apps
         crate::auth::grants::replace_from_legacy_json(
             &state.db,
             dev_id,
@@ -1551,6 +1524,17 @@ mod tests {
         )
         .await
         .unwrap();
+        let dev_user_scoped = state.auth.get_user_by_id(dev_id).await.unwrap();
+        let scoped_err = verify_cross_node_shift_rbac(&state, &dev_user_scoped, proj.id, good_target_id)
+            .await
+            .unwrap_err();
+        assert_eq!(scoped_err.0, StatusCode::FORBIDDEN);
+
+        sqlx::query("UPDATE users SET role = 'admin' WHERE id = $1")
+            .bind(dev_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
         let dev_user_allowed = state.auth.get_user_by_id(dev_id).await.unwrap();
         verify_cross_node_shift_rbac(&state, &dev_user_allowed, proj.id, good_target_id)
             .await

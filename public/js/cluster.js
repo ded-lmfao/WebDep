@@ -19,6 +19,7 @@ import {
   closeModal,
   showConfirmDialog,
   showPromptDialog,
+  getAppNodeLabel,
 } from './state.js';
 import { api, toast } from './api.js';
 import { nodeNetChartHtml, syncNodeNetCharts, stopNodeNetCharts } from './node_net_charts.js';
@@ -115,6 +116,8 @@ export function renderNodesView(enrollTokens = null) {
 
   const addBtn = document.getElementById('add-node-header-btn');
   if (addBtn) addBtn.style.display = isMainAdmin ? '' : 'none';
+  const moveBtn = document.getElementById('move-app-header-btn');
+  if (moveBtn) moveBtn.style.display = isMainAdmin && (state.projects || []).length ? '' : 'none';
   const genTokenBtn = document.getElementById('nodes-generate-token-btn');
   if (genTokenBtn) genTokenBtn.style.display = isMainAdmin ? '' : 'none';
   const fleetBtn = document.getElementById('fleet-update-header-btn');
@@ -1013,6 +1016,47 @@ window.evacuateClusterNode = evacuateClusterNode;
 window.removeClusterNode = removeClusterNode;
 window.triggerFleetUpdate = triggerFleetUpdate;
 window.openMoveToNodeModal = openMoveToNodeModal;
+
+// "Move an app" picker on the Nodes page (admins only; the server enforces it too).
+function renderMoveAppResults(q) {
+  const box = document.getElementById('move-app-results');
+  if (!box) return;
+  const query = (q || '').trim().toLowerCase();
+  if (!query) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  const hits = (state.projects || [])
+    .filter((p) => (p.name || '').toLowerCase().includes(query) || (p.slug || '').toLowerCase().includes(query))
+    .slice(0, 8);
+  box.innerHTML = hits.length
+    ? hits.map((p) => `<button type="button" class="acct-search-item" role="option" data-move-app="${p.id}">
+        <span class="acct-person-name" style="flex:1">${escapeHtml(p.name)}</span>
+        <span class="badge badge-neutral">${p.project_kind === 'service' ? 'Service' : 'Website'}</span>
+        <span class="acct-muted">${escapeHtml(getAppNodeLabel(p.node_id))}</span>
+        <span class="acct-search-add">Move</span>
+      </button>`).join('')
+    : '<p class="acct-search-empty">No matching website or service.</p>';
+  box.hidden = false;
+}
+
+export function openMoveAppPicker() {
+  const input = document.getElementById('move-app-search');
+  if (input) input.value = '';
+  renderMoveAppResults('');
+  openModal('modal-move-app-picker');
+  setTimeout(() => input?.focus(), 60);
+}
+window.openMoveAppPicker = openMoveAppPicker;
+
+document.getElementById('move-app-search')?.addEventListener('input', (e) => renderMoveAppResults(e.target.value));
+document.getElementById('move-app-results')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-move-app]');
+  if (!btn) return;
+  closeModal('modal-move-app-picker');
+  void openMoveToNodeModal(Number(btn.getAttribute('data-move-app')));
+});
 window.confirmStartProjectShift = confirmStartProjectShift;
 window.checkShiftDns = checkShiftDns;
 window.completeShiftCutover = completeShiftCutover;

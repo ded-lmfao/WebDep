@@ -659,7 +659,6 @@ function renderWebsiteWorkspaceHeader() {
         restart: ico('<path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"></path>'),
         maint: ico('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>'),
         globe: ico('<circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>'),
-        move: ico('<path d="M5 12h14M13 5l7 7-7 7"></path>'),
         gear: ico('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>'),
         more: ico('<circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle>'),
         trash: ico('<polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>'),
@@ -680,8 +679,7 @@ function renderWebsiteWorkspaceHeader() {
         menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="openNginxModal(${p.id})">${I.globe}<span>Domains &amp; SSL</span></button>`);
       }
       if (canManage) {
-        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="window.openMoveToNodeModal && window.openMoveToNodeModal(${p.id})">${I.move}<span>Move to another node</span></button>`);
-        menuItems.push('<div class="menu-sep" role="separator"></div>');
+        if (menuItems.length) menuItems.push('<div class="menu-sep" role="separator"></div>');
         menuItems.push(`<button type="button" class="menu-item menu-item-danger" role="menuitem" onclick="deleteProject(${p.id}, '${escapeHtml(p.slug)}')">${I.trash}<span>Delete ${isService ? 'service' : 'website'}</span></button>`);
       }
 
