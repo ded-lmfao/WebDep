@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::{
-    extract::{Path as AxPath, State},
+    extract::{Path as AxPath, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -201,6 +201,31 @@ struct Candidate {
     id: i64,
     username: String,
     display_name: String,
+    /// Shown only to people who may see emails, or when the search was the exact email.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+}
+
+const MIN_SEARCH_LEN: usize = 2;
+const MAX_CANDIDATES: usize = 8;
+
+#[derive(Deserialize)]
+pub(crate) struct AccessQuery {
+    /// Name, username, or email of a person to add. Candidates are returned only for a
+    /// search, so the full user list never reaches delegates.
+    q: Option<String>,
+}
+
+/// Whether `u` matches the search. Email matches by substring only for actors allowed to
+/// see the user list; everyone else needs the exact address, so emails can't be probed.
+fn candidate_match(u: &User, q: &str, can_see_emails: bool) -> Option<Option<String>> {
+    let email = u.email.to_lowercase();
+    let exact_email = !email.is_empty() && email == q;
+    let hit = u.username.to_lowercase().contains(q)
+        || u.display_name.to_lowercase().contains(q)
+        || exact_email
+        || (can_see_emails && !email.is_empty() && email.contains(q));
+    hit.then(|| (can_see_emails || exact_email).then(|| u.email.clone()).filter(|e| !e.is_empty()))
 }
 
 #[derive(Serialize)]
@@ -230,8 +255,11 @@ pub(crate) async fn get_app_access_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxPath((scope, raw_id)): AxPath<(String, String)>,
+    Query(query): Query<AccessQuery>,
 ) -> Result<Json<AccessView>, ApiError> {
     let (actor, app, info) = authorize_app(&state, &headers, &scope, &raw_id).await?;
+    let search = query.q.map(|q| q.trim().to_lowercase()).filter(|q| q.chars().count() >= MIN_SEARCH_LEN);
+    let can_see_emails = actor.has_any_power(&["users_view", "users_edit", "users_create"]);
     let allowed = grantable(&actor, app.scope, app.id);
     let users = state.auth.list_users().await.map_err(db_error)?;
 
@@ -263,7 +291,11 @@ pub(crate) async fn get_app_access_handler(
                 display_name: u.display_name,
                 email: u.email,
             }),
-            None if !u.disabled => candidates.push(Candidate { id: u.id, username: u.username, display_name: u.display_name }),
+            None if !u.disabled && candidates.len() < MAX_CANDIDATES => {
+                if let Some(email) = search.as_deref().and_then(|q| candidate_match(&u, q, can_see_emails)) {
+                    candidates.push(Candidate { id: u.id, username: u.username, display_name: u.display_name, email });
+                }
+            }
             None => {}
         }
     }
@@ -437,6 +469,17 @@ mod tests {
         target.id = 8;
         let app = AppRef { scope: SCOPE_PROJECT, id: Some(1) };
         assert!(ensure_can_touch(&lead, app, &target).is_err());
+    }
+
+    #[test]
+    fn candidate_search_hides_emails_from_delegates() {
+        let mut u = User::from_db(9, "priya".into(), 0, "[]".into(), "[]".into(), 0, 0);
+        u.display_name = "Priya Nair".into();
+        u.email = "priya@acme.io".into();
+        assert_eq!(candidate_match(&u, "nair", false), Some(None), "name match, email hidden");
+        assert_eq!(candidate_match(&u, "acme", false), None, "no email substring probing");
+        assert_eq!(candidate_match(&u, "priya@acme.io", false), Some(Some("priya@acme.io".into())));
+        assert_eq!(candidate_match(&u, "acme", true), Some(Some("priya@acme.io".into())));
     }
 
     #[test]

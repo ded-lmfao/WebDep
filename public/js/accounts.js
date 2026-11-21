@@ -137,13 +137,39 @@ setInterval(() => { if (!document.hidden && state.user) void refreshRequestBadge
 // Sign-in page: self-registration
 // ============================================================================
 function showLoginStep(step) {
-  const forms = { login: byId('login-form'), register: byId('login-register-form') };
+  const forms = { login: byId('login-form'), register: byId('login-register-form'), status: byId('login-request-status') };
   Object.entries(forms).forEach(([k, el]) => { if (el) el.style.display = k === step ? 'block' : 'none'; });
   const mfa = byId('login-2fa-form');
   if (mfa && step !== 'login') mfa.style.display = 'none';
   const sub = document.querySelector('.login-card-header-text p');
-  if (sub) sub.textContent = step === 'register' ? 'Request an account' : 'Sign in to your VPS workspace';
+  if (sub) sub.textContent = step === 'register' ? 'Request an account' : step === 'status' ? 'Account request' : 'Sign in to your VPS workspace';
 }
+
+/** Full status screen for an account request: 'sent', 'pending', or 'declined'. */
+function showRequestStatus(kind, username) {
+  const declined = kind === 'declined';
+  const who = username ? `<strong>${escapeHtml(username)}</strong>` : 'your account';
+  const title = byId('login-request-title');
+  const text = byId('login-request-text');
+  const box = byId('login-request-status');
+  if (title) title.textContent = declined ? 'Request declined' : kind === 'sent' ? 'Request sent' : 'Request under review';
+  if (text) {
+    text.innerHTML = declined
+      ? `An admin declined the account request for ${who}. Contact your administrator if you think this is a mistake.`
+      : `The account request for ${who} is with the admins. You can sign in to the panel once it's approved. Until then, the panel stays locked.`;
+  }
+  if (box) box.classList.toggle('is-declined', declined);
+  const steps = byId('login-request-steps');
+  if (steps) steps.hidden = declined;
+  setLoginNotice('');
+  showLoginStep('status');
+}
+
+byId('login-request-back')?.addEventListener('click', () => {
+  const pw = byId('login-password');
+  if (pw) pw.value = '';
+  showLoginStep('login');
+});
 
 function setLoginNotice(text, kind = 'warning') {
   let el = byId('login-notice');
@@ -175,8 +201,9 @@ export async function refreshRegistrationLink() {
 
 /** Login errors that explain a request's status get a persistent notice. */
 export function noteLoginError(message) {
-  if (/waiting for admin approval|was declined/i.test(message || '')) {
-    setLoginNotice(message, 'warning');
+  const msg = message || '';
+  if (/waiting for admin approval|was declined/i.test(msg)) {
+    showRequestStatus(/declined/i.test(msg) ? 'declined' : 'pending', byId('login-username')?.value.trim());
     return true;
   }
   setLoginNotice('');
@@ -205,12 +232,11 @@ byId('login-register-form')?.addEventListener('submit', async (e) => {
   }
   if (btn) btn.disabled = true;
   try {
-    const res = await api('/api/auth/register', { method: 'POST', body });
+    await api('/api/auth/register', { method: 'POST', body });
     byId('login-register-form')?.reset();
-    showLoginStep('login');
     const user = byId('login-username');
     if (user) user.value = body.username;
-    setLoginNotice(res.message || 'Request sent. You can sign in once an admin approves it.', 'success');
+    showRequestStatus('sent', body.username);
   } catch (err) {
     toast(err.message, 'error');
   } finally {
@@ -384,7 +410,7 @@ function accessSummary(u) {
 
 function canEditUser(u) {
   if (u.isMainAdmin) return Boolean(state.user?.isMainAdmin);
-  if (u.isAdmin) return isAdmin();
+  if (u.isAdmin) return Boolean(state.user?.isMainAdmin) || u.id === state.user?.id;
   if (u.id === state.user?.id) return isAdmin();
   return hasPanelPower('users_edit') || hasPower('access_manage');
 }
@@ -493,9 +519,9 @@ function powerChecks(app, selected, allowed, name) {
   }).join('')}</div>`;
 }
 
-function appRow(app, user) {
+function appRow(app, user, added = false) {
   const name = `${app.scope}:${app.id}`;
-  const current = existingPowers(user, app);
+  const current = added ? [] : existingPowers(user, app);
   const allowed = actorGrantable(app);
   const lockedRow = current && current.some((p) => !allowed.includes(p) && p !== '*') && !isAdmin();
   const has = current !== null;
@@ -522,12 +548,15 @@ function renderEditor() {
   const targetIsAdmin = Boolean(user && (user.isAdmin || user.isMainAdmin));
   const groups = grantableApps();
   editor.apps = [...groups.website, ...groups.service, ...groups.database];
+  // Older setups may hold an every-app grant: keep showing it so it can be edited or removed.
   if (isAdmin()) {
-    editor.apps.unshift(
-      { scope: 'project', id: 'all', name: 'All websites and services (including future ones)', kind: 'all-projects' },
-      { scope: 'database', id: 'all', name: 'All databases (including future ones)', kind: 'all-databases' },
-    );
+    [
+      { scope: 'project', id: 'all', name: 'All websites and services (earlier setup)', kind: 'all-projects' },
+      { scope: 'database', id: 'all', name: 'All databases (earlier setup)', kind: 'all-databases' },
+    ].forEach((a) => { if (existingPowers(user, a) !== null) editor.apps.unshift(a); });
   }
+  editor.rows = editor.apps.filter((a) => existingPowers(user, a) !== null);
+  editor.added = new Set();
   const panelHeld = (user?.access?.panel || []);
   const panelAllowed = PANEL_ACCOUNT_POWERS.filter((p) => hasPanelPower(p));
   const canEditProfile = isNew || isAdmin() || hasPanelPower('users_edit');
@@ -549,26 +578,24 @@ function renderEditor() {
     <label class="acct-check" style="margin-top:4px"><input type="checkbox" id="ue-must-change" ${isNew || user?.mustChangePassword ? 'checked' : ''} ${canEditProfile && !(user?.isMainAdmin) ? '' : 'disabled'}> Must change password at next sign-in</label>
     ${!isNew && !user.isMainAdmin && user.id !== me?.id ? `<label class="acct-check" style="margin-top:8px"><input type="checkbox" id="ue-disabled" ${user.disabled ? 'checked' : ''} ${canEditProfile ? '' : 'disabled'}> Account disabled (signs the user out)</label>` : ''}`;
 
-  const role = canRole ? section('Role', `<select id="ue-role" class="form-control" style="max-width:260px">
-      <option value="user" ${!targetIsAdmin ? 'selected' : ''}>User: only what you give them</option>
-      <option value="admin" ${targetIsAdmin ? 'selected' : ''}>Admin: full access to everything</option>
-    </select>`, 'Only the main admin can make or remove admins.') : '';
+  const role = canRole ? section('Admin', `<label class="acct-check acct-admin-toggle">
+      <input type="checkbox" id="ue-make-admin" ${targetIsAdmin ? 'checked' : ''}>
+      <span><strong>Make admin</strong><small>Full access to every website, service, database, and setting. Admins can't make or remove other admins; only the main admin can.</small></span>
+    </label>`) : '';
 
   const panel = section('Admin panel permissions', `<div class="acct-power-grid">${PANEL_ACCOUNT_POWERS.map((p) => {
     const ok = panelAllowed.includes(p);
     return `<label class="acct-check ${ok ? '' : 'is-locked'}"><input type="checkbox" data-panel-power value="${p}" ${panelHeld.includes(p) ? 'checked' : ''} ${ok ? '' : 'disabled'}> ${escapeHtml(powerLabel(p))}</label>`;
   }).join('')}</div>`, 'Lets this user help run accounts. Nodes, VPS modules, and platform settings stay admin only.');
 
-  const appGroup = (title, icon, list) => list.length ? `<div class="acct-app-group">
-      <div class="acct-app-group-title">${title}</div>${list.map((a) => appRow(a, user)).join('')}</div>` : '';
-  const everyApp = editor.apps.filter((a) => a.id === 'all');
   const apps = section('App access', `
-      ${appGroup('Every app', '', everyApp)}
-      ${appGroup('Websites', '', groups.website)}
-      ${appGroup('Services', '', groups.service)}
-      ${appGroup('Databases', '', groups.database)}
-      ${editor.apps.length ? '' : '<p class="acct-muted">There are no apps you can give access to.</p>'}`,
-    'Tick an app to let this user open it, then tick what they can do there. "Manage access" lets them give others the permissions they hold.');
+      <div class="acct-search">
+        <input type="search" id="ue-app-search" class="form-control" placeholder="Add access: type a website, service, or database name" autocomplete="off" aria-label="Find an app to give access to">
+        <div id="ue-app-results" class="acct-search-results" role="listbox" hidden></div>
+      </div>
+      <div id="ue-app-rows" class="acct-app-rows">${editor.rows.map((a) => appRow(a, user)).join('')}</div>
+      <p class="acct-muted" id="ue-app-empty" ${editor.rows.length ? 'hidden' : ''}>No app access yet. Search above to add some.</p>`,
+    'Search for an app, add it, then tick what this user can do there. Untick an app to remove access. "Manage access" lets them give others the permissions they hold.');
 
   byId('user-editor-title').textContent = isNew ? 'Create account' : `Edit ${user.displayName || user.username}`;
   byId('user-editor-body').innerHTML = section('Account', profile)
@@ -613,14 +640,67 @@ byId('user-editor-body')?.addEventListener('change', (e) => {
     const sum = document.querySelector(`[data-app-summary="${name}"]`);
     if (sum && app) sum.textContent = on ? (powers.length ? powers.map((p) => powerLabel(p, app.kind)).join(', ') : 'Can open it') : '';
   }
-  if (t.id === 'ue-role') {
-    const admin = t.value === 'admin';
+  if (t.id === 'ue-make-admin') {
+    const admin = t.checked;
     byId('ue-access-wrap').hidden = admin;
     byId('ue-admin-note').hidden = !admin;
   }
 });
 
+const KIND_LABEL = { website: 'Website', service: 'Service', database: 'Database' };
+
+function renderAppSearch(q) {
+  const box = byId('ue-app-results');
+  if (!box || !editor) return;
+  const query = q.trim().toLowerCase();
+  if (!query) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  const shown = new Set(editor.rows.map((a) => `${a.scope}:${a.id}`));
+  const hits = editor.apps
+    .filter((a) => a.id !== 'all' && !shown.has(`${a.scope}:${a.id}`) && a.name.toLowerCase().includes(query))
+    .slice(0, 8);
+  box.innerHTML = hits.length
+    ? hits.map((a) => `<button type="button" class="acct-search-item" role="option" data-ue-add="${a.scope}:${a.id}">
+        <span class="acct-person-name" style="flex:1">${escapeHtml(a.name)}</span>
+        <span class="badge badge-neutral">${KIND_LABEL[a.kind] || a.kind}</span>
+        <span class="acct-search-add">Add</span>
+      </button>`).join('')
+    : '<p class="acct-search-empty">No matching app you can give access to.</p>';
+  box.hidden = false;
+}
+
+byId('user-editor-body')?.addEventListener('input', (e) => {
+  if (e.target.id === 'ue-app-search') renderAppSearch(e.target.value);
+});
+
+byId('user-editor-body')?.addEventListener('keydown', (e) => {
+  if (e.target.id === 'ue-app-search' && e.key === 'Escape') {
+    e.target.value = '';
+    renderAppSearch('');
+  }
+});
+
 byId('user-editor-body')?.addEventListener('click', (e) => {
+  const add = e.target.closest('[data-ue-add]');
+  if (add && editor) {
+    const key = add.getAttribute('data-ue-add');
+    const app = editor.apps.find((a) => `${a.scope}:${a.id}` === key);
+    if (!app) return;
+    editor.rows.push(app);
+    editor.added.add(key);
+    byId('ue-app-rows')?.insertAdjacentHTML('beforeend', appRow(app, editor.user, true));
+    byId('ue-app-empty').hidden = true;
+    const input = byId('ue-app-search');
+    if (input) {
+      input.value = '';
+      input.focus();
+    }
+    renderAppSearch('');
+    return;
+  }
   if (e.target.id !== 'ue-generate') return;
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
   const bytes = crypto.getRandomValues(new Uint8Array(14));
@@ -658,7 +738,7 @@ byId('user-editor-footer')?.addEventListener('click', async (e) => {
 });
 
 function collectAppSelections() {
-  return (editor?.apps || []).map((app) => {
+  return (editor?.rows || []).map((app) => {
     const name = `${app.scope}:${app.id}`;
     const toggle = document.querySelector(`[data-app-toggle="${name}"]`);
     const on = Boolean(toggle?.checked);
@@ -675,7 +755,8 @@ byId('user-editor-save')?.addEventListener('click', async () => {
   const isNew = !user;
   const btn = byId('user-editor-save');
   const val = (id) => byId(id)?.value ?? '';
-  const role = byId('ue-role')?.value;
+  const adminBox = byId('ue-make-admin');
+  const role = adminBox ? (adminBox.checked ? 'admin' : 'user') : undefined;
   const password = val('ue-password').trim();
   const panelPowers = Array.from(document.querySelectorAll('[data-panel-power]:checked')).map((c) => c.value);
   const selections = collectAppSelections();
@@ -910,13 +991,10 @@ function renderAccessView(view) {
   const intro = isAdmin()
     ? `Admins always have full access. Add people here and tick what they can do on this ${kindWord}.`
     : `You can give others only the permissions you have on this ${kindWord}. Greyed-out items are ones you don't have.`;
-  const add = view.candidates.length ? `<div class="acct-add-row">
-      <select id="access-add-select" class="form-control">
-        <option value="">Add a person</option>
-        ${view.candidates.map((c) => `<option value="${c.id}">${escapeHtml(c.displayName ? `${c.displayName} (@${c.username})` : c.username)}</option>`).join('')}
-      </select>
-      <button class="btn btn-primary" id="access-add-btn">Add</button>
-    </div>` : '';
+  const add = `<div class="acct-search">
+      <input type="search" id="access-search" class="form-control" placeholder="Add a person: type a name, username, or email" autocomplete="off" aria-label="Find a person to add">
+      <div id="access-search-results" class="acct-search-results" role="listbox" hidden></div>
+    </div>`;
 
   const rows = view.users.map((u) => {
     const open = accessOpen.has(u.id) && !u.viaAll;
@@ -969,12 +1047,9 @@ byId('access-view-body')?.addEventListener('click', async (e) => {
     } catch (err) { toast(err.message, 'error'); }
     return;
   }
-  if (e.target.id === 'access-add-btn') {
-    const id = Number(byId('access-add-select')?.value || 0);
-    if (!id) {
-      toast('Pick a person to add.', 'warning');
-      return;
-    }
+  const addBtn = e.target.closest('[data-access-add]');
+  if (addBtn) {
+    const id = Number(addBtn.getAttribute('data-access-add'));
     try {
       await api(accessPath(id), { method: 'PUT', body: { powers: [] } });
       accessOpen.add(id);
@@ -988,6 +1063,49 @@ byId('access-view-body')?.addEventListener('click', async (e) => {
     const id = Number(toggle.getAttribute('data-access-toggle'));
     if (accessOpen.has(id)) accessOpen.delete(id); else accessOpen.add(id);
     await loadAccessView();
+  }
+});
+
+let accessSearchTimer = null;
+let accessSearchSeq = 0;
+
+async function runAccessSearch(q) {
+  const box = byId('access-search-results');
+  const body = byId('access-view-body');
+  if (!box || !body) return;
+  if (q.length < 2) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  const seq = ++accessSearchSeq;
+  try {
+    const view = await api(`/api/access/${body.dataset.scope}/${body.dataset.id}?q=${encodeURIComponent(q)}`, { noCache: true });
+    if (seq !== accessSearchSeq) return;
+    box.innerHTML = view.candidates.length
+      ? view.candidates.map((c) => `<button type="button" class="acct-search-item" role="option" data-access-add="${c.id}">
+          ${personCell(c, `@${escapeHtml(c.username)}${c.email ? ` &middot; ${escapeHtml(c.email)}` : ''}`)}
+          <span class="acct-search-add">Add</span>
+        </button>`).join('')
+      : '<p class="acct-search-empty">No matching person without access to this app.</p>';
+    box.hidden = false;
+  } catch (err) {
+    box.innerHTML = `<p class="acct-search-empty">${escapeHtml(err.message)}</p>`;
+    box.hidden = false;
+  }
+}
+
+byId('access-view-body')?.addEventListener('input', (e) => {
+  if (e.target.id !== 'access-search') return;
+  clearTimeout(accessSearchTimer);
+  const q = e.target.value.trim();
+  accessSearchTimer = setTimeout(() => void runAccessSearch(q), 250);
+});
+
+byId('access-view-body')?.addEventListener('keydown', (e) => {
+  if (e.target.id === 'access-search' && e.key === 'Escape') {
+    e.target.value = '';
+    void runAccessSearch('');
   }
 });
 

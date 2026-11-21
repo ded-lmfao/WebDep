@@ -59,8 +59,14 @@
 /* App permissions tab */
 .acct-access-panel { display: flex; flex-direction: column; gap: 12px; max-width: 920px; }
 .acct-callout { padding: 10px 12px; border-radius: var(--radius-sm); font-size: 12.5px; line-height: 1.5; background: var(--accent-glow); color: var(--accent-light); border: 1px solid var(--accent-border); }
-.acct-add-row { display: flex; gap: 8px; }
-.acct-add-row select { flex: 1; }
+.acct-search { position: relative; }
+.acct-search-results { margin-top: 6px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-card); overflow: hidden; }
+.acct-search-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 9px 14px; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.acct-search-item:last-child { border-bottom: 0; }
+.acct-search-item:hover, .acct-search-item:focus-visible { background: var(--bg-card-hover); outline: none; }
+.acct-search-item .acct-person { flex: 1; }
+.acct-search-add { font-size: 12px; color: var(--accent-light); font-weight: 500; }
+.acct-search-empty { margin: 0; padding: 12px 14px; font-size: 12.5px; color: var(--text-dim); }
 .acct-access-list { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-card); }
 .acct-access-item { border-bottom: 1px solid var(--border-subtle); }
 .acct-access-item:last-child { border-bottom: 0; }
@@ -89,3 +95,25 @@
   .acct-access-body, .acct-app-row-body { padding-left: 14px; }
   #users-search-input, #admin-audit-search { width: 100% !important; }
 }
+
+/* Account request status screen */
+.login-request-status { text-align: center; padding: 6px 0 2px; }
+.login-request-icon { width: 54px; height: 54px; margin: 0 auto 14px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--warning-bg); color: var(--warning-light); border: 1px solid var(--warning-border); }
+.login-request-status.is-declined .login-request-icon { background: var(--danger-bg); color: var(--danger-light); border-color: var(--danger-border); }
+.login-request-status h3 { margin: 0 0 8px; font-size: 18px; font-weight: 500; color: var(--text-main); }
+.login-request-status p { margin: 0 0 16px; font-size: 13px; line-height: 1.55; color: var(--text-dim); }
+.login-request-status p strong { color: var(--text-main); font-weight: 500; }
+.login-request-steps { list-style: none; margin: 0 0 18px; padding: 12px 14px; text-align: left; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-alt); display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; color: var(--text-dim); }
+.login-request-steps li { display: flex; align-items: center; gap: 10px; }
+.login-request-steps li::before { content: ''; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--border-medium); flex-shrink: 0; }
+.login-request-steps li.is-done { color: var(--success-light); }
+.login-request-steps li.is-done::before { background: var(--success); border-color: var(--success); }
+.login-request-steps li.is-current { color: var(--warning-light); }
+.login-request-steps li.is-current::before { border-color: var(--warning); box-shadow: 0 0 0 3px var(--warning-bg); }
+
+/* User editor: admin toggle and app search */
+.acct-admin-toggle { align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-alt); }
+.acct-admin-toggle input { margin-top: 2px; }
+.acct-admin-toggle strong { display: block; font-weight: 500; color: var(--text-main); }
+.acct-admin-toggle small { display: block; margin-top: 3px; font-size: 12px; color: var(--text-dim); line-height: 1.45; }
+.acct-app-rows { margin-top: 10px; }

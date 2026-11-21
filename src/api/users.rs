@@ -281,8 +281,8 @@ pub(crate) async fn update_user_handler(
     if target.is_main_admin && !actor.is_main_admin {
         return Err(forbidden("Only the main admin can modify the main admin account."));
     }
-    if target.is_admin && !actor.is_admin {
-        return Err(forbidden("Only an admin can modify an admin account."));
+    if target.is_admin && !actor.is_main_admin && target.id != actor.id {
+        return Err(forbidden("Only the main admin can change another admin's account."));
     }
     if target.id == actor.id && !actor.is_admin {
         return Err(forbidden("Use My account to change your own details."));

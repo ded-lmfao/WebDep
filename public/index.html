@@ -161,6 +161,24 @@
           </p>
         </form>
 
+        <!-- Account request status (pending review / declined) -->
+        <div id="login-request-status" class="login-request-status" style="display: none;" role="status" aria-live="polite">
+          <div class="login-request-icon" id="login-request-icon" aria-hidden="true">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </div>
+          <h3 id="login-request-title">Request under review</h3>
+          <p id="login-request-text"></p>
+          <ol class="login-request-steps" id="login-request-steps">
+            <li class="is-done">Request sent</li>
+            <li class="is-current">Admin review</li>
+            <li>Sign in to the panel</li>
+          </ol>
+          <button type="button" class="btn btn-secondary btn-login-submit" id="login-request-back">Back to sign-in</button>
+        </div>
+
         <!-- Account request (self-registration) -->
         <form id="login-register-form" style="display: none;" autocomplete="off">
           <p class="login-register-intro">An admin reviews every request. You can sign in once it's approved.</p>

@@ -274,6 +274,8 @@ export function showLogin(skipIntro = false) {
   if (mf) mf.style.display = 'none';
   const rf = document.getElementById('login-register-form');
   if (rf) rf.style.display = 'none';
+  const rs = document.getElementById('login-request-status');
+  if (rs) rs.style.display = 'none';
   const forced = document.getElementById('force-password-overlay');
   if (forced) forced.hidden = true;
   void refreshRegistrationLink();
