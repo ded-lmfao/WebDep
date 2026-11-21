@@ -124,3 +124,5 @@
 .ws-btn-domains, .ws-btn-settings { background: transparent !important; border: 1px solid var(--border-medium) !important; color: var(--text-muted) !important; }
 .ws-btn-domains:hover:not(:disabled), .ws-btn-settings:hover:not(:disabled) { background: var(--bg-card-hover) !important; color: var(--text-main) !important; }
 .ws-btn-delete.btn-icon { padding: 0 !important; }
+.ws-actions-group .btn-icon { width: 30px; height: 30px; border-radius: var(--radius-sm); }
+.ws-actions-group .btn-icon svg { width: 15px; height: 15px; }
