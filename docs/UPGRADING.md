@@ -45,5 +45,15 @@ doesn't read.
   settings or system powers) are kept and listed under *Permissions from an earlier version* in
   **Admin Panel › Users › Edit**, where an admin can remove them.
 - **Moving apps between nodes** is now admin-only.
+- **Account security** (Platform Settings › Accounts): limit account requests to certain email
+  domains and require two-factor authentication for admins or everyone. A rule that covers you
+  can only be turned on once your own account has 2FA.
+- **Forgotten passwords**: an admin creates a one-time reset link in Users › Edit › Reset link
+  (valid 24 hours). The main admin's password is still set with `ADMIN_PASSWORD` in `.env`.
+- **Sessions**: My Account lists where you're signed in; admins see and end any user's sessions
+  (Users › Edit › Sessions).
+- **Sign-up bot check**: the request form runs a short proof-of-work check in the browser, and
+  requests are capped at 30 per hour in total. Behind a reverse proxy on the same machine (Caddy),
+  the real client address comes from `X-Forwarded-For`; from anywhere else the header is ignored.
 - **Port ranges**: nodes can be given a port range in **Admin Panel › IP Addresses**. Nodes
   without one keep the old automatic ports.

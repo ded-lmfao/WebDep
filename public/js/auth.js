@@ -32,8 +32,10 @@ import { hasPower, hasAnyPower, isAdmin } from './permissions.js';
 import {
   applyAccountChrome,
   requirePasswordChange,
+  requireTwoFactorSetup,
   refreshRegistrationLink,
   noteLoginError,
+  maybeShowResetForm,
 } from './accounts.js';
 
 export { hasPower, hasAnyPower };
@@ -189,6 +191,7 @@ export async function initAuth() {
       }
       state.user = me.user;
       state.csrf = me.csrf;
+      state.twoFactorRequired = Boolean(me.twoFactorRequired);
       state.activeSessions = me.activeSessions || 1;
       state.passkeyCount = me.passkeyCount || 0;
       await onAuthenticated(false);
@@ -278,7 +281,12 @@ export function showLogin(skipIntro = false) {
   if (rs) rs.style.display = 'none';
   const forced = document.getElementById('force-password-overlay');
   if (forced) forced.hidden = true;
+  const forced2fa = document.getElementById('force-2fa-overlay');
+  if (forced2fa) forced2fa.hidden = true;
+  const rs2 = document.getElementById('login-reset-form');
+  if (rs2) rs2.style.display = 'none';
   void refreshRegistrationLink();
+  maybeShowResetForm();
 
   const passInput = document.getElementById('login-password');
   if (passInput) {
@@ -322,6 +330,11 @@ export async function onAuthenticated(isFreshLogin = false) {
 
   if (state.user.mustChangePassword) {
     await requirePasswordChange();
+    if (!state.user || !state.csrf) return;
+    isFreshLogin = false;
+  }
+  if (state.twoFactorRequired && !state.user.totpEnabled) {
+    await requireTwoFactorSetup();
     if (!state.user || !state.csrf) return;
     isFreshLogin = false;
   }
@@ -392,6 +405,7 @@ export async function onAuthenticated(isFreshLogin = false) {
 export async function applyAuthSuccess(res) {
   state.pendingMfaToken = null;
   state.user = res.user;
+  state.twoFactorRequired = Boolean(res.twoFactorRequired);
   state.csrf = res.csrf;
   state.activeSessions = res.activeSessions || 1;
   state.passkeyCount = res.passkeyCount || 0;

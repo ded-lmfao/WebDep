@@ -169,6 +169,13 @@ pub fn create_router(state: AppState) -> Router {
         // Account requests and per-app access
         .route("/api/auth/registration", get(registration_status_handler))
         .route("/api/auth/register", post(register_handler))
+        .route("/api/auth/register/challenge", get(registration_challenge_handler))
+        .route("/api/auth/reset", post(reset_password_handler))
+        .route("/api/auth/sessions", get(my_sessions_handler))
+        .route("/api/auth/sessions/:ref", delete(revoke_my_session_handler))
+        .route("/api/users/:id/reset-link", post(create_reset_link_handler))
+        .route("/api/users/:id/sessions", get(user_sessions_handler).delete(revoke_user_sessions_handler))
+        .route("/api/users/:id/sessions/:ref", delete(revoke_user_session_handler))
         .route("/api/auth/profile", patch(update_profile_handler).put(update_profile_handler))
         .route("/api/requests", get(list_requests_handler))
         .route("/api/requests/:id", delete(delete_request_handler))

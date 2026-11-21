@@ -20,8 +20,14 @@ use crate::auth::hash_password;
 type ApiError = (StatusCode, String);
 
 const REGISTRATION_SETTING: &str = "allow_registration";
+/// Comma-separated email domains allowed to request an account (empty: any domain).
+const REGISTRATION_DOMAINS_SETTING: &str = "registration_email_domains";
 const MAX_PENDING_PER_IP_PER_HOUR: i64 = 3;
+/// Requests accepted per hour from everyone together, so a flood can't bury real ones.
+const MAX_REQUESTS_PER_HOUR: i64 = 30;
 const MAX_PENDING_TOTAL: i64 = 500;
+/// How long a password reset link works.
+const RESET_LINK_TTL_MS: i64 = 24 * 3_600_000;
 const REVIEW_POWER: &str = "requests_review";
 
 fn db_error(e: sqlx::Error) -> ApiError {
@@ -45,6 +51,79 @@ pub(crate) async fn registration_enabled(state: &AppState) -> bool {
         .unwrap_or(true)
 }
 
+// ---------------------------------------------------------------------------
+// Bot check for self-registration: a small proof of work (no third-party service).
+// The browser finds a nonce so that SHA-256("<challenge>:<nonce>") starts with
+// `difficulty` zero bits; each challenge works once and expires after 10 minutes.
+// ---------------------------------------------------------------------------
+const CHALLENGE_TTL_MS: u64 = 600_000;
+const MAX_OPEN_CHALLENGES: usize = 5_000;
+
+fn challenge_difficulty() -> u32 {
+    if cfg!(test) { 4 } else { 16 }
+}
+
+fn challenges() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> = std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+}
+
+fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+}
+
+pub(crate) fn leading_zero_bits(bytes: &[u8]) -> u32 {
+    let mut bits = 0;
+    for b in bytes {
+        if *b == 0 {
+            bits += 8;
+        } else {
+            bits += b.leading_zeros();
+            break;
+        }
+    }
+    bits
+}
+
+pub(crate) fn pow_ok(challenge: &str, nonce: &str, difficulty: u32) -> bool {
+    use sha2::{Digest, Sha256};
+    nonce.len() <= 32 && leading_zero_bits(&Sha256::digest(format!("{challenge}:{nonce}").as_bytes())) >= difficulty
+}
+
+pub(crate) async fn registration_challenge_handler() -> Result<Json<serde_json::Value>, ApiError> {
+    let now = now_ms_u64();
+    let token = crate::auth::password::random_token(24);
+    let mut map = challenges().lock().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Busy".to_string()))?;
+    map.retain(|_, exp| *exp > now);
+    if map.len() >= MAX_OPEN_CHALLENGES {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "Too many account requests. Try again later.".into()));
+    }
+    map.insert(token.clone(), now + CHALLENGE_TTL_MS);
+    Ok(Json(serde_json::json!({ "challenge": token, "difficulty": challenge_difficulty() })))
+}
+
+fn consume_challenge(challenge: &str, nonce: &str) -> bool {
+    let Ok(mut map) = challenges().lock() else { return false };
+    match map.remove(challenge) {
+        Some(exp) if exp > now_ms_u64() => pow_ok(challenge, nonce, challenge_difficulty()),
+        _ => false,
+    }
+}
+
+async fn allowed_email_domains(state: &AppState) -> Vec<String> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = $1")
+        .bind(REGISTRATION_DOMAINS_SETTING)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|d| d.trim().trim_start_matches('@').to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
 pub(crate) async fn registration_status_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "enabled": registration_enabled(&state).await }))
 }
@@ -57,6 +136,10 @@ pub(crate) struct RegisterPayload {
     password: String,
     #[serde(default)]
     display_name: String,
+    #[serde(default)]
+    challenge: String,
+    #[serde(default)]
+    nonce: String,
 }
 
 const REGISTER_ACK: &str = "Request sent. You can sign in once an admin approves it.";
@@ -76,19 +159,29 @@ pub(crate) async fn register_handler(
     if payload.password.len() < MIN_PASSWORD_LEN {
         return Err((StatusCode::BAD_REQUEST, format!("Password must be at least {MIN_PASSWORD_LEN} characters.")));
     }
+    if !consume_challenge(&payload.challenge, &payload.nonce) {
+        return Err((StatusCode::BAD_REQUEST, "The bot check expired. Send the request again.".into()));
+    }
+    let domains = allowed_email_domains(&state).await;
+    let email_domain = email.rsplit('@').next().unwrap_or_default();
+    if !domains.is_empty() && !domains.iter().any(|d| d == email_domain) {
+        return Err((StatusCode::FORBIDDEN, "Account requests are limited to certain email domains. Ask an admin for an account.".into()));
+    }
 
     let ip = client_ip(&headers);
     let hour_ago = now() - 3_600_000;
-    let (from_ip, total): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*) FILTER (WHERE ip = $1 AND created_at > $2), COUNT(*)
-         FROM registration_requests WHERE status = 'pending'",
+    let (from_ip, total, last_hour): (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE ip = $1 AND created_at > $2 AND status = 'pending'),
+                COUNT(*) FILTER (WHERE status = 'pending'),
+                COUNT(*) FILTER (WHERE created_at > $2)
+         FROM registration_requests",
     )
     .bind(&ip)
     .bind(hour_ago)
     .fetch_one(&state.db)
     .await
     .map_err(db_error)?;
-    if from_ip >= MAX_PENDING_PER_IP_PER_HOUR || total >= MAX_PENDING_TOTAL {
+    if from_ip >= MAX_PENDING_PER_IP_PER_HOUR || total >= MAX_PENDING_TOTAL || last_hour >= MAX_REQUESTS_PER_HOUR {
         return Err((StatusCode::TOO_MANY_REQUESTS, "Too many account requests. Try again later.".into()));
     }
 
@@ -312,6 +405,166 @@ pub(crate) async fn delete_request_handler(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// ---------------------------------------------------------------------------
+// Password reset links (no email): an admin creates a one-time link and gives it to the user.
+// ---------------------------------------------------------------------------
+fn token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+pub(crate) async fn create_reset_link_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let actor = verify_admin(&state, &headers).await?;
+    let target = state
+        .auth
+        .get_user_by_id(id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+    if target.is_main_admin {
+        return Err((StatusCode::BAD_REQUEST, "The main admin's password is set in the panel's .env file (ADMIN_PASSWORD).".into()));
+    }
+    if target.is_admin && !actor.is_main_admin {
+        return Err((StatusCode::FORBIDDEN, "Only the main admin can reset an admin's password.".into()));
+    }
+    let token = crate::auth::password::random_token(32);
+    let now = now();
+    let mut tx = state.db.begin().await.map_err(db_error)?;
+    sqlx::query("UPDATE password_resets SET used_at = $2 WHERE user_id = $1 AND used_at IS NULL")
+        .bind(id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    sqlx::query("INSERT INTO password_resets(user_id, token_hash, created_by, created_at, expires_at) VALUES($1, $2, $3, $4, $5)")
+        .bind(id)
+        .bind(token_hash(&token))
+        .bind(actor.id)
+        .bind(now)
+        .bind(now + RESET_LINK_TTL_MS)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+    log_audit(&state, &actor.username, "user.reset_link", Some(&target.username), Some("Created a password reset link (valid 24 hours)")).await;
+    Ok(Json(serde_json::json!({ "token": token, "expiresAt": now + RESET_LINK_TTL_MS })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ResetPayload {
+    token: String,
+    password: String,
+}
+
+pub(crate) async fn reset_password_handler(
+    State(state): State<AppState>,
+    Json(p): Json<ResetPayload>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if p.password.len() < MIN_PASSWORD_LEN {
+        return Err((StatusCode::BAD_REQUEST, format!("Password must be at least {MIN_PASSWORD_LEN} characters.")));
+    }
+    let invalid = || (StatusCode::BAD_REQUEST, "This reset link is invalid or has expired. Ask an admin for a new one.".to_string());
+    let now = now();
+    let mut tx = state.db.begin().await.map_err(db_error)?;
+    let user_id: Option<i64> = sqlx::query_scalar(
+        "UPDATE password_resets SET used_at = $2 WHERE token_hash = $1 AND used_at IS NULL AND expires_at > $2 RETURNING user_id",
+    )
+    .bind(token_hash(p.token.trim()))
+    .bind(now)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_error)?;
+    let user_id = user_id.ok_or_else(invalid)?;
+    let hash = hash_password(&p.password).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let username: String = sqlx::query_scalar(
+        "UPDATE users SET password_hash = $1, must_change_password = FALSE WHERE id = $2 RETURNING username",
+    )
+    .bind(hash)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+    state.auth.revoke_all_user_sessions(user_id, "Password reset with a reset link").await;
+    log_audit(&state, &username, "user.password_reset", Some(&username), Some("Set a new password with a reset link")).await;
+    Ok(Json(serde_json::json!({ "ok": true, "username": username })))
+}
+
+// ---------------------------------------------------------------------------
+// Sessions: your own, and (for admins) anyone's.
+// ---------------------------------------------------------------------------
+pub(crate) async fn my_sessions_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = require_current_user(&state, &headers).await?;
+    let current = extract_session_id(&headers).map(|s| crate::auth::manager::session_ref(&s));
+    let list = state.auth.list_user_sessions(user.id).await;
+    Ok(Json(serde_json::json!({ "sessions": list, "current": current })))
+}
+
+pub(crate) async fn revoke_my_session_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(reference): AxPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = require_current_user(&state, &headers).await?;
+    if !state.auth.revoke_session_by_ref(user.id, &reference).await {
+        return Err((StatusCode::NOT_FOUND, "Session not found".into()));
+    }
+    log_audit(&state, &user.username, "session.revoke", Some(&user.username), Some("Signed out one of their sessions")).await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn session_admin_target(state: &AppState, headers: &HeaderMap, id: i64) -> Result<(User, User), ApiError> {
+    let actor = verify_admin(state, headers).await?;
+    let target = state
+        .auth
+        .get_user_by_id(id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+    if target.is_admin && !actor.is_main_admin && target.id != actor.id {
+        return Err((StatusCode::FORBIDDEN, "Only the main admin can see another admin's sessions.".into()));
+    }
+    Ok((actor, target))
+}
+
+pub(crate) async fn user_sessions_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (_, target) = session_admin_target(&state, &headers, id).await?;
+    Ok(Json(serde_json::json!({ "sessions": state.auth.list_user_sessions(target.id).await })))
+}
+
+pub(crate) async fn revoke_user_sessions_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (actor, target) = session_admin_target(&state, &headers, id).await?;
+    let n = state.auth.revoke_all_user_sessions(target.id, "Signed out everywhere by an admin").await;
+    log_audit(&state, &actor.username, "session.revoke_all", Some(&target.username), Some(&format!("Signed out {n} session(s)"))).await;
+    Ok(Json(serde_json::json!({ "ok": true, "revoked": n })))
+}
+
+pub(crate) async fn revoke_user_session_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath((id, reference)): AxPath<(i64, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (actor, target) = session_admin_target(&state, &headers, id).await?;
+    if !state.auth.revoke_session_by_ref(target.id, &reference).await {
+        return Err((StatusCode::NOT_FOUND, "Session not found".into()));
+    }
+    log_audit(&state, &actor.username, "session.revoke", Some(&target.username), Some("Signed out one session")).await;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProfilePayload {
@@ -375,6 +628,79 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
     }
 
+    /// Fetches a bot-check challenge and solves it.
+    async fn solve(router: &axum::Router) -> serde_json::Value {
+        let (_, c) = call(router, Method::GET, "/api/auth/register/challenge", None, json!({})).await;
+        let challenge = c["challenge"].as_str().unwrap().to_string();
+        let difficulty = c["difficulty"].as_u64().unwrap() as u32;
+        let nonce = (0u64..).find(|n| super::pow_ok(&challenge, &n.to_string(), difficulty)).unwrap();
+        json!({ "challenge": challenge, "nonce": nonce.to_string() })
+    }
+
+    #[test]
+    fn counts_leading_zero_bits() {
+        assert_eq!(super::leading_zero_bits(&[0, 0x0f]), 12);
+        assert_eq!(super::leading_zero_bits(&[0x80]), 0);
+        assert_eq!(super::leading_zero_bits(&[0, 0]), 16);
+    }
+
+    #[tokio::test]
+    async fn reset_links_sessions_and_two_factor_policy() {
+        let state = crate::api::common::tests_state_helper().await;
+        let router = crate::api::create_router(state.clone());
+        let admin = state.auth.create_session(1).await.unwrap();
+        let admin_s = Some((admin.id.as_str(), admin.csrf_token.as_str()));
+
+        let (_, u) = call(&router, Method::POST, "/api/users", admin_s,
+            json!({"username": "resetme", "password": "OldPass1234", "mustChangePassword": false})).await;
+        let uid = u["id"].as_i64().unwrap();
+
+        // Disabled accounts are only revealed to someone with the right password.
+        call(&router, Method::PUT, &format!("/api/users/{uid}"), admin_s, json!({"disabled": true})).await;
+        let (st, _) = call(&router, Method::POST, "/api/auth/login", None, json!({"username": "resetme", "password": "wrong-pass"})).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = call(&router, Method::POST, "/api/auth/login", None, json!({"username": "resetme", "password": "OldPass1234"})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        call(&router, Method::PUT, &format!("/api/users/{uid}"), admin_s, json!({"disabled": false})).await;
+
+        // Reset link: works once, then never again.
+        let (st, link) = call(&router, Method::POST, &format!("/api/users/{uid}/reset-link"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        let token = link["token"].as_str().unwrap().to_string();
+        let (st, _) = call(&router, Method::POST, "/api/auth/reset", None, json!({"token": token, "password": "NewPass5678"})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&router, Method::POST, "/api/auth/reset", None, json!({"token": token, "password": "Again9999"})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(&router, Method::POST, "/api/auth/login", None, json!({"username": "resetme", "password": "NewPass5678"})).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // Sessions: listed for the admin and revocable.
+        let (_, list) = call(&router, Method::GET, &format!("/api/users/{uid}/sessions"), admin_s, json!({})).await;
+        assert_eq!(list["sessions"].as_array().unwrap().len(), 1);
+        let (st, _) = call(&router, Method::DELETE, &format!("/api/users/{uid}/sessions"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, list) = call(&router, Method::GET, &format!("/api/users/{uid}/sessions"), admin_s, json!({})).await;
+        assert!(list["sessions"].as_array().unwrap().is_empty());
+
+        // Required 2FA: a user without it can only reach the setup endpoints.
+        crate::auth::policy::set_for_test("everyone");
+        let sess = state.auth.create_session(uid).await.unwrap();
+        let s = Some((sess.id.as_str(), sess.csrf_token.as_str()));
+        let (st, body) = call(&router, Method::GET, "/api/projects", s, json!({})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "two_factor_required");
+        let (st, me) = call(&router, Method::GET, "/api/auth/me", s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(me["twoFactorRequired"], true);
+        crate::auth::policy::set_for_test("off");
+        let (st, _) = call(&router, Method::GET, "/api/projects", s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // An admin without 2FA can't require it for admins (would lock themselves out).
+        let (st, _) = call(&router, Method::PUT, "/api/settings", admin_s, json!({"require_2fa": "admins"})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn registration_approval_and_delegated_access() {
         let state = crate::api::common::tests_state_helper().await;
@@ -382,11 +708,18 @@ mod tests {
         let admin = state.auth.create_session(1).await.unwrap();
         let admin_s = Some((admin.id.as_str(), admin.csrf_token.as_str()));
 
-        // Register: neutral ack, pending login explains itself, duplicate is silent.
-        let reg = json!({"username": "priya", "email": "Priya@Acme.io", "password": "PriyaPass123", "displayName": "Priya"});
-        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, reg.clone()).await;
+        // Register: needs a solved bot check; neutral ack; duplicate is silent.
+        let (st, _) = call(&router, Method::POST, "/api/auth/register", None,
+            json!({"username": "bot", "email": "bot@x.io", "password": "BotPass1234"})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "no bot check");
+        let reg = |extra: serde_json::Value| {
+            let mut v = json!({"username": "priya", "email": "Priya@Acme.io", "password": "PriyaPass123", "displayName": "Priya"});
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            v
+        };
+        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, reg(solve(&router).await)).await;
         assert_eq!(st, StatusCode::OK);
-        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, reg).await;
+        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, reg(solve(&router).await)).await;
         assert_eq!(st, StatusCode::OK);
         let (st, _) = call(&router, Method::POST, "/api/auth/login", None, json!({"username": "priya", "password": "PriyaPass123"})).await;
         assert_eq!(st, StatusCode::FORBIDDEN);
@@ -407,7 +740,9 @@ mod tests {
         // Self-registration toggle.
         let (st, _) = call(&router, Method::PUT, "/api/settings", admin_s, json!({"allow_registration": "false"})).await;
         assert!(st.is_success());
-        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, json!({"username": "late", "email": "late@x.io", "password": "LatePass123"})).await;
+        let mut late = json!({"username": "late", "email": "late@x.io", "password": "LatePass123"});
+        late.as_object_mut().unwrap().extend(solve(&router).await.as_object().unwrap().clone());
+        let (st, _) = call(&router, Method::POST, "/api/auth/register", None, late).await;
         assert_eq!(st, StatusCode::FORBIDDEN);
 
         // Delegation: a lead with deploy + manage on one app can give deploy, not env.

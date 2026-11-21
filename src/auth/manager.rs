@@ -12,6 +12,25 @@ use super::user::{User, USER_COLUMNS};
 
 pub const ACCESS_REVOKE_CHANNEL: &str = "webdep_access_revoke";
 
+/// A session as shown to its owner or an admin (never the secret id itself).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    #[serde(rename = "ref")]
+    pub session_ref: String,
+    pub created_at: i64,
+    pub last_active_at: i64,
+    pub expires_at: i64,
+    pub ip: String,
+    pub user_agent: String,
+}
+
+/// Short, non-reversible reference for a session id.
+pub fn session_ref(session_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(session_id.as_bytes()))[..16].to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccessRevocationEvent {
@@ -435,7 +454,13 @@ impl Auth {
             && (now_s as i64).saturating_sub(last_active_at) > (self.session_idle_timeout_s as i64)
     }
 
+    #[cfg(test)]
     pub async fn create_session(&self, user_id: i64) -> Result<Session, sqlx::Error> {
+        self.create_session_with_meta(user_id, "", "").await
+    }
+
+    /// Creates a session and records where it started (shown in the sessions list).
+    pub async fn create_session_with_meta(&self, user_id: i64, ip: &str, user_agent: &str) -> Result<Session, sqlx::Error> {
         let session_id = random_token(32);
         let csrf_token = random_token(24);
         let now_s = Self::now_secs();
@@ -443,13 +468,16 @@ impl Auth {
         let last_active_at = now_s as i64;
 
         sqlx::query(
-            "INSERT INTO sessions(id, user_id, expires_at, last_active_at, csrf_token) VALUES($1, $2, $3, $4, $5)",
+            "INSERT INTO sessions(id, user_id, expires_at, last_active_at, csrf_token, created_at, ip, user_agent)
+             VALUES($1, $2, $3, $4, $5, $4, $6, $7)",
         )
         .bind(&session_id)
         .bind(user_id)
         .bind(expires_at)
         .bind(last_active_at)
         .bind(&csrf_token)
+        .bind(ip.chars().take(64).collect::<String>())
+        .bind(user_agent.chars().take(200).collect::<String>())
         .execute(&self.db)
         .await?;
 
@@ -586,6 +614,46 @@ impl Auth {
             .bind(session_id)
             .execute(&self.db)
             .await;
+    }
+
+    /// Live sessions of a user. Session ids are secrets, so each is identified by a short hash.
+    pub async fn list_user_sessions(&self, user_id: i64) -> Vec<SessionInfo> {
+        let now = Self::now_secs() as i64;
+        let rows: Vec<(String, i64, i64, i64, String, String)> = sqlx::query_as(
+            "SELECT id, created_at, last_active_at, expires_at, ip, user_agent FROM sessions
+             WHERE user_id = $1 AND expires_at > $2 ORDER BY last_active_at DESC",
+        )
+        .bind(user_id)
+        .bind(now)
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .map(|(id, created_at, last_active_at, expires_at, ip, user_agent)| SessionInfo {
+                session_ref: session_ref(&id),
+                created_at,
+                last_active_at,
+                expires_at,
+                ip,
+                user_agent,
+            })
+            .collect()
+    }
+
+    /// Signs out one session of a user, found by its short hash. Returns whether it existed.
+    pub async fn revoke_session_by_ref(&self, user_id: i64, reference: &str) -> bool {
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM sessions WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&self.db)
+            .await
+            .unwrap_or_default();
+        match ids.into_iter().find(|id| session_ref(id) == reference) {
+            Some(id) => {
+                self.delete_session(&id).await;
+                true
+            }
+            None => false,
+        }
     }
 
     pub async fn revoke_other_sessions(&self, user_id: i64, keep_session_id: &str) -> usize {

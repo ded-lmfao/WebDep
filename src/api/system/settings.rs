@@ -359,6 +359,26 @@ pub(crate) async fn update_settings_handler(
     let mut saved_theme: Option<&'static str> = None;
     let mut touched_tokens = false;
 
+    if let Some(v) = payload.get(crate::auth::policy::REQUIRE_2FA_SETTING) {
+        let raw = v.as_str().unwrap_or("");
+        if !crate::auth::policy::is_valid_require_2fa(raw) {
+            return Err((StatusCode::BAD_REQUEST, "Two-factor requirement must be off, admins, or everyone.".into()));
+        }
+        // Don't let an admin lock themselves out: a rule that covers them needs their own 2FA.
+        let covers_actor = match raw.trim().to_ascii_lowercase().as_str() {
+            "everyone" => true,
+            "admins" => actor.is_admin,
+            _ => false,
+        };
+        if covers_actor && !actor.totp_enabled {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Set up two-factor authentication for your own account (My Account) before requiring it.".into(),
+            ));
+        }
+    }
+    let touches_policy = payload.contains_key(crate::auth::policy::REQUIRE_2FA_SETTING);
+
     for (k, v) in payload {
         if k == "github_tokens" {
             let tokens_vec: Vec<crate::git::StoredGithubToken> = if let Some(arr) = v.as_array() {
@@ -424,6 +444,10 @@ pub(crate) async fn update_settings_handler(
     }
     if touched_tokens {
         let _ = crate::git::Git::read_github_tokens(&state.db).await;
+    }
+    if touches_policy {
+        crate::auth::policy::reload(&state.db).await;
+        state.auth.invalidate_sessions();
     }
     if only_theme {
         let theme_id = saved_theme.unwrap_or(DEFAULT_THEME_ID);

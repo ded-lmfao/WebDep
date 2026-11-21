@@ -10,6 +10,7 @@ import {
   escapeHtml,
   showConfirmDialog,
   showPromptDialog,
+  showCopyDialog,
   formatRelativeTime,
   formatDate,
   getSelectedProject,
@@ -139,12 +140,12 @@ setInterval(() => { if (!document.hidden && state.user) void refreshRequestBadge
 // Sign-in page: self-registration
 // ============================================================================
 function showLoginStep(step) {
-  const forms = { login: byId('login-form'), register: byId('login-register-form'), status: byId('login-request-status') };
+  const forms = { login: byId('login-form'), register: byId('login-register-form'), status: byId('login-request-status'), reset: byId('login-reset-form') };
   Object.entries(forms).forEach(([k, el]) => { if (el) el.style.display = k === step ? 'block' : 'none'; });
   const mfa = byId('login-2fa-form');
   if (mfa && step !== 'login') mfa.style.display = 'none';
   const sub = document.querySelector('.login-card-header-text p');
-  if (sub) sub.textContent = step === 'register' ? 'Request an account' : step === 'status' ? 'Account request' : 'Sign in to your VPS workspace';
+  if (sub) sub.textContent = { register: 'Request an account', status: 'Account request', reset: 'Set a new password' }[step] || 'Sign in to your VPS workspace';
 }
 
 /** Full status screen for an account request: 'sent', 'pending', or 'declined'. */
@@ -232,8 +233,13 @@ byId('login-register-form')?.addEventListener('submit', async (e) => {
     toast('Password must be at least 8 characters.', 'warning');
     return;
   }
-  if (btn) btn.disabled = true;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Checking you are not a bot';
+  }
   try {
+    Object.assign(body, await solveRegistrationChallenge());
+    if (btn) btn.textContent = 'Sending';
     await api('/api/auth/register', { method: 'POST', body });
     byId('login-register-form')?.reset();
     const user = byId('login-username');
@@ -242,8 +248,133 @@ byId('login-register-form')?.addEventListener('submit', async (e) => {
   } catch (err) {
     toast(err.message, 'error');
   } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Send request';
+    }
+  }
+});
+
+/** Proof of work: find a nonce so SHA-256("<challenge>:<nonce>") starts with N zero bits. */
+async function solveRegistrationChallenge() {
+  const res = await fetch('/api/auth/register/challenge', { credentials: 'same-origin' });
+  if (!res.ok) throw new Error('Could not start the bot check. Try again later.');
+  const { challenge, difficulty } = await res.json();
+  const enc = new TextEncoder();
+  const zeroBits = (bytes) => {
+    let bits = 0;
+    for (const b of bytes) {
+      if (b === 0) { bits += 8; continue; }
+      bits += Math.clz32(b) - 24;
+      break;
+    }
+    return bits;
+  };
+  for (let nonce = 0; nonce < 50_000_000; nonce += 1) {
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(`${challenge}:${nonce}`)));
+    if (zeroBits(digest) >= difficulty) return { challenge, nonce: String(nonce) };
+  }
+  throw new Error('The bot check took too long. Try again.');
+}
+
+// ============================================================================
+// Password reset links (?reset=<token>)
+// ============================================================================
+// Read once at load: the sign-in screen tidies the URL before it is shown.
+let pendingResetToken = (() => {
+  try { return new URLSearchParams(window.location.search).get('reset') || ''; } catch (_) { return ''; }
+})();
+
+function resetTokenFromUrl() {
+  return pendingResetToken;
+}
+
+/** Shows the reset form when the page was opened from a reset link. */
+export function maybeShowResetForm() {
+  if (!resetTokenFromUrl()) return false;
+  showLoginStep('reset');
+  setTimeout(() => byId('reset-password')?.focus(), 50);
+  return true;
+}
+
+function clearResetFromUrl() {
+  pendingResetToken = '';
+  try { window.history.replaceState({}, '', window.location.pathname); } catch (_) { /* ignore */ }
+}
+
+byId('login-reset-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const pw = byId('reset-password')?.value || '';
+  const confirm = byId('reset-password-confirm')?.value || '';
+  if (pw.length < 8) return toast('Password must be at least 8 characters.', 'warning');
+  if (pw !== confirm) return toast("The passwords don't match.", 'warning');
+  const btn = byId('reset-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api('/api/auth/reset', { method: 'POST', body: { token: resetTokenFromUrl(), password: pw } });
+    clearResetFromUrl();
+    byId('login-reset-form')?.reset();
+    showLoginStep('login');
+    const user = byId('login-username');
+    if (user && res.username) user.value = res.username;
+    setLoginNotice('Password set. Sign in with your new password.', 'success');
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
     if (btn) btn.disabled = false;
   }
+  return undefined;
+});
+byId('reset-back-btn')?.addEventListener('click', () => {
+  clearResetFromUrl();
+  showLoginStep('login');
+});
+
+// ============================================================================
+// Required two-factor setup
+// ============================================================================
+let twoFactorResolve = null;
+
+/** Blocks until the user has an authenticator set up (when the admin requires it). */
+export function requireTwoFactorSetup() {
+  const overlay = byId('force-2fa-overlay');
+  if (!overlay) return Promise.resolve();
+  overlay.hidden = false;
+  const login = byId('login-view');
+  if (login) login.style.display = 'none';
+  return new Promise((resolve) => { twoFactorResolve = resolve; });
+}
+
+byId('force-2fa-start')?.addEventListener('click', () => {
+  byId('force-2fa-overlay').hidden = true;
+  window.openSecurityModal?.('2fa');
+  const timer = setInterval(async () => {
+    const modalOpen = byId('modal-change-password')?.classList.contains('active');
+    try {
+      const me = await api('/api/auth/me', { noCache: true });
+      if (me.user?.totpEnabled) {
+        clearInterval(timer);
+        state.user = me.user;
+        state.csrf = me.csrf;
+        state.twoFactorRequired = false;
+        const done = twoFactorResolve;
+        twoFactorResolve = null;
+        done?.();
+        return;
+      }
+    } catch (_) { /* keep waiting */ }
+    if (!modalOpen) {
+      clearInterval(timer);
+      byId('force-2fa-overlay').hidden = false;
+    }
+  }, 2000);
+});
+
+byId('force-2fa-logout')?.addEventListener('click', async () => {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (_) { /* ignore */ }
+  byId('force-2fa-overlay').hidden = true;
+  twoFactorResolve = null;
+  window.showLogin?.();
 });
 
 // ============================================================================
@@ -350,6 +481,81 @@ function renderMyAccess() {
     : '<p class="acct-muted" style="margin:4px 0">You don\'t have access to any apps yet. Ask an admin to give you access.</p>';
 }
 
+function describeAgent(ua) {
+  const s = String(ua || '');
+  if (!s) return 'Unknown device';
+  const browser = /Edg\//.test(s) ? 'Edge' : /Chrome\//.test(s) ? 'Chrome' : /Firefox\//.test(s) ? 'Firefox' : /Safari\//.test(s) ? 'Safari' : 'Browser';
+  const os = /Windows/.test(s) ? 'Windows' : /Android/.test(s) ? 'Android' : /iPhone|iPad/.test(s) ? 'iOS' : /Mac OS/.test(s) ? 'macOS' : /Linux/.test(s) ? 'Linux' : '';
+  return os ? `${browser} on ${os}` : browser;
+}
+
+function sessionRows(list, current, revokeAttr) {
+  if (!list.length) return '<p class="acct-muted">No active sessions.</p>';
+  return `<div class="table-responsive"><table class="table acct-table"><thead><tr><th>Device</th><th>From</th><th>Last active</th><th></th></tr></thead><tbody>${list.map((s) => `<tr>
+    <td>${escapeHtml(describeAgent(s.userAgent))}${s.ref === current ? ' <span class="badge badge-success">This device</span>' : ''}</td>
+    <td>${escapeHtml(s.ip || 'unknown')}</td>
+    <td title="Signed in ${escapeHtml(formatDate((s.createdAt || 0) * 1000))}">${escapeHtml(formatRelativeTime((s.lastActiveAt || 0) * 1000))}</td>
+    <td style="text-align:right"><button class="btn btn-secondary btn-sm" ${revokeAttr}="${escapeHtml(s.ref)}">Sign out</button></td>
+  </tr>`).join('')}</tbody></table></div>`;
+}
+
+async function loadMySessions() {
+  const body = byId('account-sessions-body');
+  if (!body) return;
+  try {
+    const res = await api('/api/auth/sessions', { noCache: true });
+    body.innerHTML = sessionRows(res.sessions || [], res.current, 'data-my-session');
+  } catch (err) {
+    body.innerHTML = `<p class="acct-muted">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+byId('account-sessions-body')?.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-my-session]');
+  if (!b) return;
+  try {
+    await api(`/api/auth/sessions/${encodeURIComponent(b.getAttribute('data-my-session'))}`, { method: 'DELETE' });
+    toast('Signed out that session.', 'success');
+    await loadMySessions();
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+let sessionsUser = null;
+async function openUserSessions(user) {
+  sessionsUser = user;
+  byId('user-sessions-title').textContent = `Sessions of ${user.displayName || user.username}`;
+  const body = byId('user-sessions-body');
+  body.innerHTML = '<p class="acct-muted">Loading</p>';
+  openModal('modal-user-sessions');
+  try {
+    const res = await api(`/api/users/${user.id}/sessions`, { noCache: true });
+    body.innerHTML = sessionRows(res.sessions || [], null, 'data-user-session');
+  } catch (err) {
+    body.innerHTML = `<p class="acct-muted">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+byId('user-sessions-body')?.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-user-session]');
+  if (!b || !sessionsUser) return;
+  try {
+    await api(`/api/users/${sessionsUser.id}/sessions/${encodeURIComponent(b.getAttribute('data-user-session'))}`, { method: 'DELETE' });
+    toast('Signed out that session.', 'success');
+    await openUserSessions(sessionsUser);
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+byId('user-sessions-revoke-all')?.addEventListener('click', async () => {
+  if (!sessionsUser) return;
+  const ok = await showConfirmDialog({ title: 'Sign out everywhere', message: `Sign ${sessionsUser.username} out on every device? They can sign in again.`, confirmText: 'Sign out everywhere', danger: true });
+  if (!ok) return;
+  try {
+    const res = await api(`/api/users/${sessionsUser.id}/sessions`, { method: 'DELETE' });
+    toast(`Signed out ${res.revoked || 0} session(s).`, 'success');
+    await openUserSessions(sessionsUser);
+  } catch (err) { toast(err.message, 'error'); }
+});
+
 function loadAccountView() {
   const u = state.user;
   if (!u) return;
@@ -365,6 +571,7 @@ function loadAccountView() {
   window.renderSecurityStatusSummary?.();
   window.loadPasskeysList?.().catch(() => {});
   renderMyAccess();
+  void loadMySessions();
 }
 
 byId('account-profile-form')?.addEventListener('submit', async (e) => {
@@ -617,6 +824,12 @@ function renderEditor() {
   if (!isNew && isAdmin() && user.totpEnabled && (me?.isMainAdmin || !user.isAdmin)) {
     footer.insertAdjacentHTML('afterbegin', `<button class="btn btn-secondary" data-editor-extra id="ue-reset-2fa">Reset 2FA</button>`);
   }
+  if (!isNew && isAdmin() && (me?.isMainAdmin || !user.isAdmin || user.id === me?.id)) {
+    footer.insertAdjacentHTML('afterbegin', `<button class="btn btn-secondary" data-editor-extra id="ue-sessions">Sessions</button>`);
+  }
+  if (!isNew && isAdmin() && !user.isMainAdmin && (me?.isMainAdmin || !user.isAdmin)) {
+    footer.insertAdjacentHTML('afterbegin', `<button class="btn btn-secondary" data-editor-extra id="ue-reset-link">Reset link</button>`);
+  }
   byId('user-editor-save').textContent = isNew ? 'Create account' : 'Save changes';
 }
 
@@ -716,6 +929,22 @@ byId('user-editor-body')?.addEventListener('click', (e) => {
 byId('user-editor-footer')?.addEventListener('click', async (e) => {
   const user = editor?.user;
   if (!user) return;
+  if (e.target.id === 'ue-sessions') {
+    void openUserSessions(user);
+    return;
+  }
+  if (e.target.id === 'ue-reset-link') {
+    try {
+      const res = await api(`/api/users/${user.id}/reset-link`, { method: 'POST' });
+      const url = `${window.location.origin}/?reset=${encodeURIComponent(res.token)}`;
+      await showCopyDialog({
+        title: 'Password reset link',
+        message: `Send this link to ${user.username}. It works once, for 24 hours, and replaces any earlier link.`,
+        value: url,
+      });
+    } catch (err) { toast(err.message, 'error'); }
+    return;
+  }
   if (e.target.id === 'ue-delete') {
     const ok = await showConfirmDialog({
       title: 'Delete account',
@@ -1143,8 +1372,24 @@ export async function loadRegistrationSetting() {
   try {
     const res = await api('/api/auth/registration', { noCache: true });
     box.checked = Boolean(res.enabled);
+    const s = await api('/api/settings', { noCache: true });
+    const domains = byId('setting-registration-domains');
+    if (domains) domains.value = s.registration_email_domains || '';
+    const tfa = byId('setting-require-2fa');
+    if (tfa) tfa.value = s.require_2fa || 'off';
   } catch (_) { /* leave as is */ }
 }
+
+byId('setting-accounts-save')?.addEventListener('click', async () => {
+  const body = {
+    registration_email_domains: byId('setting-registration-domains')?.value.trim() || '',
+    require_2fa: byId('setting-require-2fa')?.value || 'off',
+  };
+  try {
+    await api('/api/settings', { method: 'PUT', body });
+    toast('Account rules saved.', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+});
 
 byId('setting-allow-registration')?.addEventListener('change', async (e) => {
   const on = e.target.checked;

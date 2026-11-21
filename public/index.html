@@ -161,6 +161,21 @@
           </p>
         </form>
 
+        <!-- Password reset (from a one-time link an admin created) -->
+        <form id="login-reset-form" style="display: none;" autocomplete="off">
+          <p class="login-register-intro">Choose a new password for your account. This link works once.</p>
+          <div class="form-group">
+            <label class="form-label" for="reset-password">New password</label>
+            <input type="password" id="reset-password" class="form-control" required minlength="8" autocomplete="new-password" placeholder="New password">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="reset-password-confirm">Confirm new password</label>
+            <input type="password" id="reset-password-confirm" class="form-control" required minlength="8" autocomplete="new-password" placeholder="Confirm new password">
+          </div>
+          <button type="submit" class="btn btn-primary btn-login-submit" id="reset-btn"><span>Set password</span></button>
+          <button type="button" class="btn-text-back" id="reset-back-btn">&larr; Back to sign-in</button>
+        </form>
+
         <!-- Account request status (pending review / declined) -->
         <div id="login-request-status" class="login-request-status" style="display: none;" role="status" aria-live="polite">
           <div class="login-request-icon" id="login-request-icon" aria-hidden="true">
@@ -1969,6 +1984,21 @@
                 </span>
                 <input type="checkbox" id="setting-allow-registration" class="acct-switch">
               </label>
+              <div class="acct-policy">
+                <div class="form-group">
+                  <label class="form-label" for="setting-registration-domains">Allowed email domains for requests</label>
+                  <input type="text" id="setting-registration-domains" class="form-control" placeholder="Email domains, comma separated (empty: any)">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="setting-require-2fa">Require two-factor authentication</label>
+                  <select id="setting-require-2fa" class="form-control">
+                    <option value="off">Off</option>
+                    <option value="admins">For admins</option>
+                    <option value="everyone">For everyone</option>
+                  </select>
+                </div>
+                <button type="button" class="btn btn-primary btn-sm" id="setting-accounts-save">Save account rules</button>
+              </div>
             </div>
 
             <div class="project-card settings-card settings-card-wide" id="settings-theme-card">
@@ -2097,6 +2127,12 @@
               </div>
             </div>
 
+            <div class="project-card settings-card settings-card-wide" id="account-sessions-card">
+              <div class="project-card-header" style="min-height: 40px;">
+                <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Where you're signed in</span></div>
+              </div>
+              <div id="account-sessions-body"></div>
+            </div>
             <div class="project-card settings-card settings-card-wide" id="account-access-card">
               <div class="project-card-header" style="min-height: 40px;">
                 <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Your access</span></div>
@@ -2940,6 +2976,31 @@
         <button class="btn btn-secondary" data-close-modal>Cancel</button>
         <button class="btn btn-primary" id="user-editor-save">Create account</button>
       </div>
+    </div>
+  </div>
+
+  <!-- SESSIONS OF A USER (admin) -->
+  <div class="modal-overlay" id="modal-user-sessions">
+    <div class="modal-container" style="max-width: 640px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="user-sessions-title">Sessions</h3>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body" id="user-sessions-body"></div>
+      <div class="modal-footer">
+        <button class="btn btn-danger" id="user-sessions-revoke-all" style="margin-right:auto">Sign out everywhere</button>
+        <button class="btn btn-secondary" data-close-modal>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- REQUIRED TWO-FACTOR SETUP -->
+  <div id="force-2fa-overlay" class="acct-force-overlay" hidden>
+    <div class="acct-force-card">
+      <h2>Set up two-factor authentication</h2>
+      <p>Your admin requires an authenticator app for your account. Set it up to keep using the panel.</p>
+      <button type="button" class="btn btn-primary" id="force-2fa-start" style="width: 100%;">Set up now</button>
+      <button type="button" class="btn-text-back" id="force-2fa-logout">Sign out</button>
     </div>
   </div>
 

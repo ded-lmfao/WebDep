@@ -96,9 +96,18 @@ fn should_touch_session_activity(path: &str, method: &Method) -> bool {
 
 pub(crate) async fn security_middleware(
     State(state): State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    let ip = resolve_client_ip(peer, req.headers());
+    req.headers_mut().remove(CLIENT_IP_HEADER);
+    if let Ok(v) = HeaderValue::from_str(&ip) {
+        req.headers_mut().insert(CLIENT_IP_HEADER, v);
+    }
     let is_https = is_https_request(req.headers(), state.auth.force_secure_cookies);
     let is_mutating = matches!(
         *req.method(),
@@ -115,6 +124,8 @@ pub(crate) async fn security_middleware(
         if is_api {
             let is_public_auth = path == "/api/auth/login"
                 || path == "/api/auth/register"
+                || path == "/api/auth/reset"
+                || (path == "/api/auth/register/challenge" && *req.method() == Method::GET)
                 || (path == "/api/auth/registration" && *req.method() == Method::GET)
                 || path == "/api/auth/2fa/verify-login"
                 || path == "/api/auth/passkeys/login/start"
@@ -154,6 +165,30 @@ pub(crate) async fn security_middleware(
                         Json(serde_json::json!({
                             "error": "Change your temporary password to continue.",
                             "code": "password_change_required"
+                        })),
+                    )
+                        .into_response();
+                    attach_security_headers(&mut res, true, is_https);
+                    return res;
+                }
+
+                // When the admin requires two-factor authentication, users without it can only
+                // set it up (or sign out).
+                if crate::auth::policy::needs_two_factor_setup(&user)
+                    && !matches!(
+                        path,
+                        "/api/auth/me"
+                            | "/api/auth/logout"
+                            | "/api/auth/presence"
+                            | "/api/auth/2fa/setup"
+                            | "/api/auth/2fa/enable"
+                    )
+                {
+                    let mut res = (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "Set up two-factor authentication to continue.",
+                            "code": "two_factor_required"
                         })),
                     )
                         .into_response();
@@ -304,15 +339,35 @@ pub(crate) async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Resul
 
 /// Best-effort client address (proxy headers first). Spoofable: use only for audit and
 /// soft rate limits.
+/// Header the middleware sets to the verified client address (incoming copies are dropped).
+pub(crate) const CLIENT_IP_HEADER: &str = "x-webdep-client-ip";
+
+/// Client address worked out by `security_middleware`: the TCP peer, or the first
+/// `X-Forwarded-For` / `X-Real-IP` hop only when the peer is a proxy on this machine (Caddy).
 pub(crate) fn client_ip(headers: &HeaderMap) -> String {
     headers
-        .get("x-forwarded-for")
+        .get(CLIENT_IP_HEADER)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(crate) fn resolve_client_ip(peer: Option<std::net::IpAddr>, headers: &HeaderMap) -> String {
+    let forwarded = || {
+        headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
+    };
+    match peer {
+        Some(ip) if ip.is_loopback() => forwarded().unwrap_or_else(|| ip.to_string()),
+        Some(ip) => ip.to_string(),
+        None => "unknown".to_string(),
+    }
 }
 
 pub(crate) async fn verify_power(
@@ -404,9 +459,14 @@ pub(crate) async fn create_authenticated_response(
     headers: &HeaderMap,
     user: User,
 ) -> Result<Response, (StatusCode, String)> {
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let session = state
         .auth
-        .create_session(user.id)
+        .create_session_with_meta(user.id, &client_ip(headers), &user_agent)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create session".to_string()))?;
 
@@ -430,6 +490,7 @@ pub(crate) async fn create_authenticated_response(
     );
 
     let body = Json(LoginResponse {
+        two_factor_required: crate::auth::policy::needs_two_factor_setup(&user),
         user,
         csrf: session.csrf_token,
         active_sessions,
@@ -657,6 +718,9 @@ pub(crate) async fn log_audit_project(
 pub(crate) struct LoginResponse {
     pub(crate) user: User,
     pub(crate) csrf: String,
+    /// The admin requires 2FA for this user and none is set up yet.
+    #[serde(rename = "twoFactorRequired")]
+    pub(crate) two_factor_required: bool,
     #[serde(rename = "activeSessions")]
     pub(crate) active_sessions: usize,
     #[serde(rename = "passkeyCount")]

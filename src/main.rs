@@ -200,6 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // successful boot retries the conversion; the main admin is unaffected.
         Err(e) => tracing::error!("Failed to convert legacy permissions into access grants (will retry next start): {e}"),
     }
+    crate::auth::policy::reload(&db).await;
     match crate::auth::grants::grant_legacy_delete_once(&db).await {
         Ok(0) => {}
         Ok(n) => tracing::info!("Carried the app delete right over to {n} access grant(s)"),
@@ -465,7 +466,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
     };
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     if let Some(h) = control_pg_handle {
         h.stop().await;
     }

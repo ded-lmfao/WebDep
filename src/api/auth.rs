@@ -62,10 +62,6 @@ pub(crate) async fn login_handler(
         ));
     }
 
-    if user.disabled {
-        return Err((StatusCode::FORBIDDEN, "Account is disabled by administrator".to_string()));
-    }
-
     if !verify_password(&payload.password, &hash) {
         if let Some(lock_s) = state.auth.record_failure(&uname_key) {
             log_audit(&state, &user.username, "auth.lockout", Some(&user.username), Some("Account locked after repeated failed password attempts")).await;
@@ -78,6 +74,11 @@ pub(crate) async fn login_handler(
     }
 
     state.auth.clear_failures(&uname_key);
+
+    // Only someone who knows the password learns the account is disabled.
+    if user.disabled {
+        return Err((StatusCode::FORBIDDEN, "Account is disabled by administrator".to_string()));
+    }
 
     // If 2FA is enabled on this account, require 2FA challenge verification before creating a session
     if user.totp_enabled {
@@ -213,6 +214,7 @@ pub(crate) async fn me_handler(
     let active_sessions = state.auth.count_active_sessions(user.id).await;
     let passkey_count = state.auth.count_user_passkeys(user.id).await;
     Ok(Json(LoginResponse {
+        two_factor_required: crate::auth::policy::needs_two_factor_setup(&user),
         user,
         csrf: session.csrf_token,
         active_sessions,
