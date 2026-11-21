@@ -643,27 +643,29 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
 });
 
 // Delete Project
-async function deleteProject(id, slug) {
+async function deleteProject(id) {
   const delProj = (state.projects || []).find((x) => x.id === id);
-  const delIsService = !!delProj && delProj.project_kind === 'service';
+  if (!delProj) return;
+  const delIsService = delProj.project_kind === 'service';
   const delNoun = delIsService ? 'service' : 'website';
   const delNounCap = delIsService ? 'Service' : 'Website';
-  const confirmSlug = await showPromptDialog({
-    title: `Delete ${delNounCap}`,
-    message: `CAUTION: Deleting this ${delNoun} will remove its configuration and stop its running process.\n\nType the ${delNoun} slug "${slug}" below to confirm deletion:`,
-    placeholder: slug,
-    confirmText: `Delete ${delNounCap}`,
+  const name = delProj.name;
+  const typed = await showPromptDialog({
+    title: `Delete ${delNoun} "${name}"`,
+    message: `This stops the ${delNoun} and permanently removes its files, settings, releases, and data. It can't be undone.\n\nType "${name}" to confirm:`,
+    placeholder: name,
+    confirmText: `Delete ${delNoun}`,
     danger: true,
   });
-  if (confirmSlug === null) return;
-  if (confirmSlug.trim() !== slug) {
-    toast('Slug confirmation did not match. Deletion cancelled.', 'warning');
+  if (typed === null) return;
+  if (typed.trim() !== name) {
+    toast(`The name didn't match, so nothing was deleted.`, 'warning');
     return;
   }
 
   try {
-    await api(`/api/projects/${id}`, { method: 'DELETE', body: { confirm: slug } });
-    toast(`${delNounCap} "${slug}" deleted.`, 'success');
+    await api(`/api/projects/${id}`, { method: 'DELETE', body: { confirm: delProj.slug } });
+    toast(`${delNounCap} "${name}" deleted.`, 'success');
     if (state.selectedProjectId === id) state.selectedProjectId = null;
     await loadProjects();
     navigateTo(delIsService ? 'services' : 'projects');

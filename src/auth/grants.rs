@@ -22,21 +22,21 @@ pub const PANEL_ACCOUNT_POWERS: &[&str] = &["users_view", "users_create", "users
 /// Powers a website or service grant may hold.
 pub const PROJECT_POWERS: &[&str] = &[
     "logs", "files", "files_write", "deploy", "process", "backups", "env", "domains",
-    "projects_manage", "services_manage", "activity", "access_manage",
+    "projects_manage", "services_manage", "activity", "access_manage", "app_delete",
 ];
 /// Powers a database grant may hold.
-pub const DATABASE_POWERS: &[&str] = &["databases", "env", "databases_manage", "activity", "access_manage"];
+pub const DATABASE_POWERS: &[&str] = &["databases", "env", "databases_manage", "activity", "access_manage", "app_delete"];
 
 /// Checklist shown for one kind of app, in display order.
 pub fn kind_catalog(kind: &str) -> &'static [&'static str] {
     match kind {
         "website" => &[
             "logs", "files", "files_write", "deploy", "process", "backups", "env", "domains",
-            "projects_manage", "activity", "access_manage",
+            "projects_manage", "activity", "access_manage", "app_delete",
         ],
         "service" => &[
             "logs", "files", "files_write", "deploy", "process", "backups", "env",
-            "services_manage", "activity", "access_manage",
+            "services_manage", "activity", "access_manage", "app_delete",
         ],
         "database" | "all-databases" => DATABASE_POWERS,
         _ => PROJECT_POWERS,

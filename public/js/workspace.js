@@ -370,7 +370,7 @@ function renderDatabaseWorkspaceHeader(banner) {
     const actions = document.getElementById('ws-project-actions');
     if (actions) {
       const dbScope = databaseScope(d);
-      const canManage = typeof window.hasPower === 'function' ? window.hasPower('databases_manage', dbScope) : false;
+      const canManage = typeof window.hasPower === 'function' ? window.hasPower('app_delete', dbScope) : false;
       const canControl = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases', 'databases_manage'], dbScope) : false;
       const canCreds = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases_manage', 'env'], dbScope) : false;
       const safeName = escapeHtml(d.name).replace(/'/g, '&#39;');
@@ -660,7 +660,6 @@ function renderWebsiteWorkspaceHeader() {
         maint: ico('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>'),
         globe: ico('<circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>'),
         gear: ico('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>'),
-        more: ico('<circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle>'),
         trash: ico('<polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>'),
       };
       const localSource = !p.repo_url || p.repo_url === 'local';
@@ -671,17 +670,9 @@ function renderWebsiteWorkspaceHeader() {
       const neverDeployed = !isService && !p.deployed_sha;
       const settingsAction = isService ? `openEditServiceModal(${p.id})` : `openEditWebsiteModal(${p.id})`;
 
-      const menuItems = [];
-      if (!isService && canProcess) {
-        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="toggleMaintenanceMode(${p.id})">${I.maint}<span>${isMaintenance ? 'Exit maintenance mode' : 'Maintenance mode'}</span></button>`);
-      }
-      if (!isService && hasPower('domains')) {
-        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="openNginxModal(${p.id})">${I.globe}<span>Domains &amp; SSL</span></button>`);
-      }
-      if (canManage) {
-        if (menuItems.length) menuItems.push('<div class="menu-sep" role="separator"></div>');
-        menuItems.push(`<button type="button" class="menu-item menu-item-danger" role="menuitem" onclick="deleteProject(${p.id}, '${escapeHtml(p.slug)}')">${I.trash}<span>Delete ${isService ? 'service' : 'website'}</span></button>`);
-      }
+      const canMaint = !isService && canProcess;
+      const canDomains = !isService && hasPower('domains');
+      const canDelete = hasPower('app_delete');
 
       actions.innerHTML = `
         <div class="ws-actions-group">
@@ -695,12 +686,10 @@ function renderWebsiteWorkspaceHeader() {
         </div>
         <div class="ws-actions-group">
           ${isMaintenance ? `<span class="badge badge-warning" title="Visitors see the maintenance page">${I.maint} Maintenance</span>` : ''}
+          ${canMaint ? `<button class="btn btn-secondary btn-sm" onclick="toggleMaintenanceMode(${p.id})" title="${isMaintenance ? 'Show the live site to visitors again' : 'Show visitors a maintenance page'}">${I.maint}<span>${isMaintenance ? 'Exit maintenance' : 'Maintenance'}</span></button>` : ''}
+          ${canDomains ? `<button class="btn btn-secondary btn-sm" onclick="openNginxModal(${p.id})" title="Domains and SSL certificates">${I.globe}<span>Domains</span></button>` : ''}
           ${canManage ? `<button class="btn btn-secondary btn-sm" onclick="${settingsAction}" title="${isService ? 'Service settings' : 'Website settings'}">${I.gear}<span>Settings</span></button>` : ''}
-          ${menuItems.length ? `
-            <div class="menu-wrap">
-              <button type="button" class="btn btn-secondary btn-sm btn-icon" data-menu-toggle aria-haspopup="menu" aria-expanded="false" aria-label="More actions" title="More actions">${I.more}</button>
-              <div class="menu" role="menu">${menuItems.join('')}</div>
-            </div>` : ''}
+          ${canDelete ? `<button class="btn btn-sm ws-btn-delete" onclick="deleteProject(${p.id})" title="Delete this ${isService ? 'service' : 'website'}">${I.trash}<span>Delete</span></button>` : ''}
         </div>
       `;
     }

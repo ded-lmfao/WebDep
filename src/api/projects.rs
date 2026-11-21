@@ -430,7 +430,9 @@ pub(crate) async fn delete_project_handler(
         .as_ref()
         .map(|p| p.project_kind.as_str())
         .unwrap_or("website");
-    let actor = verify_power(&state, &headers, manage_power_for_kind(kind), Some(id)).await?;
+    // Deleting an app is for admins and the app's owner (the per-app `app_delete` power).
+    let _ = kind;
+    let actor = verify_power(&state, &headers, "app_delete", Some(id)).await?;
     if let Some(ref p) = deleted_proj {
         log_audit_project(
             &state,

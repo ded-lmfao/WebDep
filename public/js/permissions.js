@@ -11,9 +11,9 @@ export const PANEL_ACCOUNT_POWERS = ['users_view', 'users_create', 'users_edit',
 
 /** Checklist per kind of app, in display order (mirrors the server's kind_catalog). */
 export const APP_POWER_CATALOG = {
-  website: ['logs', 'files', 'files_write', 'deploy', 'process', 'backups', 'env', 'domains', 'projects_manage', 'activity', 'access_manage'],
-  service: ['logs', 'files', 'files_write', 'deploy', 'process', 'backups', 'env', 'services_manage', 'activity', 'access_manage'],
-  database: ['databases', 'env', 'databases_manage', 'activity', 'access_manage'],
+  website: ['logs', 'files', 'files_write', 'deploy', 'process', 'backups', 'env', 'domains', 'projects_manage', 'activity', 'access_manage', 'app_delete'],
+  service: ['logs', 'files', 'files_write', 'deploy', 'process', 'backups', 'env', 'services_manage', 'activity', 'access_manage', 'app_delete'],
+  database: ['databases', 'env', 'databases_manage', 'activity', 'access_manage', 'app_delete'],
 };
 APP_POWER_CATALOG['all-projects'] = Array.from(new Set([...APP_POWER_CATALOG.website, ...APP_POWER_CATALOG.service]));
 APP_POWER_CATALOG['all-databases'] = APP_POWER_CATALOG.database;
@@ -31,6 +31,7 @@ const LABELS = {
   services_manage: 'Edit settings',
   activity: 'View activity',
   access_manage: 'Manage access',
+  app_delete: 'Delete app (owner)',
   databases: 'View, start, stop',
   databases_manage: 'Manage database',
   users_view: 'View users',

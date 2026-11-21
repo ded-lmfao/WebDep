@@ -291,7 +291,8 @@ pub(crate) async fn delete_database_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let user = verify_db_access(&state, &headers, &["databases_manage"], &db).await?;
+    // Deleting a database is for admins and its owner (the per-app `app_delete` power).
+    let user = verify_db_access(&state, &headers, &["app_delete"], &db).await?;
     state.databases.delete(id).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let _ = crate::auth::grants::remove_for_app(&state.db, crate::auth::grants::SCOPE_DATABASE, id).await;
     state.auth.invalidate_sessions();
