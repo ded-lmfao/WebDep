@@ -1,9 +1,12 @@
 //! Per-app CPU and memory limits.
 //!
-//! On Linux with cgroups v2 each limited app gets `/sys/fs/cgroup/webdep/app-<id>` with
-//! `cpu.max` and `memory.max`; the app's shell joins it before running the start command, so
-//! everything it starts is limited too. Elsewhere (Windows, cgroups v1, no permission) the app
-//! runs without limits and its log says so.
+//! - **Linux (cgroups v2):** each limited app gets `/sys/fs/cgroup/webdep/<app-id|db-id>` with
+//!   `cpu.max` and `memory.max`; the app's shell joins it before running the start command, so
+//!   everything it starts is limited too. Needs WebDep to run as root.
+//! - **Windows (Job Objects):** right after the app starts, its process is put in a job object
+//!   with a hard CPU cap and a memory limit; everything it starts afterwards inherits the job.
+//! - **Anywhere else, or without permission:** the app runs without limits and its log says so.
+//!   `enforcement_status` tells the admin panel which case applies.
 
 /// Highest CPU limit accepted, as a percentage of one core (64 cores).
 pub const MAX_CPU_PERCENT: i32 = 6400;
@@ -72,10 +75,121 @@ pub fn prepare(name: &str, cpu_percent: i32, memory_mb: i32) -> Result<Option<st
 
 #[cfg(not(target_os = "linux"))]
 pub fn prepare(_name: &str, cpu_percent: i32, memory_mb: i32) -> Result<Option<std::ffi::CString>, String> {
-    if cpu_percent <= 0 && memory_mb <= 0 {
+    // Windows applies its limits to the process after it starts (`apply_to_process`).
+    if (cpu_percent <= 0 && memory_mb <= 0) || cfg!(windows) {
         Ok(None)
     } else {
-        Err("resource limits are only enforced on Linux".into())
+        Err("resource limits are only enforced on Linux and Windows servers".into())
+    }
+}
+
+/// Whether CPU and memory limits are enforced on this server, for the App Limits page.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Enforcement {
+    pub works: bool,
+    /// How limits are enforced here: `cgroups`, `job-objects`, or `none`.
+    pub method: &'static str,
+    pub reason: String,
+}
+
+#[cfg(target_os = "linux")]
+pub fn enforcement_status() -> Enforcement {
+    use std::path::Path;
+    if !Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
+        return Enforcement { works: false, method: "none", reason: "this server doesn't use cgroups v2".into() };
+    }
+    match std::fs::create_dir_all("/sys/fs/cgroup/webdep") {
+        Ok(()) => Enforcement { works: true, method: "cgroups", reason: String::new() },
+        Err(e) => Enforcement {
+            works: false,
+            method: "none",
+            reason: format!("WebDep can't use cgroups here ({e}); run it as root"),
+        },
+    }
+}
+
+#[cfg(windows)]
+pub fn enforcement_status() -> Enforcement {
+    Enforcement { works: true, method: "job-objects", reason: String::new() }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn enforcement_status() -> Enforcement {
+    Enforcement { works: false, method: "none", reason: "limits are only enforced on Linux and Windows servers".into() }
+}
+
+/// CPU cap as hundredths of a percent of the whole machine (Windows job objects), for a limit
+/// given as a percentage of one core. `None` when the limit is 0 or covers every core anyway.
+pub fn cpu_rate_hundredths(cpu_percent: i32, cores: usize) -> Option<u32> {
+    let cores = cores.max(1) as i64;
+    let percent = i64::from(cpu_percent);
+    if percent <= 0 || percent >= cores * 100 {
+        return None;
+    }
+    Some((percent * 100 / cores).clamp(1, 10_000) as u32)
+}
+
+/// Puts a just-started process (and everything it starts afterwards) under CPU and memory
+/// limits using a Windows job object. Call it right after spawning.
+#[cfg(windows)]
+pub fn apply_to_process(process: std::os::windows::io::RawHandle, cpu_percent: i32, memory_mb: i32) -> Result<(), String> {
+    use std::ffi::c_void;
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    };
+
+    if cpu_percent <= 0 && memory_mb <= 0 {
+        return Ok(());
+    }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+
+    // SAFETY: plain Win32 calls with valid, correctly sized structs; the job handle is closed
+    // below (the job lives on until its processes exit).
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return Err(format!("can't create a job object: {}", std::io::Error::last_os_error()));
+        }
+        let result = (|| {
+            if memory_mb > 0 {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
+                info.JobMemoryLimit = (memory_mb as usize).saturating_mul(1024 * 1024);
+                if SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const c_void,
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                ) == 0
+                {
+                    return Err(format!("can't set the memory limit: {}", std::io::Error::last_os_error()));
+                }
+            }
+            if let Some(rate) = cpu_rate_hundredths(cpu_percent, cores) {
+                let mut info: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = zeroed();
+                info.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+                info.Anonymous.CpuRate = rate;
+                if SetInformationJobObject(
+                    job,
+                    JobObjectCpuRateControlInformation,
+                    &info as *const _ as *const c_void,
+                    size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+                ) == 0
+                {
+                    return Err(format!("can't set the CPU limit: {}", std::io::Error::last_os_error()));
+                }
+            }
+            if AssignProcessToJobObject(job, process) == 0 {
+                return Err(format!("can't add the app to the job: {}", std::io::Error::last_os_error()));
+            }
+            Ok(())
+        })();
+        CloseHandle(job);
+        result
     }
 }
 
@@ -113,6 +227,77 @@ mod tests {
         assert_eq!(cpu_max_value(0), "max 100000");
         assert_eq!(memory_max_value(512), "536870912");
         assert_eq!(memory_max_value(0), "max");
+    }
+
+    #[test]
+    fn cpu_limits_become_a_share_of_the_whole_machine() {
+        assert_eq!(cpu_rate_hundredths(0, 8), None);
+        assert_eq!(cpu_rate_hundredths(50, 1), Some(5000));
+        assert_eq!(cpu_rate_hundredths(100, 8), Some(1250), "one core of eight");
+        assert_eq!(cpu_rate_hundredths(800, 8), None, "all cores is no limit");
+        assert_eq!(cpu_rate_hundredths(10, 64), Some(15), "never below the smallest step");
+        assert_eq!(cpu_rate_hundredths(1, 64), Some(1));
+    }
+
+    #[test]
+    fn enforcement_is_reported() {
+        let e = enforcement_status();
+        assert_eq!(e.works, e.method != "none");
+        #[cfg(windows)]
+        assert_eq!(e.method, "job-objects");
+    }
+
+    /// Real Windows job-object round trips: needs `python` on the PATH, otherwise skipped.
+    #[cfg(windows)]
+    mod windows_job {
+        use super::super::*;
+        use std::os::windows::io::AsRawHandle;
+        use std::process::{Command, Stdio};
+
+        fn python_works() -> bool {
+            Command::new("python")
+                .args(["-c", "print(1)"])
+                .output()
+                .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "1")
+                .unwrap_or(false)
+        }
+
+        fn run_limited(script: &str, cpu: i32, memory_mb: i32) -> String {
+            let child = Command::new("python")
+                .args(["-c", script])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start python");
+            apply_to_process(child.as_raw_handle(), cpu, memory_mb).expect("apply limits");
+            let out = child.wait_with_output().expect("python output");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        #[test]
+        fn memory_limit_stops_an_app_from_using_more() {
+            if !python_works() {
+                eprintln!("skipped: python not found");
+                return;
+            }
+            let script = "import time\ntime.sleep(0.3)\ntry:\n    x = bytearray(300 * 1024 * 1024)\n    print('allocated')\nexcept MemoryError:\n    print('limited')";
+            assert_eq!(run_limited(script, 0, 64), "limited", "300 MB is refused under a 64 MB limit");
+            assert_eq!(run_limited(script, 0, 0), "allocated", "no limit allocates normally");
+        }
+
+        #[test]
+        fn cpu_limit_caps_how_much_cpu_an_app_gets() {
+            if !python_works() {
+                eprintln!("skipped: python not found");
+                return;
+            }
+            let script = "import time\nt = time.time()\nc = time.process_time()\nwhile time.time() - t < 3:\n    pass\nprint(round(time.process_time() - c, 2))";
+            let limited: f64 = run_limited(script, 50, 0).parse().expect("cpu seconds");
+            let free: f64 = run_limited(script, 0, 0).parse().expect("cpu seconds");
+            assert!(free > 2.4, "an unlimited busy loop uses about a core: {free}");
+            assert!(limited < 2.2, "half a core over 3 seconds is about 1.5 CPU seconds: {limited}");
+            assert!(limited > 0.5, "it still runs: {limited}");
+        }
     }
 
     #[test]

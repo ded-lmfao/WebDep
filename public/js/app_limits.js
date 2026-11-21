@@ -56,6 +56,12 @@ export async function loadLimitsView() {
     const res = await api('/api/limits', { noCache: true });
     rows = res.limits || [];
     loaded = true;
+    const banner = document.getElementById('limits-banner');
+    if (banner) {
+      const e = res.enforcement;
+      banner.hidden = !e || e.works;
+      if (e && !e.works) banner.textContent = `CPU and memory limits are not enforced on this server: ${e.reason}. Disk and backup limits still work.`;
+    }
   } catch (err) {
     toast(err.message, 'error');
   }

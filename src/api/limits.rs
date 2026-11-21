@@ -43,7 +43,7 @@ pub(crate) async fn list_limits_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     verify_admin(&state, &headers).await?;
     let rows = app_limits::list_all(&state.db).await.map_err(internal)?;
-    Ok(Json(serde_json::json!({ "limits": rows })))
+    Ok(Json(serde_json::json!({ "limits": rows, "enforcement": crate::runtime::limits::enforcement_status() })))
 }
 
 /// Sets a website or service's limits. A running app restarts when its CPU or memory limit
@@ -113,9 +113,9 @@ const MB: u64 = 1024 * 1024;
 
 fn over_message(name: &str, used: u64, limit: u64) -> String {
     format!(
-        "'{name}' is over its disk limit ({} MB used of {} MB). Free space or ask an admin to raise the limit.",
-        used / MB,
-        limit / MB
+        "'{name}' is over its disk limit ({:.1} MB used of {:.1} MB). Free space or ask an admin to raise the limit.",
+        used as f64 / MB as f64,
+        limit as f64 / MB as f64
     )
 }
 

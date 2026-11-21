@@ -2261,6 +2261,7 @@
               <input type="text" id="limits-search" class="form-control" placeholder="Search apps, types, or nodes" style="width: 240px;" autocomplete="off">
             </div>
           </div>
+          <div id="limits-banner" class="acct-callout" hidden></div>
           <div class="table-responsive acct-table-wrap">
             <table class="table acct-table lim-table">
               <thead>
@@ -2269,7 +2270,7 @@
               <tbody id="limits-list-body"></tbody>
             </table>
           </div>
-          <p class="acct-muted" style="margin-top:10px">CPU and memory are enforced on Linux servers. A disk limit is checked every few minutes: an app that grows past it is stopped and can't be started until it is under the limit. Backups is the most an app can hold at a time.</p>
+          <p class="acct-muted" style="margin-top:10px">CPU and memory are enforced on Linux servers (as root) and on Windows. A disk limit is checked every minute: an app that grows past it is stopped and can't be started until it is under the limit. Backups is the most an app can hold at a time.</p>
         </section>
 
         <section id="view-moves" class="view-section">

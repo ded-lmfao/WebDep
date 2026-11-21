@@ -237,6 +237,16 @@ pub async fn spawn_project_process_pure(
         )
     })?;
 
+    // Windows: put the app under its CPU and memory limits as soon as it exists.
+    #[cfg(windows)]
+    if p.cpu_limit > 0 || p.memory_limit_mb > 0 {
+        if let Some(handle) = child.raw_handle() {
+            if let Err(e) = crate::runtime::limits::apply_to_process(handle, p.cpu_limit, p.memory_limit_mb) {
+                log_cb("system", "warn", &format!("Resource limits not applied: {e}. The app runs without limits."));
+            }
+        }
+    }
+
     let pid = child.id().unwrap_or(0);
     clear_container_pids_in(container);
     record_container_pid_to(container, pid);

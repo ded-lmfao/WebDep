@@ -797,7 +797,24 @@ impl Databases {
             _ => {}
         }
 
-        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), start_cmd.status()).await;
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            // Windows: pg_ctl and the server it starts run in a job with the database's limits.
+            #[cfg(windows)]
+            {
+                if limits.cpu > 0 || limits.memory_mb > 0 {
+                    if let Ok(mut child) = start_cmd.spawn() {
+                        if let Some(handle) = child.raw_handle() {
+                            if let Err(e) = crate::runtime::limits::apply_to_process(handle, limits.cpu, limits.memory_mb) {
+                                warn!("[DB #{}] Resource limits not applied: {}. The database runs without limits.", id, e);
+                            }
+                        }
+                        return child.wait().await;
+                    }
+                }
+            }
+            start_cmd.status().await
+        })
+        .await;
 
         let pid = match wait_for_pg_ready(port, &data_dir, 20000).await {
             Some(p) => p,
