@@ -12,6 +12,7 @@ pub mod users;
 pub mod access;
 pub mod accounts;
 pub mod ports;
+pub mod limits;
 
 pub use common::AppState;
 
@@ -63,6 +64,7 @@ use self::users::*;
 use self::access::*;
 use self::accounts::*;
 use self::ports::*;
+use self::limits::*;
 use self::common::{axum_static_fallback, security_middleware};
 
 pub fn create_router(state: AppState) -> Router {
@@ -211,7 +213,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/projects/:id/port", put(set_app_port_handler))
         .route("/api/projects/:id/extra-ports", put(set_extra_ports_handler))
         .route("/api/projects/:id/ip", put(set_app_ip_handler))
-        .route("/api/projects/:id/limits", put(set_app_limits_handler))
+        .route("/api/limits", get(list_limits_handler))
+        .route("/api/projects/:id/limits", put(set_project_limits_handler))
+        .route("/api/databases/:id/limits", put(set_database_limits_handler))
         .route("/api/cluster/nodes/:id/ips", get(list_node_ips_handler).post(add_node_ip_handler))
         .route("/api/cluster/nodes/:id/ips/:ip_id", delete(remove_node_ip_handler))
         .route(

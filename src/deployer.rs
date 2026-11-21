@@ -262,6 +262,7 @@ impl Deployer {
             .bind(ts)
             .execute(&self.db)
             .await;
+            crate::api::common::trim_app_audit(&self.db, p.id).await;
         }
 
         // Keep at most the latest 5 deployment records per project and reclaim old storage
@@ -369,6 +370,7 @@ impl Deployer {
         .bind(now())
         .execute(&self.db)
         .await;
+        crate::api::common::trim_app_audit(&self.db, project_id).await;
 
         if project_id > 0 {
             let pid = project_id;

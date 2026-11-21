@@ -280,6 +280,8 @@ mod tests {
             bind_ip: String::new(),
             cpu_limit: 0,
             memory_limit_mb: 0,
+            disk_limit_mb: 0,
+            backup_limit: 0,
         }
     }
 

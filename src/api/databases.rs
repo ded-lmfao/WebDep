@@ -263,6 +263,7 @@ pub(crate) async fn start_database_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
+    super::limits::ensure_database_under_disk_limit(&state, id).await?;
     run_database_lifecycle(&state, &headers, id, "database.start", "Started database container", state.databases.start(id)).await
 }
 
@@ -279,6 +280,7 @@ pub(crate) async fn restart_database_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
+    super::limits::ensure_database_under_disk_limit(&state, id).await?;
     run_database_lifecycle(&state, &headers, id, "database.restart", "Restarted database container", state.databases.restart(id)).await
 }
 

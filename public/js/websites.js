@@ -25,6 +25,7 @@ import {
 import { api, toast } from './api.js';
 import { cleanDomainList } from './settings.js';
 import { toggleDatabaseAccessIpFields } from './databases_modal.js';
+import { readLimitFields, resetLimitFields, setLimitFieldsVisible } from './limits_fields.js';
 import { renderWebsiteWorkspaceHeader, navigateTo, openWebsiteWorkspace } from './workspace.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
 import { startProject, stopProject } from './workspace_actions.js';
@@ -332,6 +333,8 @@ function openAddWebsiteModal() {
   }
   const idInput = document.getElementById('website-form-id');
   if (idInput) idInput.value = '';
+  resetLimitFields('website');
+  setLimitFieldsVisible('website', true);
   const titleEl = document.getElementById('modal-website-title');
   if (titleEl) titleEl.textContent = 'Add New Website';
   const submitBtn = document.getElementById('save-website-submit-btn');
@@ -373,6 +376,7 @@ async function openEditWebsiteModal(projectId) {
   const form = document.getElementById('website-form');
   if (form) form.reset();
   document.getElementById('website-form-id').value = String(p.id);
+  setLimitFieldsVisible('website', false);
   document.getElementById('modal-website-title').textContent = `Edit Website: ${p.name}`;
   document.getElementById('save-website-submit-btn').textContent = 'Update Website';
 
@@ -606,6 +610,10 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
   };
   if (!id && selectedNodeVal) {
     payload.node_id = Number(selectedNodeVal);
+  }
+  if (!id) {
+    const l = readLimitFields('website');
+    Object.assign(payload, { cpu_limit: l.cpu, memory_limit_mb: l.memoryMb, disk_limit_mb: l.diskMb, backup_limit: l.backups });
   }
 
   const submitBtn = document.getElementById('save-website-submit-btn');

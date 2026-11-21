@@ -344,6 +344,7 @@ fn is_spa_route_path(raw: &str) -> bool {
             | "admin-audit"
             | "ips"
             | "moves"
+            | "limits"
     )
 }
 
@@ -521,7 +522,7 @@ mod tests {
     #[test]
     fn test_every_sidebar_view_is_a_spa_route() {
         // Reloading the browser on any sidebar view must serve index.html, not 404.
-        for view in ["overview", "projects", "services", "databases", "nodes", "modules", "settings", "account", "users", "requests", "admin-audit", "access", "ips", "moves"] {
+        for view in ["overview", "projects", "services", "databases", "nodes", "modules", "settings", "account", "users", "requests", "admin-audit", "access", "ips", "moves", "limits"] {
             assert!(is_spa_route_path(view), "{view} should be a SPA route");
             assert!(is_spa_route_path(&format!("/{view}/42")), "{view}/<id> should be a SPA route");
         }

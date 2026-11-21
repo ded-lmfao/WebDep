@@ -79,6 +79,9 @@ pub struct CreateDatabaseInput {
     pub domain: Option<String>,
     #[serde(default, alias = "linkedProjectId", alias = "linked_project_id")]
     pub linked_project_id: Option<i64>,
+    /// Limits chosen at creation; 0 or empty = no limit.
+    #[serde(default)]
+    pub limits: crate::app_limits::AppLimits,
 }
 
 pub fn encode_uri_userinfo_component(input: &str) -> String {
@@ -359,6 +362,7 @@ impl Databases {
             return Err("Database password is required".to_string());
         }
 
+        input.limits.validate()?;
         let engine = input.engine.unwrap_or_else(|| "postgres".to_string());
         let access_mode = input.access_mode.unwrap_or_else(|| "local".to_string());
         let allowed_ips = input.allowed_ips.unwrap_or_default().trim().to_string();
@@ -413,6 +417,8 @@ impl Databases {
         .fetch_one(&self.db)
         .await
         .map_err(|e| e.to_string())?;
+
+        let _ = crate::app_limits::set(&self.db, crate::app_limits::Kind::Database, id, &input.limits).await;
 
         let db_dir = self.base_dir.join(format!("db-{}", id));
         let data_dir_str = db_dir.to_string_lossy().to_string();
@@ -771,6 +777,25 @@ impl Databases {
         start_cmd.stdin(std::process::Stdio::null());
         start_cmd.stdout(std::process::Stdio::null());
         start_cmd.stderr(std::process::Stdio::null());
+
+        // CPU and memory limits: pg_ctl joins the database's cgroup, and the server it
+        // starts stays in it (Linux with cgroups v2; elsewhere the database runs unlimited).
+        let limits = crate::app_limits::get(&self.db, crate::app_limits::Kind::Database, id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        match crate::runtime::limits::prepare(&format!("db-{id}"), limits.cpu, limits.memory_mb) {
+            #[cfg(target_os = "linux")]
+            Ok(Some(procs)) => {
+                // SAFETY: join_in_child only uses async-signal-safe calls.
+                unsafe {
+                    start_cmd.pre_exec(move || crate::runtime::limits::join_in_child(&procs));
+                }
+            }
+            Err(e) => warn!("[DB #{}] Resource limits not applied: {}. The database runs without limits.", id, e),
+            _ => {}
+        }
 
         let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), start_cmd.status()).await;
 

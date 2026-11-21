@@ -238,7 +238,7 @@ Move a website or backend service from one VPS to another directly from its work
 | **Services** | 24/7 background daemons (Lavalink/Java, Python workers, Node bots, Go/Rust binaries) with live PID tracking and log streaming. |
 | **Databases** | Isolated native PostgreSQL clusters on any node with SCRAM-SHA-256 auth, local/mesh/CIDR/public rules, and 1-click `DATABASE_URL` linking. |
 | **My Account** | Every user's own profile (name, email), password, passkeys, TOTP 2FA, sessions, and a read-only list of the apps they can access. |
-| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **IP Addresses**, **Move Apps**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
+| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **IP Addresses**, **Move Apps**, **App Limits**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
 
 #### Accounts & Permissions
 - **Sign-up requests**: people create an account request from the sign-in page; it waits in **Admin Panel › Requests** and an account exists only after approval. Admins can also create accounts directly (with a temporary password the user must change). Self-registration can be switched off in **Platform Settings › Accounts**.
@@ -252,13 +252,13 @@ Move a website or backend service from one VPS to another directly from its work
 #### Ports, IPs, and limits (Admin Panel › IP Addresses)
 - **Port ranges per node**: new apps take the lowest free port in the node's range. Ports stay private (only Caddy and the mesh reach them) until made public, and the firewall follows automatically. If a node has no free port, the app isn't created and the panel says so.
 - **Several IPs per VPS**: add the VPS's public IPs and choose one per website or service; Caddy then serves its domains on that IP only.
-- **Resource limits**: cap an app's CPU (100% = one core) and memory. Enforced with cgroups v2 on Linux when WebDep runs as root.
+- **Resource limits** (set at creation, changed by admins in **App Limits**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root); a disk limit stops the app when it grows past it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
 - **Move Apps** moves a website or service to another node (admins only).
 
-#### Maintenance (Platform Settings › Maintenance)
-- Daily backups of the control database (seven kept by default), **Back up now**, and downloads.
-- Audit history retention (365 days by default), with server-side search and CSV export on the Audit page.
-- Optional webhook notifications (Discord, Slack, or any JSON endpoint) for new account requests, a VPS going offline or back online, low free ports, and failed backups.
+#### Maintenance
+- The control database is backed up automatically once a day (seven kept) and before upgrades; files are in `data/backups/control-db/`.
+- The Audit page searches and exports to CSV; panel-wide history is kept 365 days.
+- Optional webhook notifications (set the `notify_webhook_url` setting) for new account requests, a VPS going offline or back online, low free ports, and apps stopped for going over their disk limit.
 
 The panel is fully responsive: on phones and tablets the sidebar becomes a drawer with a bottom tab bar, and data tables turn into compact cards.
 

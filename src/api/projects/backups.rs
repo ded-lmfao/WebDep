@@ -140,6 +140,24 @@ pub(crate) async fn create_backup_handler(
     Json(payload): Json<CreateBackupPayload>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let actor = verify_power(&state, &headers, "backups", Some(id)).await?;
+    let backup_limit = crate::app_limits::get(&state.db, crate::app_limits::Kind::Project, id)
+        .await
+        .ok()
+        .flatten()
+        .map_or(0, |l| l.backups);
+    if backup_limit > 0 {
+        let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM backups WHERE project_id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+        if held >= i64::from(backup_limit) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("This app already holds its limit of {backup_limit} backup(s). Delete one first or ask an admin to raise the limit."),
+            ));
+        }
+    }
     let note = payload
         .note
         .map(|s| s.trim().to_string())

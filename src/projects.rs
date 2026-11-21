@@ -119,8 +119,9 @@ impl Projects {
                 stability_s, auto_deploy, webhook_secret,
                 app_status, domains, ssl_email,
                 created_at, updated_at, project_kind, access_mode, allowed_ips,
-                node_id, placement_version, assigned_port
-            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+                node_id, placement_version, assigned_port,
+                cpu_limit, memory_limit_mb, disk_limit_mb, backup_limit
+            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
             RETURNING id",
         )
         .bind(&p.name)
@@ -150,6 +151,10 @@ impl Projects {
         .bind(p.node_id)
         .bind(p.placement_version.max(1))
         .bind(final_port as i32)
+        .bind(p.cpu_limit)
+        .bind(p.memory_limit_mb)
+        .bind(p.disk_limit_mb)
+        .bind(p.backup_limit)
         .fetch_one(&self.db)
         .await?;
 

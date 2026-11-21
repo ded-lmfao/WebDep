@@ -370,6 +370,20 @@
           </svg>
           <span>Move Apps</span>
         </a>
+        <a class="nav-item" data-view="limits">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M4 21v-7"></path>
+            <path d="M4 10V3"></path>
+            <path d="M12 21v-9"></path>
+            <path d="M12 8V3"></path>
+            <path d="M20 21v-5"></path>
+            <path d="M20 12V3"></path>
+            <path d="M1 14h6"></path>
+            <path d="M9 8h6"></path>
+            <path d="M17 16h6"></path>
+          </svg>
+          <span>App Limits</span>
+        </a>
         <a class="nav-item" data-view="settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <circle cx="12" cy="12" r="3"></circle>
@@ -2001,41 +2015,6 @@
               </div>
             </div>
 
-            <div class="project-card settings-card" id="settings-maintenance-card" hidden>
-              <div class="project-card-header" style="min-height: 40px;">
-                <div style="min-width: 0;">
-                  <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Maintenance</span></div>
-                  <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">Backups, audit history, and notifications</div>
-                </div>
-              </div>
-              <div class="acct-policy">
-                <div class="form-group">
-                  <label class="form-label" for="setting-backup-keep">Daily database backups to keep</label>
-                  <input type="number" id="setting-backup-keep" class="form-control" min="0" max="365" placeholder="Number of days (0 turns daily backups off)">
-                </div>
-                <div class="form-group">
-                  <label class="form-label" for="setting-audit-retention">Keep audit history for</label>
-                  <input type="number" id="setting-audit-retention" class="form-control" min="0" max="3650" placeholder="Number of days (0 keeps everything)">
-                </div>
-                <div class="form-group">
-                  <label class="form-label" for="setting-notify-webhook">Notification webhook</label>
-                  <input type="url" id="setting-notify-webhook" class="form-control" placeholder="Webhook URL (empty: no notifications)" autocomplete="off">
-                  <small class="acct-muted">Sends new account requests, VPS offline and back online, ports running low, and failed backups. Works with Discord, Slack, or any URL that accepts JSON.</small>
-                </div>
-                <div class="maint-actions">
-                  <button type="button" class="btn btn-primary btn-sm" id="setting-maintenance-save">Save</button>
-                  <button type="button" class="btn btn-secondary btn-sm" id="setting-notify-test">Send test</button>
-                </div>
-                <div class="maint-backups">
-                  <div class="maint-backups-head">
-                    <strong>Control database backups</strong>
-                    <button type="button" class="btn btn-secondary btn-sm" id="setting-backup-now">Back up now</button>
-                  </div>
-                  <div id="setting-backup-list" class="maint-backup-list"></div>
-                </div>
-              </div>
-            </div>
-
             <div class="project-card settings-card settings-card-wide" id="settings-theme-card">
               <div class="project-card-header"
                 style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
@@ -2277,6 +2256,28 @@
         </section>
 
         <!-- ==================== ADMIN: MOVE APPS VIEW ==================== -->
+        <!-- ==================== ADMIN: APP LIMITS VIEW ==================== -->
+        <section id="view-limits" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>App Limits</h1>
+              <p>CPU, memory, disk, and backup limits for every website, service, and database. Empty or 0 means no limit.</p>
+            </div>
+            <div class="view-actions">
+              <input type="text" id="limits-search" class="form-control" placeholder="Search apps, types, or nodes" style="width: 240px;" autocomplete="off">
+            </div>
+          </div>
+          <div class="table-responsive acct-table-wrap">
+            <table class="table acct-table lim-table">
+              <thead>
+                <tr><th>App</th><th>Type</th><th>Node</th><th>CPU (% of a core)</th><th>Memory (MB)</th><th>Disk</th><th>Backups</th><th style="text-align: right;">Action</th></tr>
+              </thead>
+              <tbody id="limits-list-body"></tbody>
+            </table>
+          </div>
+          <p class="acct-muted" style="margin-top:10px">CPU and memory are enforced on Linux servers. A disk limit is checked every few minutes: an app that grows past it is stopped and can't be started until it is under the limit. Backups is the most an app can hold at a time.</p>
+        </section>
+
         <section id="view-moves" class="view-section">
           <div class="view-header">
             <div class="view-title-group">
@@ -2610,6 +2611,8 @@
               from these remote IPs.</span>
           </div>
 
+          <div id="website-limits-slot" class="limits-slot"></div>
+
           <!-- Hidden defaults: auto-deploy disabled by default, slug and deploy dir auto-derived -->
           <input type="checkbox" id="website-auto-deploy" style="display: none;" aria-label="Enable auto deploy">
           <input type="checkbox" id="website-auto-backup" checked style="display: none;"
@@ -2769,6 +2772,8 @@
             <span class="form-hint">Firewall rules (UFW) will be configured to strictly permit connections to this port
               from these remote IPs.</span>
           </div>
+
+          <div id="service-limits-slot" class="limits-slot"></div>
 
           <input type="hidden" id="service-slug">
           <input type="hidden" id="service-deploy-dir">
@@ -3451,6 +3456,8 @@
               remote IPs.</span>
           </div>
 
+          <div id="db-create-limits-slot" class="limits-slot"></div>
+
           <!-- Real-time database provisioning progress track -->
           <div id="db-create-progress-container"
             style="display: none; margin-top: 12px; padding: 12px; background: rgba(238, 241, 247, 0.03); border: 1px solid var(--border); border-radius: var(--radius-md);">
@@ -3734,36 +3741,6 @@
       </div>
       <div class="modal-footer" style="padding: 12px 20px; justify-content: flex-end;" id="update-modal-footer">
         <button class="btn btn-secondary btn-sm" id="update-dismiss-btn" data-close-modal disabled>Close</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- MODAL: APP RESOURCE LIMITS -->
-  <div class="modal-overlay" id="modal-app-limits">
-    <div class="modal-container" style="max-width: 440px;">
-      <div class="modal-header">
-        <div>
-          <h3 class="modal-title" id="limits-modal-title">Resource limits</h3>
-          <div style="font-size: 11.5px; color: var(--text-dim); margin-top: 2px;">0 means no limit. A running app restarts to apply them.</div>
-        </div>
-        <button class="modal-close" data-close-modal>&times;</button>
-      </div>
-      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
-        <div class="form-group" style="margin:0">
-          <label class="form-label" for="limits-cpu">CPU (% of one core)</label>
-          <input type="number" id="limits-cpu" class="form-control" min="0" max="6400" step="10" placeholder="Percent of one core">
-          <span class="form-hint">100 is one full core, 50 is half a core, 200 is two cores.</span>
-        </div>
-        <div class="form-group" style="margin:0">
-          <label class="form-label" for="limits-memory">Memory (MB)</label>
-          <input type="number" id="limits-memory" class="form-control" min="0" step="64" placeholder="Megabytes">
-          <span class="form-hint">The app is stopped by the system if it uses more.</span>
-        </div>
-        <p class="acct-muted" style="margin:0">Limits are enforced on Linux servers. On other systems the app runs without them and its log says so.</p>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" data-close-modal>Cancel</button>
-        <button class="btn btn-primary" id="limits-save">Save limits</button>
       </div>
     </div>
   </div>

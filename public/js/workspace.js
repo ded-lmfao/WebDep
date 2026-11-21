@@ -273,6 +273,7 @@ function updateBreadcrumbs() {
       'admin-audit': 'Admin Panel › Audit',
       ips: 'Admin Panel › IP Addresses',
       moves: 'Admin Panel › Move Apps',
+      limits: 'Admin Panel › App Limits',
     };
     secEl.textContent = globalLabels[state.currentView] || state.currentView;
   }
@@ -857,6 +858,7 @@ function renderCurrentView() {
     case 'modules': if (window.loadModulesView) void window.loadModulesView(); break;
     case 'ips': if (window.loadIpsView) void window.loadIpsView(); break;
     case 'moves': if (window.loadMovesView) void window.loadMovesView(); break;
+    case 'limits': if (window.loadLimitsView) void window.loadLimitsView(); break;
     case 'account':
     case 'users':
     case 'requests':

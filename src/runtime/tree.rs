@@ -308,6 +308,8 @@ pub(crate) async fn kill_project_processes_pure(
         bind_ip: String::new(),
         cpu_limit: 0,
         memory_limit_mb: 0,
+        disk_limit_mb: 0,
+        backup_limit: 0,
     };
     let container = super::container::ensure_container_with_port(&fake_proj, port.unwrap_or(3000));
     let mut pids_to_kill: HashSet<u32> = HashSet::new();

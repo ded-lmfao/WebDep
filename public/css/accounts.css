@@ -255,3 +255,17 @@
 .ipx-addr { display: inline-flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); }
 .ipx-addr-ip { font-family: var(--font-mono, monospace); font-size: 12.5px; }
 .ipx-ip-select { min-width: 130px; height: 30px; padding: 2px 8px; font-size: 12.5px; }
+
+/* Resource limit fields */
+.limits-slot { margin-top: 4px; }
+.limits-fields { border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); padding: 8px 12px; margin-bottom: 12px; }
+.limits-fields summary { cursor: pointer; font-size: 13px; font-weight: 500; }
+.limits-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+.limits-grid .form-group { margin-bottom: 0; }
+.limits-disk { display: flex; gap: 6px; }
+.limits-disk .form-control:first-child { flex: 1; min-width: 0; }
+.limits-disk select { width: 72px; flex: none; }
+.lim-table .lim-input { width: 110px; height: 30px; padding: 2px 8px; font-size: 12.5px; }
+.lim-table .limits-disk .lim-input { width: 90px; }
+.lim-table .limits-disk select { height: 30px; padding: 2px 6px; font-size: 12.5px; width: 64px; }
+@media (max-width: 560px) { .limits-grid { grid-template-columns: 1fr; } }

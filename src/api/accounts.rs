@@ -868,4 +868,82 @@ mod tests {
         assert_eq!(app["cpu_limit"], 150);
         assert_eq!(app["memory_limit_mb"], 512);
     }
+
+    #[tokio::test]
+    async fn app_limits_creation_admin_tab_and_guards() {
+        let state = crate::api::common::tests_state_helper().await;
+        let router = crate::api::create_router(state.clone());
+        let admin = state.auth.create_session(1).await.unwrap();
+        let admin_s = Some((admin.id.as_str(), admin.csrf_token.as_str()));
+        let (_, u) = call(&router, Method::POST, "/api/users", admin_s,
+            json!({"username": "limiter", "password": "LimiterPass123", "mustChangePassword": false, "panelPowers": ["create_websites"]})).await;
+        let sess = state.auth.create_session(u["id"].as_i64().unwrap()).await.unwrap();
+        let s = Some((sess.id.as_str(), sess.csrf_token.as_str()));
+
+        // Limits chosen at creation are stored; bad values are refused; empty means none.
+        let (st, _) = call(&router, Method::POST, "/api/projects", s,
+            json!({"name": "Bad", "slug": "limit-bad", "repo_url": "", "cpu_limit": -5})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, plain) = call(&router, Method::POST, "/api/projects", s,
+            json!({"name": "Plain", "slug": "limit-plain", "repo_url": ""})).await;
+        assert_eq!(st, StatusCode::OK, "{plain}");
+        assert_eq!((plain["cpu_limit"].as_i64(), plain["disk_limit_mb"].as_i64(), plain["backup_limit"].as_i64()), (Some(0), Some(0), Some(0)));
+        let (st, site) = call(&router, Method::POST, "/api/projects", s,
+            json!({"name": "Capped", "slug": "limit-capped", "repo_url": "", "cpu_limit": 50, "memory_limit_mb": 256, "disk_limit_mb": 1, "backup_limit": 2})).await;
+        assert_eq!(st, StatusCode::OK, "{site}");
+        let id = site["id"].as_i64().unwrap();
+        assert_eq!((site["cpu_limit"].as_i64(), site["memory_limit_mb"].as_i64(), site["disk_limit_mb"].as_i64(), site["backup_limit"].as_i64()),
+            (Some(50), Some(256), Some(1), Some(2)));
+
+        // Only admins change limits afterwards, and only admins see the App Limits list.
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{id}/limits"), s, json!({"cpu": 1})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = call(&router, Method::GET, "/api/limits", s, json!({})).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, list) = call(&router, Method::GET, "/api/limits", admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        let row = list["limits"].as_array().unwrap().iter().find(|r| r["name"] == "Capped").expect("listed");
+        assert_eq!((row["kind"].as_str(), row["cpu"].as_i64(), row["diskMb"].as_i64(), row["backups"].as_i64()), (Some("website"), Some(50), Some(1), Some(2)));
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{id}/limits"), admin_s, json!({"backups": -1})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, app) = call(&router, Method::PUT, &format!("/api/projects/{id}/limits"), admin_s,
+            json!({"cpu": 0, "memoryMb": 0, "diskMb": 1, "backups": 2})).await;
+        assert_eq!(st, StatusCode::OK, "{app}");
+        assert_eq!(app["cpu_limit"], 0, "0 clears a limit");
+
+        // Backup limit: at the limit, a new backup is refused.
+        for _ in 0..2 {
+            sqlx::query("INSERT INTO backups(project_id, kind, path, size_bytes, note, created_at) VALUES($1, 'full-snapshot', '', 0, 'n', 0)")
+                .bind(id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        let (st, _) = call(&router, Method::POST, &format!("/api/projects/{id}/backup"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        // Disk limit: over it, the app can't be started.
+        let dir = std::path::PathBuf::from(site["deploy_dir"].as_str().unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("big.bin"), vec![0u8; 2 * 1024 * 1024]).unwrap();
+        let (st, _) = call(&router, Method::POST, &format!("/api/projects/{id}/start"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Databases have limits too.
+        let db_id: i64 = sqlx::query_scalar(
+            "INSERT INTO databases(name, engine, db_name, db_user, db_password, port, is_superuser, access_mode, allowed_ips, domain, status, data_dir, created_at, updated_at)
+             VALUES('Limited DB', 'postgres', 'ldb', 'lu', 'x', 5999, FALSE, 'local', '', '', 'stopped', '', 0, 0) RETURNING id",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        let (st, res) = call(&router, Method::PUT, &format!("/api/databases/{db_id}/limits"), admin_s,
+            json!({"cpu": 100, "memoryMb": 512, "diskMb": 4096})).await;
+        assert_eq!(st, StatusCode::OK, "{res}");
+        assert_eq!(res["appliesOnRestart"], true);
+        let (_, list) = call(&router, Method::GET, "/api/limits", admin_s, json!({})).await;
+        let row = list["limits"].as_array().unwrap().iter().find(|r| r["name"] == "Limited DB").expect("db listed");
+        assert_eq!((row["kind"].as_str(), row["diskMb"].as_i64()), (Some("database"), Some(4096)));
+    }
 }

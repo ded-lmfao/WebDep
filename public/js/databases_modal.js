@@ -4,11 +4,13 @@
  */
 
 import { state, showPromptDialog, copyTextToClipboard, setBtnLoading } from './state.js';
+import { readLimitFields, resetLimitFields } from './limits_fields.js';
 import { api, toast } from './api.js';
 
 export function openCreateDatabaseModal() {
   const modal = document.getElementById('modal-create-database');
   if (!modal) return;
+  resetLimitFields('db-create');
 
   const getPort = window.getNextAvailablePort || ((p) => p);
   const portInput = document.getElementById('db-create-port');
@@ -167,6 +169,7 @@ export async function handleCreateDatabaseSubmit(e) {
         accessMode: access_mode,
         allowedIps: allowed_ips,
         domain: domain || undefined,
+        limits: readLimitFields('db-create'),
       },
     });
 

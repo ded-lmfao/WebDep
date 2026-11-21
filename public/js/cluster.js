@@ -1121,13 +1121,6 @@ function projectById(id) {
   return (state.projects || []).find((p) => Number(p.id) === Number(id)) || null;
 }
 
-function limitsText(p) {
-  if (!p) return '';
-  const parts = [];
-  if (Number(p.cpu_limit) > 0) parts.push(`CPU ${p.cpu_limit}%`);
-  if (Number(p.memory_limit_mb) > 0) parts.push(`${p.memory_limit_mb} MB`);
-  return parts.join(' &middot; ');
-}
 
 function renderIpAddresses(nid) {
   const list = ipsAddrs.get(nid) || [];
@@ -1158,38 +1151,6 @@ function appIpSelect(appId, nid) {
   return `<select class="form-control ipx-ip-select" data-app="${appId}" aria-label="IP the app is served on">${opts.join('')}</select>`;
 }
 
-let limitsAppId = null;
-
-function openLimitsModal(appId) {
-  const p = projectById(appId);
-  limitsAppId = appId;
-  document.getElementById('limits-modal-title').textContent = p ? `Resource limits: ${p.name}` : 'Resource limits';
-  document.getElementById('limits-cpu').value = p ? Number(p.cpu_limit || 0) : 0;
-  document.getElementById('limits-memory').value = p ? Number(p.memory_limit_mb || 0) : 0;
-  openModal('modal-app-limits');
-}
-
-document.getElementById('limits-save')?.addEventListener('click', async (e) => {
-  if (!limitsAppId) return;
-  const btn = e.currentTarget;
-  btn.disabled = true;
-  try {
-    await api(`/api/projects/${limitsAppId}/limits`, {
-      method: 'PUT',
-      body: {
-        cpu: Number(document.getElementById('limits-cpu').value || 0),
-        memoryMb: Number(document.getElementById('limits-memory').value || 0),
-      },
-    });
-    closeModal('modal-app-limits');
-    toast('Limits saved.', 'success');
-    await loadIpsView(true);
-  } catch (err) {
-    toast(err.message, 'error');
-  } finally {
-    btn.disabled = false;
-  }
-});
 
 /** in-use | extra | free | closed */
 function portState(p) {
@@ -1275,7 +1236,6 @@ function renderPortMap(ports) {
 function appActionButtons(appId, running, others) {
   return `<button class="btn btn-secondary btn-sm" data-ipx-act="app-port" data-app="${appId}">Change port</button>
     <button class="btn btn-secondary btn-sm" data-ipx-act="app-extra" data-app="${appId}">Extra ports</button>
-    <button class="btn btn-secondary btn-sm" data-ipx-act="app-limits" data-app="${appId}">Limits</button>
     <button class="btn btn-sm ${running ? 'ipx-btn-stop' : 'ipx-btn-start'}" data-ipx-act="${running ? 'app-stop' : 'app-start'}" data-app="${appId}">${running ? 'Stop' : 'Start'}</button>
     ${others.length ? `<select class="form-control ipx-move" data-app="${appId}" aria-label="Move to another node">
       <option value="">Move to node</option>${others.map((t) => `<option value="${t.id}">${escapeHtml(nodeLabel(t))}</option>`).join('')}
@@ -1357,7 +1317,7 @@ function renderAppsTable(ports, others) {
     <div class="table-responsive"><table class="table acct-table">
       <thead><tr><th>App</th><th>Port</th><th>IP</th><th>Extra ports</th><th>Status</th><th style="text-align:right">Actions</th></tr></thead>
       <tbody>${list.map((a) => `<tr>
-        <td><div class="acct-person-name">${escapeHtml(a.name)}</div><div class="acct-person-sub">${kindLabel(a.kind)}${a.kind !== 'database' && limitsText(projectById(a.id)) ? ` &middot; ${limitsText(projectById(a.id))}` : ''}</div></td>
+        <td><div class="acct-person-name">${escapeHtml(a.name)}</div><div class="acct-person-sub">${kindLabel(a.kind)}</div></td>
         <td>${a.main ? `<button type="button" class="ipx-port-link" data-ipx-jump="${a.main}">${a.main}</button>` : '-'}</td>
         <td>${a.kind !== 'database' ? appIpSelect(a.id, Number(ipsUi.nodeId)) : '<span class="acct-muted">-</span>'}</td>
         <td>${a.extra.length ? a.extra.map((x) => `<button type="button" class="ipx-port-link" data-ipx-jump="${x}">${x}</button>`).join(' ') : '<span class="acct-muted">None</span>'}</td>
@@ -1577,9 +1537,6 @@ async function runIpxAction(act, el) {
       toast('Extra ports saved. Restart the app to use them.', 'success');
       return loadIpsView(true);
     }
-    case 'app-limits':
-      openLimitsModal(appId);
-      return undefined;
     case 'ip-add': {
       const ip = (document.getElementById(`ip-add-${nid}`)?.value || '').trim();
       const label = (document.getElementById(`ip-label-${nid}`)?.value || '').trim();

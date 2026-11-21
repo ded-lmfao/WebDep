@@ -14,7 +14,6 @@
 //! - `POST   /api/cluster/nodes/:id/ips`             `{ ip, label }` add an IP address
 //! - `DELETE /api/cluster/nodes/:id/ips/:ip_id`      remove an IP no app uses
 //! - `PUT    /api/projects/:id/ip`                   `{ ip }` serve an app on one IP ("" = every IP)
-//! - `PUT    /api/projects/:id/limits`               `{ cpu, memoryMb }` CPU (% of a core) and memory limits
 
 use axum::{
     extract::{Path as AxPath, State},
@@ -448,58 +447,6 @@ pub(crate) async fn set_app_ip_handler(
     super::projects::propagate_project_change(&state, Some(&prev), &updated).await?;
     let shown = if ip.is_empty() { "every IP address".to_string() } else { ip.clone() };
     log_audit_project(&state, Some(id), &actor.username, "app.ip", Some(&updated.name), Some(&format!("Now served on {shown}"))).await;
-    state.cache.invalidate_all();
-    Ok(Json(updated))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AppLimitsPayload {
-    #[serde(default)]
-    cpu: i32,
-    #[serde(default)]
-    memory_mb: i32,
-}
-
-/// Sets an app's CPU and memory limits; a running app restarts so they take effect.
-pub(crate) async fn set_app_limits_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxPath(id): AxPath<i64>,
-    Json(p): Json<AppLimitsPayload>,
-) -> Result<Json<crate::projects::Project>, ApiError> {
-    let actor = verify_admin(&state, &headers).await?;
-    crate::runtime::limits::validate(p.cpu, p.memory_mb).map_err(bad)?;
-    let prev = load_app(&state, id).await?;
-    if prev.cpu_limit == p.cpu && prev.memory_limit_mb == p.memory_mb {
-        return Ok(Json(prev));
-    }
-    sqlx::query("UPDATE projects SET cpu_limit = $1, memory_limit_mb = $2 WHERE id = $3")
-        .bind(p.cpu)
-        .bind(p.memory_mb)
-        .bind(id)
-        .execute(&state.db)
-        .await
-        .map_err(internal)?;
-    let updated = load_app(&state, id).await?;
-    super::projects::propagate_project_change(&state, Some(&prev), &updated).await?;
-    if prev.app_status == "running" || prev.app_status == "maintenance" {
-        super::projects::restart_project_internal(&state, &actor, &updated).await?;
-    }
-    let describe = |cpu: i32, mem: i32| {
-        let c = if cpu > 0 { format!("CPU {cpu}%") } else { "CPU unlimited".into() };
-        let m = if mem > 0 { format!("memory {mem} MB") } else { "memory unlimited".into() };
-        format!("{c}, {m}")
-    };
-    log_audit_project(
-        &state,
-        Some(id),
-        &actor.username,
-        "app.limits",
-        Some(&updated.name),
-        Some(&format!("Limits: {}", describe(p.cpu, p.memory_mb))),
-    )
-    .await;
     state.cache.invalidate_all();
     Ok(Json(updated))
 }

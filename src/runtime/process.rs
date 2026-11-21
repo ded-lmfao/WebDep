@@ -149,7 +149,7 @@ pub async fn spawn_project_process_pure(
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(false);
 
-    let limits_procs = match crate::runtime::limits::prepare(p.id, p.cpu_limit, p.memory_limit_mb) {
+    let limits_procs = match crate::runtime::limits::prepare(&format!("app-{}", p.id), p.cpu_limit, p.memory_limit_mb) {
         Ok(path) => path,
         Err(e) => {
             log_cb("system", "warn", &format!("Resource limits not applied: {e}. The app runs without limits."));

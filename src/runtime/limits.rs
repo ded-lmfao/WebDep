@@ -40,10 +40,10 @@ pub fn memory_max_value(memory_mb: i32) -> String {
     }
 }
 
-/// Creates (or updates) the app's cgroup and returns the path of its `cgroup.procs`, which the
+/// Creates (or updates) the cgroup `webdep/<name>` (`app-<id>` or `db-<id>`) and returns the path of its `cgroup.procs`, which the
 /// child writes "0" into to join. `Ok(None)` when the app has no limits.
 #[cfg(target_os = "linux")]
-pub fn prepare(project_id: i64, cpu_percent: i32, memory_mb: i32) -> Result<Option<std::ffi::CString>, String> {
+pub fn prepare(name: &str, cpu_percent: i32, memory_mb: i32) -> Result<Option<std::ffi::CString>, String> {
     use std::fs;
     use std::path::Path;
 
@@ -60,7 +60,7 @@ pub fn prepare(project_id: i64, cpu_percent: i32, memory_mb: i32) -> Result<Opti
     let _ = fs::write(root.join("cgroup.subtree_control"), "+cpu +memory");
     let _ = fs::write(parent.join("cgroup.subtree_control"), "+cpu +memory");
 
-    let dir = parent.join(format!("app-{project_id}"));
+    let dir = parent.join(name);
     fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
     fs::write(dir.join("cpu.max"), cpu_max_value(cpu_percent)).map_err(|e| format!("can't set the CPU limit: {e}"))?;
     fs::write(dir.join("memory.max"), memory_max_value(memory_mb)).map_err(|e| format!("can't set the memory limit: {e}"))?;
@@ -71,7 +71,7 @@ pub fn prepare(project_id: i64, cpu_percent: i32, memory_mb: i32) -> Result<Opti
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn prepare(_project_id: i64, cpu_percent: i32, memory_mb: i32) -> Result<Option<std::ffi::CString>, String> {
+pub fn prepare(_name: &str, cpu_percent: i32, memory_mb: i32) -> Result<Option<std::ffi::CString>, String> {
     if cpu_percent <= 0 && memory_mb <= 0 {
         Ok(None)
     } else {
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn apps_without_limits_need_no_cgroup() {
-        assert_eq!(prepare(1, 0, 0).unwrap(), None);
+        assert_eq!(prepare("app-1", 0, 0).unwrap(), None);
     }
 
     /// Real cgroup round trip; needs root on a cgroups v2 host, otherwise it is skipped.
@@ -133,7 +133,7 @@ mod tests {
             return;
         }
         let id = 990_000 + i64::from(std::process::id() % 10_000);
-        let procs = prepare(id, 50, 64).expect("prepare").expect("limits set");
+        let procs = prepare(&format!("app-{id}"), 50, 64).expect("prepare").expect("limits set");
         let dir = Path::new("/sys/fs/cgroup/webdep").join(format!("app-{id}"));
         assert_eq!(std::fs::read_to_string(dir.join("cpu.max")).unwrap().trim(), "50000 100000");
         assert_eq!(std::fs::read_to_string(dir.join("memory.max")).unwrap().trim(), "67108864");

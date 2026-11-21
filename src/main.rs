@@ -9,6 +9,7 @@ mod db;
 mod deployer;
 mod git;
 mod logs;
+mod app_limits;
 mod maintenance;
 mod monitor;
 mod monitor_net;
@@ -418,6 +419,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         updater,
         cluster,
     };
+
+    {
+        // Disk limits are soft: every few minutes, stop local apps that grew past theirs.
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                crate::api::limits::enforce_disk_limits(&state).await;
+            }
+        });
+    }
 
     let app = create_router(state);
 

@@ -711,6 +711,58 @@ pub(crate) async fn log_audit_project(
     .bind(detail)
     .execute(&state.db)
     .await;
+    if let Some(pid) = project_id {
+        trim_app_audit(&state.db, pid).await;
+    }
+}
+
+/// Keeps only the newest `APP_AUDIT_CAP` audit entries for one website or service; older ones
+/// are deleted as new ones arrive. Panel-wide entries are not touched.
+pub(crate) const APP_AUDIT_CAP: i64 = 50;
+
+pub(crate) async fn trim_app_audit(db: &crate::db::DbPool, project_id: i64) {
+    let _ = sqlx::query(
+        "DELETE FROM audit WHERE project_id = $1 AND id NOT IN (
+            SELECT id FROM audit WHERE project_id = $1 ORDER BY id DESC LIMIT $2)",
+    )
+    .bind(project_id)
+    .bind(APP_AUDIT_CAP)
+    .execute(db)
+    .await;
+}
+
+#[cfg(test)]
+mod audit_cap_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn app_audit_keeps_newest_fifty() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let pid: i64 = sqlx::query_scalar(
+            "INSERT INTO projects(name, slug, repo_url, deploy_dir, created_at, updated_at)
+             VALUES('cap', 'cap-app', 'local', '/tmp/cap', 0, 0) RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        for i in 0..55 {
+            sqlx::query("INSERT INTO audit(project_id, ts, actor, action) VALUES($2, $1, 'a', 'x')")
+                .bind(i as i64)
+                .bind(pid)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO audit(ts, actor, action) VALUES(0, 'a', 'panel')")
+            .execute(&db)
+            .await
+            .unwrap();
+        trim_app_audit(&db, pid).await;
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit WHERE project_id = $1").bind(pid).fetch_one(&db).await.unwrap();
+        assert_eq!(kept, 50);
+        let panel: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit WHERE project_id IS NULL").fetch_one(&db).await.unwrap();
+        assert_eq!(panel, 1, "panel-wide entries are not capped");
+    }
 }
 
 

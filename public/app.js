@@ -29,6 +29,7 @@ import './js/files.js';
 import './js/logs.js';
 import './js/cluster.js';
 import './js/modules.js';
+import './js/app_limits.js';
 import './js/sidebar.js';
 import './js/table_cards.js';
 import './js/accounts.js';

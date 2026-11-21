@@ -192,6 +192,9 @@ pub(crate) async fn create_project_handler(
     if p.name.trim().is_empty() || p.slug.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Name and slug are required".into()));
     }
+    crate::app_limits::AppLimits { cpu: p.cpu_limit, memory_mb: p.memory_limit_mb, disk_mb: p.disk_limit_mb, backups: p.backup_limit }
+        .validate()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if p.repo_url.trim().is_empty() {
         p.repo_url = "local".to_string();
     }
@@ -589,6 +592,7 @@ pub(crate) async fn start_project_with_audit(
         .await;
         Ok(pid)
     } else {
+        super::limits::ensure_project_under_disk_limit(p)?;
         let env = state.projects.get_env_map(p.id).await;
         state.runtime.start_project(p, env, None).await.map_err(|e| {
             if e == "NOT_DEPLOYED_YET" {

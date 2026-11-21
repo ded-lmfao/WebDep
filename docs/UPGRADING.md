@@ -57,14 +57,13 @@ doesn't read.
   the real client address comes from `X-Forwarded-For`; from anywhere else the header is ignored.
 - **Port ranges**: nodes can be given a port range in **Admin Panel › IP Addresses**. Nodes
   without one keep the old automatic ports.
-- **Daily backups** (Platform Settings › Maintenance): the control database is backed up once a
-  day to `data/backups/control-db/daily-<time>.dump` (seven kept by default; 0 turns this off).
-  **Back up now** takes a manual backup, and any backup can be downloaded from the same card.
+- **Daily backups**: the control database is backed up once a day to
+  `data/backups/control-db/daily-<time>.dump` (seven kept by default).
 - **Audit history** is kept for 365 days by default (0 keeps everything). The Audit page loads
   200 entries at a time, filters by user or text on the server, and exports to CSV.
-- **Notifications**: set a webhook URL (Discord, Slack, or anything that accepts JSON) to hear
-  about new account requests, a VPS going offline or coming back, a node running low on free
-  ports, and failed backups. **Send test** checks the URL.
+- **Notifications**: set the `notify_webhook_url` setting (Discord, Slack, or anything that
+  accepts JSON) to hear about new account requests, a VPS going offline or coming back, a node
+  running low on free ports, and apps stopped for going over their disk limit.
 - **Creating apps is a permission**: give a user *Create websites*, *Create services*, or
   *Create databases* in **Users › Edit**. They own every app they create (all permissions on
   it, including delete). Users who could create apps before keep that ability.
@@ -72,7 +71,13 @@ doesn't read.
   choose one for each website or service. Caddy then serves its domains on that IP only; apps
   without a choice are served on every IP, as before. Moving an app to another VPS clears the
   choice. An IP can only be removed once no app uses it.
-- **Resource limits** (**IP Addresses › Limits** on an app): cap CPU (100% = one core) and
-  memory per app. Limits are enforced with cgroups v2 on Linux and need WebDep to run as root
-  (or with write access to `/sys/fs/cgroup`). Elsewhere the app runs without limits and its log
-  says why. A running app restarts when its limits change.
+- **Resource limits** (set when creating a website, service, or database; changed later by
+  admins in **Admin Panel › App Limits**): CPU (100% = one core), memory, disk, and number of
+  backups. Empty or 0 means no limit. CPU and memory use cgroups v2 on Linux and need WebDep to
+  run as root (or with write access to `/sys/fs/cgroup`); elsewhere the app runs without them and
+  its log says why. Disk is a soft limit checked every five minutes on this server: an app over
+  it is stopped and can't be started until it is under the limit or an admin raises it (apps on
+  other nodes are not measured yet). The backup limit refuses a new backup once the app holds
+  that many; databases have no backups.
+- **Audit history per app** keeps the newest 50 entries for each website or service; older ones
+  are deleted as new ones arrive. Panel-wide entries keep the days-based retention.
