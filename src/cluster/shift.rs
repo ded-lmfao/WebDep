@@ -301,6 +301,11 @@ pub async fn start_project_shift(
 
     // STEP 1: Target Preflight & Port Allocation
     let used_ports = state.cluster.used_ports_on_node(target_node_id).await;
+    // A target with a port range gets its next open free port; otherwise keep the app's port.
+    let preferred_port = match crate::cluster::ports::next_free_port(&state.db, target_node_id, &[]).await {
+        Ok(Some(p)) if crate::cluster::ports::has_pool(&state.db, target_node_id).await => Some(p),
+        _ => proj.assigned_port.or(proj.port),
+    };
     let (target_port, target_deploy_dir) = if !to_node.is_local {
         let res = match state
             .cluster
@@ -309,7 +314,7 @@ pub async fn start_project_shift(
                 "shift.preflight",
                 json!({
                     "project": &proj,
-                    "preferredPort": proj.assigned_port.or(proj.port),
+                    "preferredPort": preferred_port,
                     "usedPorts": &used_ports,
                 }),
                 Duration::from_secs(20),
@@ -334,7 +339,7 @@ pub async fn start_project_shift(
             });
         (port, dir)
     } else {
-        let port = match allocate_free_port_on_node(proj.assigned_port.or(proj.port), &used_ports) {
+        let port = match allocate_free_port_on_node(preferred_port, &used_ports) {
             Ok(p) => p,
             Err(e) => {
                 fail_migration(state, migration_id, &e).await;

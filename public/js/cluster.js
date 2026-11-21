@@ -412,8 +412,20 @@ export async function generateNodeEnrollToken() {
   const btn = document.getElementById('generate-node-token-btn');
 
   if (!label) {
-    toast('Please enter a VPS / Node Name (e.g. VPS-2)', 'warning');
+    toast('Enter a node name.', 'warning');
     document.getElementById('add-node-label')?.focus();
+    return;
+  }
+  const portMinRaw = (document.getElementById('add-node-port-min')?.value || '').trim();
+  const portMaxRaw = (document.getElementById('add-node-port-max')?.value || '').trim();
+  if (Boolean(portMinRaw) !== Boolean(portMaxRaw)) {
+    toast('Enter both the lowest and the highest port, or leave both empty.', 'warning');
+    return;
+  }
+  const portMin = portMinRaw ? Number(portMinRaw) : undefined;
+  const portMax = portMaxRaw ? Number(portMaxRaw) : undefined;
+  if (portMin !== undefined && (portMin < 1024 || portMax > 65535 || portMax < portMin)) {
+    toast('Use ports between 1024 and 65535, lowest first.', 'warning');
     return;
   }
 
@@ -427,6 +439,8 @@ export async function generateNodeEnrollToken() {
         ttlSeconds,
         coreUrl: coreUrl || undefined,
         targetPublicIp: targetPublicIp || undefined,
+        portMin,
+        portMax,
       },
     });
     const freshEl = document.getElementById('add-node-fresh-cmd');
@@ -1052,68 +1066,235 @@ function appPortText(p) {
   return p.port || p.assigned_port || '';
 }
 
-export async function loadIpsView() {
+const ipsPools = new Map();
+const ipsFilter = new Map();
+const PORT_ROWS_LIMIT = 120;
+
+async function loadNodePool(nodeId) {
+  try {
+    const res = await api(`/api/cluster/nodes/${nodeId}/ports`, { noCache: true });
+    ipsPools.set(Number(nodeId), res);
+    if (res.firewallNote) toast(res.firewallNote, 'warning');
+  } catch (err) {
+    ipsPools.set(Number(nodeId), { error: err.message });
+  }
+}
+
+function portUserCell(u) {
+  if (!u) return '<span class="acct-muted">Free</span>';
+  const kind = u.kind === 'database' ? 'Database' : u.kind === 'service' ? 'Service' : 'Website';
+  return `<div class="acct-person-name">${escapeHtml(u.name)}${u.role === 'extra' ? ' <span class="acct-muted">(extra port)</span>' : ''}</div>
+    <div class="acct-person-sub">${kind} &middot; ${u.running ? 'Running' : 'Stopped'}</div>`;
+}
+
+function portActions(nodeId, row, otherOnline) {
+  const u = row.usedBy;
+  const btn = (label, action, extra = '') => `<button class="btn btn-secondary btn-sm" data-port-action="${action}" data-node="${nodeId}" data-port="${row.port}" ${extra}>${label}</button>`;
+  if (u && u.role === 'main' && u.kind !== 'database') {
+    return `${btn('Change port', 'app-port', `data-app="${u.id}"`)}
+      ${btn('Extra ports', 'app-extra', `data-app="${u.id}"`)}
+      ${u.running ? btn('Stop', 'app-stop', `data-app="${u.id}"`) : btn('Start', 'app-start', `data-app="${u.id}"`)}
+      ${otherOnline.length ? `<select class="form-control ip-move-select" data-app="${u.id}" aria-label="Move to another node">
+          <option value="">Move to node</option>
+          ${otherOnline.map((t) => `<option value="${t.id}">${escapeHtml(nodeLabel(t))}</option>`).join('')}
+        </select>` : ''}`;
+  }
+  if (u) return '<span class="acct-muted">In use</span>';
+  if (!row.inPool) return '';
+  return row.open
+    ? btn('Close', 'close')
+    : `${btn('Open', 'open')}${row.manual ? btn('Remove', 'remove') : ''}`;
+}
+
+function renderNodePorts(n, otherOnline) {
+  const nid = Number(n.id);
+  const data = ipsPools.get(nid);
+  if (!data) return '<p class="acct-muted">Loading ports</p>';
+  if (data.error) return `<p class="acct-muted">${escapeHtml(data.error)}</p>`;
+  const pool = data.pool || { ports: [] };
+  const q = (document.getElementById('ips-search')?.value || '').trim().toLowerCase();
+  const filter = ipsFilter.get(nid) || 'used';
+  const ports = pool.ports || [];
+  const counts = {
+    used: ports.filter((p) => p.usedBy).length,
+    free: ports.filter((p) => !p.usedBy && p.open && p.inPool).length,
+    closed: ports.filter((p) => !p.open).length,
+  };
+  const shown = ports.filter((p) => {
+    if (q && !String(p.port).includes(q) && !(p.usedBy && p.usedBy.name.toLowerCase().includes(q))) return false;
+    if (filter === 'used') return Boolean(p.usedBy);
+    if (filter === 'free') return !p.usedBy && p.open && p.inPool;
+    if (filter === 'closed') return !p.open;
+    return true;
+  });
+  const rows = shown.slice(0, PORT_ROWS_LIMIT).map((p) => `<tr>
+      <td><code class="ip-port">${p.port}</code>${p.manual ? ' <span class="acct-muted">added</span>' : ''}${!p.inPool ? ' <span class="acct-muted" title="Outside the port range">outside range</span>' : ''}</td>
+      <td>${p.open ? '<span class="badge badge-success">Open</span>' : '<span class="badge badge-danger">Closed</span>'}</td>
+      <td>${portUserCell(p.usedBy)}</td>
+      <td><div class="acct-actions" style="justify-content:flex-end">${portActions(nid, p, otherOnline)}</div></td>
+    </tr>`).join('');
+  const more = shown.length > PORT_ROWS_LIMIT ? `<p class="acct-muted" style="margin:8px 0 0">Showing ${PORT_ROWS_LIMIT} of ${shown.length}. Search for a port to find the rest.</p>` : '';
+  const pill = (key, label) => `<button class="pill ${filter === key ? 'active' : ''}" data-port-filter="${key}" data-node="${nid}">${label}</button>`;
+  return `
+    <div class="ip-pool-controls">
+      <div class="ip-pool-range">
+        <span class="acct-muted">Port range</span>
+        <input type="number" class="form-control" id="pool-min-${nid}" min="1024" max="65535" value="${pool.portMin ?? ''}" placeholder="Lowest port">
+        <span class="acct-muted">to</span>
+        <input type="number" class="form-control" id="pool-max-${nid}" min="1024" max="65535" value="${pool.portMax ?? ''}" placeholder="Highest port">
+        <button class="btn btn-secondary btn-sm" data-port-action="range" data-node="${nid}">Save range</button>
+      </div>
+      <div class="ip-pool-range">
+        <input type="text" class="form-control" id="pool-add-${nid}" placeholder="Ports or ranges to add" style="width:200px">
+        <button class="btn btn-secondary btn-sm" data-port-action="add" data-node="${nid}">Add ports</button>
+        ${data.firewallManaged ? `<button class="btn btn-secondary btn-sm" data-port-action="sync" data-node="${nid}" title="Apply open and closed ports to this node's firewall again">Sync firewall</button>` : '<span class="acct-muted" title="WEBDEP_MANAGE_FIREWALL is off">Firewall managed outside the panel</span>'}
+      </div>
+    </div>
+    <div class="filter-pills ip-pool-filters">
+      ${pill('used', `In use (${counts.used})`)}${pill('free', `Free (${counts.free})`)}${pill('closed', `Closed (${counts.closed})`)}${pill('all', `All (${ports.length})`)}
+    </div>
+    ${rows ? `<div class="table-responsive"><table class="table acct-table"><thead><tr><th>Port</th><th>State</th><th>Used by</th><th style="text-align:right">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>${more}`
+      : `<p class="acct-muted" style="margin:6px 0 0">${pool.portMin ? 'Nothing here.' : 'No port range yet. Set one to open ports and hand them out in order.'}</p>`}`;
+}
+
+export async function loadIpsView(reloadPools = true) {
   const body = document.getElementById('ips-view-body');
   if (!body) return;
-  await refreshInfraData();
+  if (reloadPools) {
+    await refreshInfraData();
+    await Promise.all((state.nodes || []).map((n) => loadNodePool(n.id)));
+  }
   const nodes = state.nodes || [];
   if (!nodes.length) {
     body.innerHTML = '<p class="acct-muted">No nodes yet.</p>';
     return;
   }
   const online = nodes.filter((n) => n.status === 'online');
-  const q = (document.getElementById('ips-search')?.value || '').trim().toLowerCase();
-
   body.innerHTML = nodes.map((n) => {
-    const nid = Number(n.id);
-    const ip = nodeIpLabel(n);
-    const apps = (state.projects || []).filter((p) => appNodeId(p) === nid);
-    const dbs = (state.databases || []).filter((d) => appNodeId(d) === nid);
-    const matches = (name) => !q || name.toLowerCase().includes(q) || ip.toLowerCase().includes(q);
-    const appRows = apps.filter((p) => matches(p.name)).map((p) => {
-      const targets = online.filter((t) => Number(t.id) !== nid);
-      const domains = Array.isArray(p.domains) && p.domains.length ? p.domains.join(', ') : '';
-      return `<tr>
-        <td><div class="acct-person-name">${escapeHtml(p.name)}</div><div class="acct-person-sub">${domains ? escapeHtml(domains) : 'No domain'}</div></td>
-        <td><span class="badge badge-neutral">${p.project_kind === 'service' ? 'Service' : 'Website'}</span></td>
-        <td><code>${escapeHtml(ip)}${appPortText(p) ? `:${appPortText(p)}` : ''}</code></td>
-        <td>${targets.length ? `<div class="acct-actions" style="justify-content:flex-start">
-            <select class="form-control ip-change-select" data-ip-app="${p.id}" style="height:30px; max-width:230px; font-size:12.5px;">
-              <option value="">Change IP</option>
-              ${targets.map((t) => `<option value="${t.id}">${escapeHtml(nodeIpLabel(t))} (${escapeHtml(nodeLabel(t))})</option>`).join('')}
-            </select></div>` : '<span class="acct-muted">No other online IP</span>'}</td>
-      </tr>`;
-    }).join('');
-    const dbRows = dbs.filter((d) => matches(d.name)).map((d) => `<tr>
-        <td><div class="acct-person-name">${escapeHtml(d.name)}</div><div class="acct-person-sub">PostgreSQL</div></td>
-        <td><span class="badge badge-neutral">Database</span></td>
-        <td><code>${escapeHtml(ip)}${d.port ? `:${d.port}` : ''}</code></td>
-        <td><span class="acct-muted" title="Databases stay on the node they were created on">Fixed to this node</span></td>
-      </tr>`).join('');
-    const rows = appRows + dbRows;
-    if (q && !rows) return '';
-    return `<div class="project-card ip-node-card">
+    const others = online.filter((t) => Number(t.id) !== Number(n.id));
+    return `<div class="project-card ip-node-card" data-ip-node="${n.id}">
       <div class="ip-node-head">
         <div>
-          <div class="ip-node-ip"><code>${escapeHtml(ip)}</code> <span class="badge ${n.status === 'online' ? 'badge-success' : 'badge-danger'}">${n.status === 'online' ? 'Online' : escapeHtml(n.status || 'Offline')}</span></div>
-          <div class="acct-muted">${escapeHtml(nodeLabel(n))}${n.isLocal ? ' (Core)' : ''} &middot; mesh ${escapeHtml(n.meshIp || '-')} &middot; ${apps.length} app${apps.length === 1 ? '' : 's'}, ${dbs.length} database${dbs.length === 1 ? '' : 's'}</div>
+          <div class="ip-node-ip">${escapeHtml(nodeLabel(n))}${n.isLocal ? ' <span class="acct-muted">(Core)</span>' : ''}
+            <span class="badge ${n.status === 'online' ? 'badge-success' : 'badge-danger'}">${n.status === 'online' ? 'Online' : escapeHtml(n.status || 'Offline')}</span></div>
+          <div class="acct-muted">IP ${escapeHtml(nodeIpLabel(n))}</div>
         </div>
       </div>
-      ${rows ? `<div class="table-responsive"><table class="table acct-table"><thead><tr><th>App</th><th>Type</th><th>Address</th><th>Assign</th></tr></thead><tbody>${rows}</tbody></table></div>`
-        : '<p class="acct-muted" style="margin:6px 0 0">Nothing is using this IP.</p>'}
+      ${renderNodePorts(n, others)}
     </div>`;
-  }).join('') || '<p class="acct-muted">Nothing matches your search.</p>';
+  }).join('');
 }
 
-document.getElementById('ips-view-body')?.addEventListener('change', (e) => {
-  const sel = e.target.closest('[data-ip-app]');
-  if (!sel || !sel.value) return;
-  const pid = Number(sel.getAttribute('data-ip-app'));
-  const target = Number(sel.value);
-  sel.value = '';
-  void openMoveToNodeModal(pid, target);
+async function portRequest(nodeId, method, path, body) {
+  const res = await api(`/api/cluster/nodes/${nodeId}${path}`, { method, body });
+  ipsPools.set(Number(nodeId), res);
+  if (res.firewallNote) toast(res.firewallNote, 'warning');
+  await loadIpsView(false);
+  return res;
+}
+
+document.getElementById('ips-view-body')?.addEventListener('click', async (e) => {
+  const pill = e.target.closest('[data-port-filter]');
+  if (pill) {
+    ipsFilter.set(Number(pill.dataset.node), pill.dataset.portFilter);
+    await loadIpsView(false);
+    return;
+  }
+  const btn = e.target.closest('[data-port-action]');
+  if (!btn) return;
+  const nid = Number(btn.dataset.node);
+  const port = btn.dataset.port;
+  const appId = Number(btn.dataset.app || 0);
+  btn.disabled = true;
+  try {
+    switch (btn.dataset.portAction) {
+      case 'range': {
+        const min = Number(document.getElementById(`pool-min-${nid}`)?.value || 0);
+        const max = Number(document.getElementById(`pool-max-${nid}`)?.value || 0);
+        if (!min || !max) { toast('Enter the lowest and highest port.', 'warning'); break; }
+        await portRequest(nid, 'PUT', '/port-range', { min, max });
+        toast(`Port range ${min}-${max} saved.`, 'success');
+        break;
+      }
+      case 'add': {
+        const ports = (document.getElementById(`pool-add-${nid}`)?.value || '').trim();
+        if (!ports) { toast('Enter ports to add.', 'warning'); break; }
+        await portRequest(nid, 'POST', '/ports', { ports });
+        toast('Ports added and opened.', 'success');
+        break;
+      }
+      case 'open':
+      case 'close':
+        await portRequest(nid, 'PATCH', '/ports', { ports: port, open: btn.dataset.portAction === 'open' });
+        toast(`Port ${port} ${btn.dataset.portAction === 'open' ? 'opened' : 'closed'}.`, 'success');
+        break;
+      case 'remove':
+        await portRequest(nid, 'DELETE', `/ports/${port}`);
+        toast(`Port ${port} removed.`, 'success');
+        break;
+      case 'sync':
+        await portRequest(nid, 'POST', '/firewall-sync');
+        toast('Firewall updated.', 'success');
+        break;
+      case 'app-port': {
+        const typed = await showPromptDialog({
+          title: 'Change port',
+          message: `Current port ${port}. Enter a new port, or leave empty to use the next free port. Caddy routes update automatically and a running app restarts.`,
+          placeholder: 'New port',
+          confirmText: 'Change port',
+        });
+        if (typed === null) break;
+        const value = String(typed).trim();
+        await api(`/api/projects/${appId}/port`, { method: 'PUT', body: { port: value ? Number(value) : null } });
+        toast('Port changed.', 'success');
+        await loadIpsView(true);
+        break;
+      }
+      case 'app-extra': {
+        const proj = (state.projects || []).find((p) => p.id === appId);
+        const typed = await showPromptDialog({
+          title: 'Extra ports',
+          message: `Ports this app may also listen on (from this node's open ports). The app receives them in EXTRA_PORTS. Leave empty to remove them.`,
+          placeholder: 'Ports or ranges',
+          defaultValue: '',
+          confirmText: 'Save',
+        });
+        if (typed === null) break;
+        const res = await api(`/api/projects/${appId}/extra-ports`, { method: 'PUT', body: { ports: String(typed).trim() } });
+        if (res.firewallNote) toast(res.firewallNote, 'warning');
+        toast(`${proj ? proj.name : 'App'}: extra ports saved. Restart it to use them.`, 'success');
+        await loadIpsView(true);
+        break;
+      }
+      case 'app-stop':
+        await api(`/api/projects/${appId}/stop`, { method: 'POST' });
+        toast('App stopped.', 'success');
+        await loadIpsView(true);
+        break;
+      case 'app-start':
+        await api(`/api/projects/${appId}/start`, { method: 'POST' });
+        toast('App started.', 'success');
+        await loadIpsView(true);
+        break;
+      default:
+        break;
+    }
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
 });
-document.getElementById('ips-search')?.addEventListener('input', () => void loadIpsView());
+
+document.getElementById('ips-view-body')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('.ip-move-select');
+  if (!sel || !sel.value) return;
+  const target = Number(sel.value);
+  const appId = Number(sel.dataset.app);
+  sel.value = '';
+  void openMoveToNodeModal(appId, target);
+});
+document.getElementById('ips-search')?.addEventListener('input', () => void loadIpsView(false));
 
 export async function loadMovesView() {
   const tbody = document.getElementById('moves-list-body');
@@ -1133,7 +1314,7 @@ export async function loadMovesView() {
       <td><div class="acct-person-name">${escapeHtml(p.name)}</div><div class="acct-person-sub">${escapeHtml(p.slug || '')}</div></td>
       <td><span class="badge badge-neutral">${p.project_kind === 'service' ? 'Service' : 'Website'}</span></td>
       <td>${node ? escapeHtml(nodeLabel(node)) : '<span class="acct-muted">Unknown</span>'}</td>
-      <td><code>${escapeHtml(node ? nodeIpLabel(node) : '-')}</code></td>
+      <td><code>${escapeHtml(String(p.assigned_port || p.port || '-'))}</code></td>
       <td>${running ? '<span class="badge badge-success">Running</span>' : '<span class="badge badge-neutral">Stopped</span>'}</td>
       <td><div class="acct-actions">${otherOnline(p)
         ? `<button class="btn btn-secondary btn-sm" onclick="openMoveToNodeModal(${p.id})">Move</button>`

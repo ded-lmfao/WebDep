@@ -21,6 +21,59 @@ pub fn firewall_management_enabled() -> bool {
     })
 }
 
+/// Opens and closes TCP ports in UFW and iptables (Linux). Used for node port pools:
+/// `open` ports accept new connections, `close` ports have WebDep's allow rules removed.
+/// Runs synchronously; call from a blocking task. No-op on other systems or when firewall
+/// management is turned off.
+pub fn sync_firewall_ports(open: &[u16], close: &[u16]) -> Result<(), String> {
+    if !firewall_management_enabled() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        let run = |args: &[&str]| -> bool {
+            let direct = std::process::Command::new(args[0]).args(&args[1..]).stdin(Stdio::null()).output();
+            if matches!(direct, Ok(ref o) if o.status.success()) {
+                return true;
+            }
+            std::process::Command::new("sudo")
+                .arg("-n")
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        let has_ufw = run(&["ufw", "status"]);
+        for p in open {
+            let rule = format!("{p}/tcp");
+            if has_ufw {
+                run(&["ufw", "allow", &rule]);
+            }
+            let port = p.to_string();
+            let check = ["iptables", "-C", "INPUT", "-p", "tcp", "--dport", &port, "-m", "conntrack", "--ctstate", "NEW", "-j", "ACCEPT"];
+            if !run(&check) {
+                run(&["iptables", "-I", "INPUT", "1", "-p", "tcp", "--dport", &port, "-m", "conntrack", "--ctstate", "NEW", "-j", "ACCEPT"]);
+            }
+        }
+        for p in close {
+            let rule = format!("{p}/tcp");
+            if has_ufw {
+                run(&["ufw", "delete", "allow", &rule]);
+            }
+            let port = p.to_string();
+            let del = ["iptables", "-D", "INPUT", "-p", "tcp", "--dport", &port, "-m", "conntrack", "--ctstate", "NEW", "-j", "ACCEPT"];
+            while run(&del) {}
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (open, close);
+        Ok(())
+    }
+}
+
 impl Runtime {
     /// Automatically open `port/tcp` in UFW and iptables on Linux so newly created servers/websites
     /// are reachable without manual firewall commands.

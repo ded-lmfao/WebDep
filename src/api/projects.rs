@@ -198,8 +198,29 @@ pub(crate) async fn create_project_handler(
         let _ = tokio::fs::create_dir_all(&p.deploy_dir).await;
     }
 
-    // Always assign a guaranteed unique port across all workloads (websites, services, databases)
-    let allocated_port = {
+    if p.node_id.is_none() {
+        p.node_id = state.cluster.default_local_node_id().await;
+    }
+    // Nodes with a port range hand out their lowest open free port (or check the chosen one);
+    // other nodes keep the cluster-wide unique allocation.
+    let pool_node = match p.node_id {
+        Some(nid) if crate::cluster::ports::has_pool(&state.db, nid).await => Some(nid),
+        _ => None,
+    };
+    let allocated_port = if let Some(nid) = pool_node {
+        match p.port.filter(|&pt| pt > 0) {
+            Some(req) => {
+                crate::cluster::ports::check_assignable(&state.db, nid, req, None)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+                req
+            }
+            None => crate::cluster::ports::next_free_port(&state.db, nid, &[])
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "No free open port left on this node. Add or open more ports in Admin Panel > IP Addresses.".to_string()))?,
+        }
+    } else {
         let default_start = if is_service { 8000 } else { 3000 };
         crate::db::allocate_global_unique_port(&state.db, p.port, default_start, None, None)
             .await
@@ -373,7 +394,20 @@ pub(crate) async fn update_project_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
 
-    if let Some(node_id) = resolve_remote_node(&state, updated.node_id).await? {
+    propagate_project_change(&state, prev.as_ref(), &updated).await?;
+    state.cache.invalidate_all();
+
+    Ok(Json(updated))
+}
+
+/// Pushes a saved project to wherever it runs: refreshes the process environment and port,
+/// Caddy routes, and firewall rules (remote nodes get `project.ensure` plus a Caddy sync).
+pub(crate) async fn propagate_project_change(
+    state: &AppState,
+    prev: Option<&crate::projects::Project>,
+    updated: &crate::projects::Project,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(node_id) = resolve_remote_node(state, updated.node_id).await? {
         if state.cluster.is_node_connected(node_id).await {
             let ctx = state.cluster.build_remote_context(&state.projects, updated.id).await;
             let _ = state
@@ -381,7 +415,7 @@ pub(crate) async fn update_project_handler(
                 .call_node(
                     node_id,
                     "project.ensure",
-                    serde_json::json!({ "project": &updated, "context": ctx }),
+                    serde_json::json!({ "project": updated, "context": ctx }),
                     std::time::Duration::from_secs(15),
                 )
                 .await;
@@ -390,17 +424,17 @@ pub(crate) async fn update_project_handler(
             }
         }
     } else {
-        let _ = state.runtime.ensure_container(&updated).await;
+        let _ = state.runtime.ensure_container(updated).await;
 
         if updated.project_kind != "service" || !updated.domains.is_empty() {
             if let Ok(all) = state.projects.list().await {
-                let _ = state.caddy.write_config(&updated, &all);
+                let _ = state.caddy.write_config(updated, &all);
                 let _ = state.caddy.reload();
             }
         }
 
         // Clean up old firewall rules if port, access mode, or allowed IPs changed
-        if let Some(ref old_p) = prev {
+        if let Some(old_p) = prev {
             if let Some(old_port) = old_p.port {
                 if Some(old_port) != updated.port
                     || old_p.access_mode != updated.access_mode
@@ -415,9 +449,7 @@ pub(crate) async fn update_project_handler(
             crate::databases::Databases::sync_firewall_rules(port, &updated.access_mode, &updated.allowed_ips).await;
         }
     }
-    state.cache.invalidate_all();
-
-    Ok(Json(updated))
+    Ok(())
 }
 
 pub(crate) async fn delete_project_handler(
@@ -633,15 +665,24 @@ pub(crate) async fn restart_project_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "process", id).await?;
+    let pid = restart_project_internal(&state, &actor, &p).await?;
+    Ok(Json(serde_json::json!({ "started": true, "pid": pid })))
+}
 
-    if let Some(node_id) = resolve_remote_node(&state, p.node_id).await? {
+/// Restarts an app where it runs (remote node over RPC, or locally) and records it.
+pub(crate) async fn restart_project_internal(
+    state: &AppState,
+    actor: &crate::auth::User,
+    p: &crate::projects::Project,
+) -> Result<u32, (StatusCode, String)> {
+    if let Some(node_id) = resolve_remote_node(state, p.node_id).await? {
         let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
         let val = state
             .cluster
             .call_node(
                 node_id,
                 "project.restart",
-                serde_json::json!({ "project": &p, "context": ctx }),
+                serde_json::json!({ "project": p, "context": ctx }),
                 std::time::Duration::from_secs(30),
             )
             .await?;
@@ -656,7 +697,7 @@ pub(crate) async fn restart_project_handler(
         .await;
         state.cache.invalidate_all();
         log_audit_project(
-            &state,
+            state,
             Some(p.id),
             &actor.username,
             "container.restart",
@@ -664,12 +705,11 @@ pub(crate) async fn restart_project_handler(
             Some(&format!("Restarted remote workload (PID {pid})")),
         )
         .await;
-        return Ok(Json(serde_json::json!({ "started": true, "pid": pid })));
+        return Ok(pid);
     }
 
-    let _ = state.runtime.stop_project(&p).await;
-    let pid = start_project_with_audit(&state, &actor, &p, "container.restart", "Restarted").await?;
-    Ok(Json(serde_json::json!({ "started": true, "pid": pid })))
+    let _ = state.runtime.stop_project(p).await;
+    start_project_with_audit(state, actor, p, "container.restart", "Restarted").await
 }
 
 #[derive(Deserialize, Default)]

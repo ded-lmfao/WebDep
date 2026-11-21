@@ -678,7 +678,7 @@ function renderWebsiteWorkspaceHeader() {
       const settingsAction = isService ? `openEditServiceModal(${p.id})` : `openEditWebsiteModal(${p.id})`;
 
       const canMaint = !isService && canProcess;
-      const canDomains = !isService && hasPower('domains');
+      const canDomains = hasPower('domains');
       const canDelete = hasPower('app_delete');
 
       actions.innerHTML = `

@@ -11,6 +11,7 @@ pub mod databases;
 pub mod users;
 pub mod access;
 pub mod accounts;
+pub mod ports;
 
 pub use common::AppState;
 
@@ -61,6 +62,7 @@ use self::databases::*;
 use self::users::*;
 use self::access::*;
 use self::accounts::*;
+use self::ports::*;
 use self::common::{axum_static_fallback, security_middleware};
 
 pub fn create_router(state: AppState) -> Router {
@@ -190,6 +192,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/cluster/modules", get(list_cluster_modules_handler))
         .route("/api/cluster/custom-modules", get(list_custom_modules_handler).post(save_custom_module_handler))
         .route("/api/cluster/custom-modules/:id", delete(delete_custom_module_handler))
+        .route("/api/cluster/nodes/:id/ports", get(get_node_ports_handler).post(add_node_ports_handler).patch(set_node_ports_open_handler))
+        .route("/api/cluster/nodes/:id/ports/:port", delete(remove_node_port_handler))
+        .route("/api/cluster/nodes/:id/port-range", put(set_port_range_handler))
+        .route("/api/cluster/nodes/:id/firewall-sync", post(sync_node_firewall_handler))
+        .route("/api/projects/:id/port", put(set_app_port_handler))
+        .route("/api/projects/:id/extra-ports", put(set_extra_ports_handler))
         .route(
             "/api/cluster/modules/install-fleet",
             post(install_fleet_modules_handler),

@@ -129,3 +129,12 @@
 .modules-custom-tag { margin-left: 6px; font-size: 10px; padding: 1px 6px; border-radius: var(--radius-xs); background: var(--accent-glow); color: var(--accent-light); border: 1px solid var(--accent-border); }
 .modules-edit-btn { margin-left: auto; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text-dim); cursor: pointer; }
 .modules-edit-btn:hover { background: var(--bg-card-hover); color: var(--text-main); }
+
+/* IP Addresses: port pools */
+.ip-pool-controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 6px 0 10px; }
+.ip-pool-range { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ip-pool-range input[type="number"] { width: 110px; height: 30px; }
+.ip-pool-range input[type="text"] { height: 30px; }
+.ip-pool-filters { margin-bottom: 8px; }
+.ip-port { font-size: 13px; }
+.ip-move-select { height: 30px; max-width: 150px; font-size: 12px; }

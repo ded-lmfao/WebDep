@@ -365,7 +365,27 @@ impl Databases {
         let domain = input.domain.unwrap_or_default().trim().to_string();
         let is_superuser = input.is_superuser.unwrap_or(false);
 
-        let port = crate::db::allocate_global_unique_port(&self.db, input.port, 5432, None, None).await?;
+        // Nodes with a port range hand out their lowest open free port; others use the
+        // cluster-wide unique allocation starting at 5432.
+        // New databases are created on the local Core node.
+        let local_node: Option<i64> = sqlx::query_scalar("SELECT id FROM nodes WHERE is_local ORDER BY id LIMIT 1")
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten();
+        let port = match local_node {
+            Some(nid) if crate::cluster::ports::has_pool(&self.db, nid).await => match input.port.filter(|p| *p > 0) {
+                Some(req) => {
+                    crate::cluster::ports::check_assignable(&self.db, nid, req, None).await?;
+                    req
+                }
+                None => crate::cluster::ports::next_free_port(&self.db, nid, &[])
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "No free open port left on this node. Add or open more ports in Admin Panel > IP Addresses.".to_string())?,
+            },
+            _ => crate::db::allocate_global_unique_port(&self.db, input.port, 5432, None, None).await?,
+        };
 
         let enc_password = self
             .vault

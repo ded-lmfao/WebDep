@@ -2020,6 +2020,20 @@ pub async fn execute_rpc(
                 }),
             )
         }
+        "firewall.ports" => {
+            let parse = |key: &str| -> Vec<u16> {
+                params[key]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|v| v.as_u64()).filter_map(|v| u16::try_from(v).ok()).filter(|p| *p >= 1024).collect())
+                    .unwrap_or_default()
+            };
+            let (open, close) = (parse("open"), parse("close"));
+            match tokio::task::spawn_blocking(move || crate::runtime::port::sync_firewall_ports(&open, &close)).await {
+                Ok(Ok(())) => ok_resp(req_id, json!({ "ok": true })),
+                Ok(Err(e)) => err_resp(req_id, 500, e),
+                Err(e) => err_resp(req_id, 500, format!("Firewall worker failed: {e}")),
+            }
+        }
         "modules.status" => {
             let p2p_port = exec.p2p_port.load(Ordering::Relaxed);
             let port_opt = if p2p_port > 0 { Some(p2p_port) } else { None };

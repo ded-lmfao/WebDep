@@ -2192,10 +2192,10 @@
           <div class="view-header">
             <div class="view-title-group">
               <h1>IP Addresses</h1>
-              <p>Every node IP and the apps using it. Changing an app's IP moves it to the node with that IP.</p>
+              <p>Each node's ports: open or close them, set the range, and move apps between ports or nodes.</p>
             </div>
             <div class="view-actions">
-              <input type="text" id="ips-search" class="form-control" placeholder="Search an IP or app" style="width: 220px;" autocomplete="off">
+              <input type="text" id="ips-search" class="form-control" placeholder="Search a port or app" style="width: 220px;" autocomplete="off">
               <button class="btn btn-secondary btn-sm" onclick="window.loadIpsView && window.loadIpsView()">Refresh</button>
             </div>
           </div>
@@ -2216,7 +2216,7 @@
           <div class="table-responsive acct-table-wrap">
             <table class="table acct-table">
               <thead>
-                <tr><th>App</th><th>Type</th><th>Node</th><th>IP</th><th>Status</th><th style="text-align: right;">Action</th></tr>
+                <tr><th>App</th><th>Type</th><th>Node</th><th>Port</th><th>Status</th><th style="text-align: right;">Action</th></tr>
               </thead>
               <tbody id="moves-list-body"></tbody>
             </table>
@@ -3498,11 +3498,11 @@
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="add-node-label">Name</label>
-              <input type="text" class="form-control" id="add-node-label" value="VPS-2" placeholder="Node name">
+              <input type="text" class="form-control" id="add-node-label" placeholder="Node name">
             </div>
             <div class="form-group">
               <label class="form-label" for="add-node-region">Region</label>
-              <input type="text" class="form-control" id="add-node-region" value="mumbai-IND" placeholder="Region">
+              <input type="text" class="form-control" id="add-node-region" placeholder="Region">
             </div>
           </div>
 
@@ -3520,6 +3520,18 @@
               </select>
             </div>
           </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="add-node-port-min">Lowest app port</label>
+              <input type="number" class="form-control" id="add-node-port-min" min="1024" max="65535" placeholder="Lowest port">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="add-node-port-max">Highest app port</label>
+              <input type="number" class="form-control" id="add-node-port-max" min="1024" max="65535" placeholder="Highest port">
+            </div>
+          </div>
+          <p class="acct-editor-note" style="margin-top:-4px">The panel opens only these ports on the new VPS and gives them to apps in order, lowest first. Leave both empty to keep automatic ports; you can set a range later in Admin Panel &rsaquo; IP Addresses.</p>
 
           <div class="form-group" style="margin-bottom: 0;">
             <label class="form-label" for="add-node-core-url">This panel's address <span style="color: var(--text-dim); font-weight: 400;">(the new VPS must reach it)</span></label>

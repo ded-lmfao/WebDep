@@ -134,12 +134,20 @@ impl ClusterManager {
         let tags = input.tags.unwrap_or_default();
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
 
+        let port_range = match (input.port_min, input.port_max) {
+            (Some(min), Some(max)) => {
+                super::ports::validate_range(min, max)?;
+                Some((i32::from(min), i32::from(max)))
+            }
+            (None, None) => None,
+            _ => return Err("Enter both the lowest and the highest port, or leave both empty.".into()),
+        };
         let raw_token = generate_secret("wdjoin_");
         let token_hash = hash_token(&raw_token);
 
         let id: i64 = sqlx::query_scalar(
-            "INSERT INTO node_enroll_tokens(token_hash, label, region, tags_json, created_by, expires_at, created_at)
-             VALUES($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO node_enroll_tokens(token_hash, label, region, tags_json, created_by, expires_at, created_at, port_min, port_max)
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING id",
         )
         .bind(&token_hash)
@@ -149,6 +157,8 @@ impl ClusterManager {
         .bind(created_by)
         .bind(expires_at)
         .bind(now)
+        .bind(port_range.map(|r| r.0))
+        .bind(port_range.map(|r| r.1))
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Failed creating enrollment token: {e}"))?;
@@ -415,6 +425,22 @@ impl ClusterManager {
         tx.commit()
             .await
             .map_err(|e| format!("Failed committing node enrollment: {e}"))?;
+
+        // Port range chosen when the join command was created.
+        let token_range: Option<(Option<i32>, Option<i32>)> =
+            sqlx::query_as("SELECT port_min, port_max FROM node_enroll_tokens WHERE id = $1")
+                .bind(token_id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
+        if let Some((Some(min), Some(max))) = token_range {
+            if let (Ok(min), Ok(max)) = (u16::try_from(min), u16::try_from(max)) {
+                if let Err(e) = super::ports::set_range(&self.db, node_id, min, max).await {
+                    tracing::warn!("Could not apply port range to node #{node_id}: {e}");
+                }
+            }
+        }
 
         let peers = self.list_peer_configs().await?;
         self.broadcast_peer_sync().await;
