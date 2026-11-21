@@ -216,3 +216,5 @@
   .ipx-grid { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); }
   .ipx-legend { display: none; }
 }
+.ipx-btn-remove { background: transparent !important; border: 1px solid var(--danger-border) !important; color: var(--danger-light) !important; }
+.ipx-btn-remove:hover:not(:disabled) { background: var(--danger-bg) !important; }

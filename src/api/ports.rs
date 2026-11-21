@@ -5,7 +5,8 @@
 //! - `PUT    /api/cluster/nodes/:id/port-range`      `{ min, max }`
 //! - `POST   /api/cluster/nodes/:id/ports`           `{ ports: "8100, 8105-8110" }` add ports
 //! - `PATCH  /api/cluster/nodes/:id/ports`           `{ ports: "...", open: bool }`
-//! - `DELETE /api/cluster/nodes/:id/ports/:port`     remove a hand-added port
+//! - `DELETE /api/cluster/nodes/:id/ports/:port`     remove an unused port
+//! - `POST   /api/cluster/nodes/:id/ports/remove`    `{ ports: "..." }` remove unused ports
 //! - `POST   /api/cluster/nodes/:id/firewall-sync`   re-apply open/closed ports to the firewall
 //! - `PUT    /api/projects/:id/port`                 `{ port }` move an app to another port (empty = next free)
 //! - `PUT    /api/projects/:id/extra-ports`          `{ ports: "..." }` extra ports for an app
@@ -163,12 +164,28 @@ pub(crate) async fn remove_node_port_handler(
     headers: HeaderMap,
     AxPath((node_id, port)): AxPath<(i64, u16)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let actor = verify_admin(&state, &headers).await?;
-    let node = load_node(&state, node_id).await?;
-    ports::remove_port(&state.db, node_id, port).await.map_err(bad)?;
-    let note = apply_firewall(&state, &node, Vec::new(), vec![port]).await;
-    log_audit(&state, &actor.username, "ports.remove", Some(&node.name), Some(&format!("Removed port {port}"))).await;
-    pool_response(&state, node_id, note).await
+    remove_ports_common(&state, &headers, node_id, &[port]).await
+}
+
+/// `POST /api/cluster/nodes/:id/ports/remove` with `{ ports: "..." }`.
+pub(crate) async fn remove_node_ports_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(node_id): AxPath<i64>,
+    Json(p): Json<PortsPayload>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let list = ports::parse_port_list(&p.ports).map_err(bad)?;
+    remove_ports_common(&state, &headers, node_id, &list).await
+}
+
+async fn remove_ports_common(state: &AppState, headers: &HeaderMap, node_id: i64, list: &[u16]) -> Result<Json<serde_json::Value>, ApiError> {
+    let actor = verify_admin(state, headers).await?;
+    let node = load_node(state, node_id).await?;
+    let removed = ports::remove_ports(&state.db, node_id, list).await.map_err(bad)?;
+    let note = apply_firewall(state, &node, Vec::new(), removed.clone()).await;
+    let shown = removed.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+    log_audit(state, &actor.username, "ports.remove", Some(&node.name), Some(&format!("Removed {} port(s): {shown}", removed.len()))).await;
+    pool_response(state, node_id, note).await
 }
 
 pub(crate) async fn sync_node_firewall_handler(
@@ -231,7 +248,7 @@ pub(crate) async fn set_app_port_handler(
         (None, true) => ports::next_free_port(&state.db, node.id, &current.into_iter().collect::<Vec<_>>())
             .await
             .map_err(internal)?
-            .ok_or_else(|| bad("No free open port left on this node. Add or open more ports."))?,
+            .ok_or_else(|| bad(ports::no_free_port_message(&node.name)))?,
         (None, false) => return Err(bad("Choose a port: this node has no port range yet.")),
     };
     if Some(target) == current {

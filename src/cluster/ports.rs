@@ -330,22 +330,29 @@ pub async fn set_open(db: &DbPool, node_id: i64, ports: &[u16], open: bool) -> R
     Ok(changed.into_iter().filter_map(|p| u16::try_from(p).ok()).collect())
 }
 
-/// Removes a hand-added port that nothing uses.
-pub async fn remove_port(db: &DbPool, node_id: i64, port: u16) -> Result<(), String> {
+/// Message the API and the panel use when a node has no free port left.
+pub const NO_FREE_PORT: &str = "No free ports available";
+
+pub fn no_free_port_message(node_name: &str) -> String {
+    format!("{NO_FREE_PORT} on {node_name}. Add or open more ports in Admin Panel > IP Addresses, then try again.")
+}
+
+/// Removes ports from a node's list (range or hand-added). Ports an app uses are refused.
+/// Returns the ports that were removed.
+pub async fn remove_ports(db: &DbPool, node_id: i64, ports: &[u16]) -> Result<Vec<u16>, String> {
     let usage = usage_on_node(db, node_id, is_local(db, node_id).await).await.map_err(|e| e.to_string())?;
-    if let Some(user) = usage.get(&port) {
-        return Err(format!("Port {port} is used by {}.", user.name));
+    if let Some((port, user)) = ports.iter().find_map(|p| usage.get(p).map(|u| (*p, u))) {
+        return Err(format!("Port {port} is used by {}. Move it to another port first.", user.name));
     }
-    let res = sqlx::query("DELETE FROM node_ports WHERE node_id = $1 AND port = $2 AND manual = TRUE")
-        .bind(node_id)
-        .bind(i32::from(port))
-        .execute(db)
-        .await
-        .map_err(|e| e.to_string())?;
-    if res.rows_affected() == 0 {
-        return Err("Only ports added by hand can be removed; close range ports instead.".into());
-    }
-    Ok(())
+    let removed: Vec<i32> = sqlx::query_scalar(
+        "DELETE FROM node_ports WHERE node_id = $1 AND port = ANY($2) AND project_id IS NULL RETURNING port",
+    )
+    .bind(node_id)
+    .bind(ports.iter().map(|p| i32::from(*p)).collect::<Vec<i32>>())
+    .fetch_all(db)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(removed.into_iter().filter_map(|p| u16::try_from(p).ok()).collect())
 }
 
 /// Lowest open pool port that nothing uses, skipping `exclude`.
@@ -476,8 +483,8 @@ mod tests {
 
         add_ports(&db, node_id, &[9500]).await.unwrap();
         check_assignable(&db, node_id, 9500, None).await.unwrap();
-        remove_port(&db, node_id, 9500).await.unwrap();
-        assert!(remove_port(&db, node_id, 9102).await.is_err(), "range ports are closed, not removed");
+        assert_eq!(remove_ports(&db, node_id, &[9500, 9101]).await.unwrap(), vec![9101, 9500]);
+        assert!(check_assignable(&db, node_id, 9101, None).await.is_err(), "removed ports are gone");
 
         // Shrinking keeps hand-added ports and drops unused range ports.
         add_ports(&db, node_id, &[9600]).await.unwrap();

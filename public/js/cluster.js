@@ -1173,11 +1173,13 @@ function renderDetail(ports, others) {
     const closable = picked.filter((p) => !p.usedBy && p.open).length;
     const openable = picked.filter((p) => !p.open).length;
     const busy = picked.filter((p) => p.usedBy).length;
+    const removable = picked.length - busy;
     return `<div class="ipx-detail-title">${picked.length} ports selected</div>
-      <p class="acct-muted">${busy ? `${busy} in use (left unchanged). ` : ''}${closable} can be closed, ${openable} can be opened.</p>
+      <p class="acct-muted">${busy ? `${busy} in use (left unchanged). ` : ''}${closable} can be closed, ${openable} can be opened, ${removable} can be removed.</p>
       <div class="ipx-detail-actions">
         <button class="btn btn-secondary btn-sm" data-ipx-act="bulk-open" ${openable ? '' : 'disabled'}>Open ${openable || ''}</button>
         <button class="btn btn-secondary btn-sm" data-ipx-act="bulk-close" ${closable ? '' : 'disabled'}>Close ${closable || ''}</button>
+        <button class="btn btn-sm ipx-btn-remove" data-ipx-act="bulk-remove" ${removable ? '' : 'disabled'}>Remove ${removable || ''}</button>
         <button class="btn btn-secondary btn-sm" data-ipx-act="clear">Clear selection</button>
       </div>`;
   }
@@ -1197,9 +1199,9 @@ function renderDetail(ports, others) {
   } else {
     body = `<div class="ipx-detail-actions">
         ${p.open ? '<button class="btn btn-secondary btn-sm" data-ipx-act="close-one">Close port</button>' : '<button class="btn btn-secondary btn-sm" data-ipx-act="open-one">Open port</button>'}
-        ${p.manual && !p.open ? '<button class="btn btn-secondary btn-sm" data-ipx-act="remove-one">Remove port</button>' : ''}
+        <button class="btn btn-sm ipx-btn-remove" data-ipx-act="remove-one">Remove port</button>
       </div>
-      <p class="acct-muted">${p.open ? 'The next new or moved app on this node takes the lowest free port.' : 'Closed ports are blocked in the firewall and never handed out.'}</p>`;
+      <p class="acct-muted">${p.open ? 'The next new or moved app on this node takes the lowest free port.' : 'Closed ports are blocked in the firewall and never handed out.'} Removing takes the port off this node's list; saving the range again adds range ports back.</p>`;
   }
   return `<div class="ipx-detail-head"><span class="ipx-detail-port">${p.port}</span><span class="badge ${badge[0]}">${badge[1]}</span></div>
     ${p.manual ? '<p class="acct-muted" style="margin:2px 0 8px">Added by hand</p>' : ''}${!p.inPool ? '<p class="acct-muted" style="margin:2px 0 8px">Outside the port range</p>' : ''}
@@ -1365,10 +1367,22 @@ async function runIpxAction(act, el) {
     case 'close-one':
       await portRequest(nid, 'PATCH', '/ports', { ports: String(one.port), open: act === 'open-one' });
       return toast(`Port ${one.port} ${act === 'open-one' ? 'opened' : 'closed'}.`, 'success');
-    case 'remove-one':
+    case 'remove-one': {
+      const ok = await showConfirmDialog({ title: `Remove port ${one.port}`, message: `Take port ${one.port} off this node's list and close it in the firewall?`, confirmText: 'Remove port', danger: true });
+      if (!ok) return undefined;
       await portRequest(nid, 'DELETE', `/ports/${one.port}`);
       ipsUi.selected.delete(one.port);
       return toast(`Port ${one.port} removed.`, 'success');
+    }
+    case 'bulk-remove': {
+      const targets = picked.filter((p) => !p.usedBy).map((p) => p.port);
+      if (!targets.length) return undefined;
+      const ok = await showConfirmDialog({ title: `Remove ${targets.length} ports`, message: `Take ${targets.length} port${targets.length === 1 ? '' : 's'} off this node's list and close ${targets.length === 1 ? 'it' : 'them'} in the firewall? Ports in use are kept.`, confirmText: 'Remove ports', danger: true });
+      if (!ok) return undefined;
+      await portRequest(nid, 'POST', '/ports/remove', { ports: targets.join(',') });
+      targets.forEach((p) => ipsUi.selected.delete(p));
+      return toast(`${targets.length} port${targets.length === 1 ? '' : 's'} removed.`, 'success');
+    }
     case 'bulk-open':
     case 'bulk-close': {
       const open = act === 'bulk-open';
@@ -1501,5 +1515,27 @@ export async function loadMovesView() {
 }
 document.getElementById('moves-search')?.addEventListener('input', () => void loadMovesView());
 
+/** Explains a "no free ports" refusal from app creation; returns true when handled. */
+export function handleNoFreePort(err) {
+  const msg = String(err?.message || '');
+  if (!msg.startsWith('No free ports available')) return false;
+  const admin = Boolean(state.user?.isAdmin);
+  void showConfirmDialog({
+    title: 'No free ports',
+    message: admin
+      ? `${msg}
+
+Nothing was created.`
+      : `${msg.split('. ')[0]}. Nothing was created. Ask an admin to add or open more ports.`,
+    confirmText: admin ? 'Open IP Addresses' : 'OK',
+  }).then((go) => {
+    if (go && admin) {
+      document.querySelectorAll('.modal-overlay.active').forEach((m) => m.classList.remove('active'));
+      window.navigateTo?.('ips');
+    }
+  });
+  return true;
+}
+window.handleNoFreePort = handleNoFreePort;
 window.loadIpsView = loadIpsView;
 window.loadMovesView = loadMovesView;

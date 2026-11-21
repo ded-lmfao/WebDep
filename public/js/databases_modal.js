@@ -205,6 +205,7 @@ export async function handleCreateDatabaseSubmit(e) {
       progressStep.className = 'badge badge-danger';
     }
     if (progressDetail) progressDetail.textContent = `Error: ${err.message}`;
+    if (window.handleNoFreePort?.(err)) return;
     toast(`Database creation failed: ${err.message}`, 'error');
   } finally {
     setBtnLoading(btn, false, 'Create & Start Database');

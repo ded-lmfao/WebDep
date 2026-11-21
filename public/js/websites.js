@@ -633,6 +633,7 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
       }
     }
   } catch (err) {
+    if (window.handleNoFreePort?.(err)) return;
     toast(`Save failed: ${err.message}`, 'error');
   } finally {
     if (submitBtn) {

@@ -382,7 +382,7 @@ impl Databases {
                 None => crate::cluster::ports::next_free_port(&self.db, nid, &[])
                     .await
                     .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "No free open port left on this node. Add or open more ports in Admin Panel > IP Addresses.".to_string())?,
+                    .ok_or_else(|| crate::cluster::ports::no_free_port_message("this node"))?,
             },
             _ => crate::db::allocate_global_unique_port(&self.db, input.port, 5432, None, None).await?,
         };

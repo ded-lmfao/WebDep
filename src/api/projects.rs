@@ -165,6 +165,14 @@ fn manage_power_for_kind(kind: &str) -> &'static str {
     }
 }
 
+async fn node_display_name(state: &AppState, node_id: i64) -> String {
+    match state.cluster.get_node(node_id).await {
+        Ok(Some(n)) if !n.display_name.trim().is_empty() => n.display_name,
+        Ok(Some(n)) => n.name,
+        _ => format!("node #{node_id}"),
+    }
+}
+
 pub(crate) async fn create_project_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -215,10 +223,16 @@ pub(crate) async fn create_project_handler(
                     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
                 req
             }
-            None => crate::cluster::ports::next_free_port(&state.db, nid, &[])
+            None => match crate::cluster::ports::next_free_port(&state.db, nid, &[])
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-                .ok_or_else(|| (StatusCode::BAD_REQUEST, "No free open port left on this node. Add or open more ports in Admin Panel > IP Addresses.".to_string()))?,
+            {
+                Some(port) => port,
+                None => {
+                    let name = node_display_name(&state, nid).await;
+                    return Err((StatusCode::CONFLICT, crate::cluster::ports::no_free_port_message(&name)));
+                }
+            },
         }
     } else {
         let default_start = if is_service { 8000 } else { 3000 };

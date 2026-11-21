@@ -360,6 +360,7 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
       if (window.navigateTo) window.navigateTo('services');
     }
   } catch (err) {
+    if (window.handleNoFreePort?.(err)) return;
     toast(`Save failed: ${err.message}`, 'error');
   } finally {
     if (submitBtn) {
