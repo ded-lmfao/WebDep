@@ -194,7 +194,7 @@ async function loadProjectBackupsTable(p) {
         isOffNode && onlineNodes.length && state.user?.isAdmin
           ? `<select id="backup-restore-node-${b.id}" class="form-control bk-node" aria-label="Restore onto node">${nodeOptions}</select>` : '',
         done ? bkButton('restore', 'bk-restore', `Restore backup #${b.id}`, `restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})`, restoring) : '',
-        done && archive ? bkButton('download', 'bk-download', `Download backup #${b.id}`, `downloadProjectBackup(${p.id}, ${b.id})`) : '',
+        done && archive && appIsOnCoreServer(p) ? bkButton('download', 'bk-download', `Download backup #${b.id}`, `downloadProjectBackup(${p.id}, ${b.id})`) : '',
         bkButton(b.locked ? 'lock' : 'unlock', `bk-lock ${b.locked ? 'is-locked' : ''}`, b.locked ? 'Unlock: allow deleting' : 'Lock: prevent deleting', `toggleBackupLock(${p.id}, ${b.id}, ${!b.locked})`, b.status === 'running'),
         bkButton('trash', 'bk-delete', b.locked ? 'Locked: unlock it to delete' : `Delete backup #${b.id}`, `deleteProjectBackup(${p.id}, ${b.id})`, b.status === 'running' || b.locked),
       ].join('') : '';

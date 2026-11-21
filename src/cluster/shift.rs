@@ -1741,4 +1741,108 @@ mod tests {
         target_rpc.abort();
         let _ = std::fs::remove_dir_all(&target_data);
     }
+
+    async fn backup_api(
+        router: &axum::Router,
+        sess: &crate::auth::session::Session,
+        method: Method,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Cookie", format!("nd_session={}", sess.id))
+            .header("X-CSRF-Token", &sess.csrf_token)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = router.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn backups_of_an_app_on_another_vps_are_built_and_restored_on_that_vps() {
+        let state = crate::api::common::tests_state_helper().await;
+        let _local = state
+            .cluster
+            .pair_local_node("http://127.0.0.1:8080", "ws://127.0.0.1:8080/api/cluster/node-ws", "core-node")
+            .await
+            .unwrap();
+        let (nid, node_data, p2p, rpc) = enroll_and_wire_remote_node(&state, "bk-node", false).await;
+        let admin = state.auth.list_users().await.unwrap().into_iter().find(|u| u.is_main_admin).unwrap();
+        let sess = state.auth.create_session(admin.id).await.unwrap();
+
+        let site = node_data.join("sites/bk-remote");
+        let proj_id = state
+            .projects
+            .create(&sample_shift_project("BK Remote", "bk-remote", &site.to_string_lossy(), 43301, nid, vec![], ""))
+            .await
+            .unwrap();
+        let app = site.join("app");
+        std::fs::create_dir_all(app.join("sub")).unwrap();
+        std::fs::write(app.join("a.txt"), "v1").unwrap();
+        std::fs::write(app.join("sub/b.txt"), "inner").unwrap();
+        state.projects.set_env_var(proj_id, "FOO", "1", true).await.unwrap();
+        let router = crate::api::create_router(state.clone());
+
+        // The backup is built on the node, not on Core.
+        let (st, started) = backup_api(&router, &sess, Method::POST, &format!("/api/projects/{proj_id}/backup"), json!({"note": "remote"})).await;
+        assert_eq!(st, StatusCode::OK, "{started}");
+        assert_eq!(started["status"], "running");
+        let bid = started["backupId"].as_i64().unwrap();
+        let mut item = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, list) = backup_api(&router, &sess, Method::GET, &format!("/api/projects/{proj_id}/backups"), json!({})).await;
+            item = list.as_array().unwrap().iter().find(|b| b["id"] == bid).cloned().unwrap_or_default();
+            if item["status"] == "complete" || item["status"] == "failed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(item["status"], "complete", "{item}");
+        assert_eq!(item["format"], "archive");
+        assert_eq!(item["fileCount"], 2);
+        assert_eq!(item["checksumSha256"].as_str().unwrap().len(), 64);
+        let archive = PathBuf::from(item["path"].as_str().unwrap());
+        assert!(archive.is_file() && archive.starts_with(&node_data), "the archive is on the node: {archive:?}");
+        assert!(!crate::backups::archive_path(state.cluster.data_dir(), proj_id, bid).exists(), "nothing was written on Core");
+
+        // A backup stored on another VPS can't be downloaded from Core.
+        let (st, _) = backup_api(&router, &sess, Method::GET, &format!("/api/projects/{proj_id}/backups/{bid}/download"), json!({})).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        // The app changes; restoring replaces its files on the node and Core's env variables.
+        std::fs::write(app.join("a.txt"), "v2").unwrap();
+        std::fs::write(app.join("extra.txt"), "added later").unwrap();
+        state.projects.set_env_var(proj_id, "BAR", "2", true).await.unwrap();
+        let (st, res) = backup_api(&router, &sess, Method::POST, &format!("/api/projects/{proj_id}/backups/restore"), json!({"backupId": bid})).await;
+        assert_eq!(st, StatusCode::OK, "{res}");
+        let mut status = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, s) = backup_api(&router, &sess, Method::GET, &format!("/api/projects/{proj_id}/backups/restore-status"), json!({})).await;
+            if s["state"] == "done" || s["state"] == "failed" {
+                status = s;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(status["state"], "done", "{status}");
+        assert_eq!(std::fs::read_to_string(app.join("a.txt")).unwrap(), "v1");
+        assert!(!app.join("extra.txt").exists(), "files not in the backup are removed on the node");
+        assert!(site.join(".pre-restore").is_dir(), "the node keeps the undo copy");
+        let env = state.projects.get_env_map(proj_id).await;
+        assert!(env.contains_key("FOO") && !env.contains_key("BAR"), "env is replaced on Core");
+
+        // Deleting the backup removes the archive on the node.
+        let (st, _) = backup_api(&router, &sess, Method::DELETE, &format!("/api/projects/{proj_id}/backups/{bid}"), json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!archive.exists());
+
+        p2p.abort();
+        rpc.abort();
+        let _ = std::fs::remove_dir_all(&node_data);
+    }
 }

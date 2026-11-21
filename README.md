@@ -255,6 +255,11 @@ Move a website or backend service from one VPS to another directly from its work
 - **Resource limits** (set at creation, changed by admins in **App Limits**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root) and Job Objects on Windows; a disk limit (checked every minute) stops the app when it grows past it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
 - **Move Apps** moves a website or service to another node (admins only).
 
+#### Backups and restore (Releases › Backups)
+- **Create backup** saves every file in the app's Files folder plus its environment variables as one archive, built in the background, with its size, file count, creator, status and checksum. Optionally leave out names such as `cache` or `*.log`. A backup limit per app (App Limits) caps how many it can hold.
+- **Restore** replaces the app's files with the backup (nothing is merged), stops and restarts the app, restores the environment variables, and keeps the replaced files for 24 hours so it can be undone. It checks the checksum first and swaps folders with rollback, so a bad backup or a failure never leaves the app half restored. You confirm by typing the app's name.
+- **Download**, **lock** (a locked backup can't be deleted) and **delete** are on each row. Apps on other VPSes are backed up and restored on that VPS.
+
 #### Maintenance
 - The control database is backed up automatically once a day (seven kept) and before upgrades; files are in `data/backups/control-db/`.
 - The Audit page searches and exports to CSV; panel-wide history is kept 365 days.

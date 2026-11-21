@@ -21,7 +21,7 @@ pub(crate) async fn deploy_project_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "deploy", id).await?;
 
-    if crate::backups::is_restoring(p.id) {
+    if crate::backups::is_restoring(state.cluster.data_dir(), p.id) {
         return Err((
             StatusCode::CONFLICT,
             format!("'{}' is being restored from a backup. Wait for the restore to finish.", p.name),

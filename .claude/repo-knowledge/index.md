@@ -1,5 +1,5 @@
 # Repo knowledge — WebDep
-Git HEAD at last analysis: 99fe7b1
+Git HEAD at last analysis: 43a6cd9+backups-phase4
 Schema version: 2
 Last incremental update: 2026-11-21 (owner-facing hardening phases 1-6: upgrades, firewall, account security, maintenance, create perms, IPs, limits)
 Index confidence: file-index re-grepped at 99fe7b1 (38 symbols)
@@ -12,7 +12,7 @@ Stale risk: LOW
 - Module install/uninstall: api/cluster.rs apply_modules_action (local or RPC) -> cluster/modules.rs run_pkg_manager (sudo -n when not root).
 - Remote-node proxying for files/git: api/files.rs proxy_file_op, api/projects/git_ops.rs proxy_git_op.
 - Who can create apps? Admins, or panel powers create_websites/create_services/create_databases (legacy *_manage still works); creator gets owner grant. See flows.md #4.
-- Backups/audit/webhooks: src/maintenance.rs (hourly loop in main.rs). Upgrade notes: docs/UPGRADING.md.
+- Backups of apps (archives, restore, lock, download): src/backups.rs + src/api/projects/backups.rs; control-DB backups/audit/webhooks: src/maintenance.rs (hourly loop in main.rs). Upgrade notes: docs/UPGRADING.md.
 - Per-app IP + CPU/memory limits: api/ports.rs, cluster/node_ips.rs, runtime/limits.rs (Linux cgroups v2 only).
 ## Invariants & Gotchas
 - start.sh on a non-main branch compiles from source (slow, needs Rust) unless WEBDEP_FORCE_RELEASE=1.
@@ -31,7 +31,10 @@ Stale risk: LOW
 - require_2fa covering the acting admin is refused unless they have TOTP (lockout guard).
 - Limits apply on process start only; Linux code paths (limits.rs, port.rs firewall) are not compiled on Windows dev — release CI (musl) is the first Linux build.
 - Moving an app to another node clears bind_ip (shift.rs). An IP in use can't be removed.
+- Restore never merges: it replaces the app's Files root (api/files.rs service_root; a `current` symlink is swapped through its target). env-only backups must never wipe files (restore_files handles it).
+- CPU/memory limits: Linux cgroups v2 (root) and Windows job objects; disk limit is a soft stop checked each minute on this server only.
 ## Changelog
+- 2026-11-22: backups rebuilt (archives, background build, status, checksum, lock, download, safe restore, remote VPS support, older backups use the safe restore); App Limits tab; Windows CPU/memory limits; icon busy fix.
 - 2026-11-21: 99fe7b1 — phases 1-6: pre-upgrade backup + rollback, private ports + firewall state, reset links/sessions/2FA policy/PoW sign-up, backups/audit paging/webhooks, create perms + owner grant, node IPs + Caddy bind, cgroup limits; migrations 0008-0010.
 - 2026-11-21: feat/user-management at 9031ed4 — accounts/requests/admin panel, per-app grants, port pools, custom modules, icon UI.
 - 2026-11-20: 861d0bd v3.0.4 — settings_users.js permission presets compared as sets; version bump only.

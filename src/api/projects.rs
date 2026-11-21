@@ -529,6 +529,7 @@ pub(crate) async fn delete_project_handler(
         } else {
             let _ = state.runtime.stop_project(p).await;
             state.runtime.stop_maintenance_server(id);
+            crate::backups::remove_project_archives(state.cluster.data_dir(), id);
         }
     }
     state

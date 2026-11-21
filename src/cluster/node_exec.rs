@@ -1046,6 +1046,7 @@ pub async fn execute_rpc(
             let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
             stop_project_local(&exec, &p, &container).await;
             cleanup_project_files_dirs_in_data_dir(&exec.data_dir, &p, &remaining);
+            crate::backups::remove_project_archives(&exec.data_dir, p.id);
             let caddy = Caddy::new(&exec.data_dir);
             caddy.remove_project_config(&p.slug, &remaining);
             exec.remove_workload(p.id).await;
@@ -1273,6 +1274,124 @@ pub async fn execute_rpc(
                 let _ = tokio::task::spawn_blocking(move || copy_backup_files(&f_c, &t_c)).await;
             }
             ok_resp(req_id, json!({ "ok": true, "rawEnv": raw_env }))
+        }
+        "project.backup_archive" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let backup_id = params["backupId"].as_i64().unwrap_or(0);
+            let kind = params["kind"].as_str().unwrap_or("full-snapshot").to_string();
+            let raw_env = params["rawEnv"].as_str().map(str::to_string);
+            let ignore_in: Vec<String> = serde_json::from_value(params["ignore"].clone()).unwrap_or_default();
+            let ignore = if kind == "env-only" {
+                vec!["*".to_string()]
+            } else {
+                match crate::backups::clean_ignore(&ignore_in) {
+                    Ok(v) => v,
+                    Err(e) => return err_resp(req_id, 400, e),
+                }
+            };
+            let source = match service_root(&p) {
+                Ok(r) => r,
+                Err((_, m)) => return err_resp(req_id, 500, m),
+            };
+            let data_dir = exec.data_dir.clone();
+            let probe = source.clone();
+            let estimate = tokio::task::spawn_blocking(move || crate::monitor::get_path_disk_size(&probe))
+                .await
+                .unwrap_or(0);
+            if let Some(free) = crate::backups::free_space_bytes(&data_dir) {
+                if estimate > free {
+                    return err_resp(
+                        req_id,
+                        409,
+                        format!(
+                            "Not enough free disk space on this VPS for the backup ({} MB needed, {} MB free).",
+                            estimate / (1024 * 1024),
+                            free / (1024 * 1024)
+                        ),
+                    );
+                }
+            }
+            let project_id = p.id;
+            match tokio::task::spawn_blocking(move || {
+                crate::backups::create_archive_file(&data_dir, project_id, backup_id, &source, raw_env.as_deref(), &ignore)
+            })
+            .await
+            {
+                Ok(Ok(info)) => ok_resp(
+                    req_id,
+                    json!({
+                        "archivePath": info.path.to_string_lossy().to_string(),
+                        "size": info.size,
+                        "files": info.files,
+                        "sha256": info.sha256,
+                    }),
+                ),
+                Ok(Err(e)) => err_resp(req_id, 500, e),
+                Err(e) => err_resp(req_id, 500, e.to_string()),
+            }
+        }
+        "project.backup_restore" => {
+            let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
+                return err_resp(req_id, 400, "Invalid project payload");
+            };
+            let ctx: RemoteContextPayload = serde_json::from_value(params["context"].clone()).unwrap_or_default();
+            let backup_id = params["backupId"].as_i64().unwrap_or(0);
+            let was_running = params["wasRunning"].as_bool().unwrap_or(false);
+            let env_only = params["envOnly"].as_bool().unwrap_or(false);
+            let archive = params["archivePath"].as_str().unwrap_or("").to_string();
+            let src = if !archive.is_empty() && archive != crate::backups::PENDING_ARCHIVE {
+                crate::backups::RestoreSource::Archive {
+                    path: PathBuf::from(&archive),
+                    sha256: params["sha256"].as_str().unwrap_or("").to_string(),
+                    files: params["files"].as_u64().unwrap_or(0),
+                }
+            } else {
+                crate::backups::RestoreSource::Dir { path: PathBuf::from(params["backupPath"].as_str().unwrap_or("")) }
+            };
+            let root = match service_root(&p) {
+                Ok(r) => r,
+                Err((_, m)) => return err_resp(req_id, 500, m),
+            };
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let work = crate::backups::deploy_base(&p.deploy_dir, &cwd);
+            let real_root = crate::backups::resolve_real_root(&root);
+            let label = root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "app".to_string());
+            let stop = {
+                let (exec, p) = (exec.clone(), p.clone());
+                move || async move {
+                    if was_running {
+                        let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
+                        stop_project_local(&exec, &p, &container).await;
+                    }
+                }
+            };
+            match crate::backups::restore_files(src, env_only, &work, &real_root, &label, backup_id, stop).await {
+                Ok(o) => ok_resp(
+                    req_id,
+                    json!({
+                        "ok": true,
+                        "rawEnv": o.env,
+                        "undoPath": o.undo.map(|u| u.to_string_lossy().to_string()),
+                        "filesReplaced": o.files_replaced,
+                    }),
+                ),
+                Err(f) => {
+                    if f.app_stopped && was_running {
+                        let _ = start_project_local(&exec, &p, ctx.env, None, &ws_tx).await;
+                    }
+                    err_resp(req_id, 500, f.message)
+                }
+            }
+        }
+        "project.backup_delete" => {
+            let path = params["archivePath"].as_str().unwrap_or("");
+            let removed = crate::backups::remove_archive_file(&exec.data_dir, Path::new(path));
+            ok_resp(req_id, json!({ "ok": removed }))
         }
         "project.delete_path" => {
             let Ok(p) = serde_json::from_value::<Project>(params["project"].clone()) else {
@@ -3339,5 +3458,83 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&src_data);
         let _ = std::fs::remove_dir_all(&dst_data);
+    }
+
+    #[tokio::test]
+    async fn execute_rpc_backup_archive_restore_and_delete_on_a_node() {
+        let data_dir = temp_dir("webdep-node-backup");
+        let site_dir = data_dir.join("sites/bk-demo");
+        let app_dir = site_dir.join("app");
+        std::fs::create_dir_all(app_dir.join("sub")).unwrap();
+        std::fs::write(app_dir.join("a.txt"), "v1").unwrap();
+        std::fs::write(app_dir.join("sub/b.txt"), "inner").unwrap();
+        let mut proj = dummy_project(77, "bk-demo", &site_dir);
+        proj.repo_url = "local".to_string();
+        let exec = Arc::new(NodeExecState::new(data_dir.clone(), test_manifest(Vec::new())));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        // The node builds the backup on its own disk and reports where, how big, and its checksum.
+        let res = execute_rpc(
+            exec.clone(),
+            "b1".to_string(),
+            "project.backup_archive".to_string(),
+            json!({ "project": proj, "backupId": 5, "kind": "full-snapshot", "rawEnv": "K=1\n", "ignore": [] }),
+            tx.clone(),
+        )
+        .await;
+        let ClusterWsMessage::RpcResponse { ok: true, result, .. } = res else { panic!("backup_archive failed: {res:?}") };
+        let archive = result["archivePath"].as_str().unwrap().to_string();
+        let sha = result["sha256"].as_str().unwrap().to_string();
+        assert_eq!(result["files"], 2);
+        assert!(Path::new(&archive).starts_with(&data_dir) && Path::new(&archive).is_file());
+
+        // Bad ignore patterns are refused.
+        let res = execute_rpc(
+            exec.clone(),
+            "b1b".to_string(),
+            "project.backup_archive".to_string(),
+            json!({ "project": proj, "backupId": 6, "kind": "full-snapshot", "rawEnv": "", "ignore": ["../x"] }),
+            tx.clone(),
+        )
+        .await;
+        assert!(matches!(res, ClusterWsMessage::RpcResponse { ok: false, status: 400, .. }));
+
+        // The app changes, then the node restores: replaced, not merged.
+        std::fs::write(app_dir.join("a.txt"), "v2").unwrap();
+        std::fs::write(app_dir.join("extra.txt"), "added later").unwrap();
+        let restore_params = json!({
+            "project": proj, "backupId": 5, "archivePath": archive, "sha256": sha, "files": 2,
+            "envOnly": false, "wasRunning": false, "context": {}
+        });
+        let res = execute_rpc(exec.clone(), "b2".to_string(), "project.backup_restore".to_string(), restore_params.clone(), tx.clone()).await;
+        let ClusterWsMessage::RpcResponse { ok: true, result, .. } = res else { panic!("backup_restore failed: {res:?}") };
+        assert_eq!(result["rawEnv"], "K=1\n");
+        assert_eq!(result["filesReplaced"], true);
+        assert_eq!(std::fs::read_to_string(app_dir.join("a.txt")).unwrap(), "v1");
+        assert!(!app_dir.join("extra.txt").exists());
+        assert!(site_dir.join(".pre-restore").is_dir(), "the previous files are kept for undo");
+
+        // A damaged archive is refused and the live files stay as they are.
+        std::fs::write(app_dir.join("a.txt"), "live").unwrap();
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&archive, &bytes).unwrap();
+        let res = execute_rpc(exec.clone(), "b3".to_string(), "project.backup_restore".to_string(), restore_params, tx.clone()).await;
+        assert!(matches!(res, ClusterWsMessage::RpcResponse { ok: false, status: 500, .. }), "{res:?}");
+        assert_eq!(std::fs::read_to_string(app_dir.join("a.txt")).unwrap(), "live");
+
+        // Deleting only removes files inside the node's backup folder.
+        let outside = data_dir.join("outside.txt");
+        std::fs::write(&outside, "keep").unwrap();
+        let res = execute_rpc(exec.clone(), "b4".to_string(), "project.backup_delete".to_string(), json!({ "archivePath": outside.to_string_lossy() }), tx.clone()).await;
+        let ClusterWsMessage::RpcResponse { result, .. } = res else { panic!("no response") };
+        assert_eq!(result["ok"], false);
+        assert!(outside.exists());
+        let res = execute_rpc(exec.clone(), "b5".to_string(), "project.backup_delete".to_string(), json!({ "archivePath": archive }), tx).await;
+        let ClusterWsMessage::RpcResponse { result, .. } = res else { panic!("no response") };
+        assert_eq!(result["ok"], true);
+        assert!(!Path::new(&archive).exists());
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }

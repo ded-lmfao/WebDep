@@ -1124,4 +1124,85 @@ mod tests {
         assert_eq!(st, StatusCode::CONFLICT);
         let _ = std::fs::remove_dir_all(&deploy);
     }
+
+    #[tokio::test]
+    async fn older_folder_backups_and_env_only_backups_restore_safely() {
+        let state = crate::api::common::tests_state_helper().await;
+        let router = crate::api::create_router(state.clone());
+        let admin = state.auth.create_session(1).await.unwrap();
+        let admin_s = Some((admin.id.as_str(), admin.csrf_token.as_str()));
+
+        let (st, site) = call(&router, Method::POST, "/api/projects", admin_s,
+            json!({"name": "Old", "slug": "old-backups", "repo_url": ""})).await;
+        assert_eq!(st, StatusCode::OK, "{site}");
+        let id = site["id"].as_i64().unwrap();
+        let deploy = std::path::PathBuf::from(site["deploy_dir"].as_str().unwrap());
+        let app = deploy.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("live.txt"), "live").unwrap();
+        std::fs::write(app.join("extra.txt"), "added later").unwrap();
+
+        // A backup made by an earlier version: a folder with files/ and backup.env.
+        let old = deploy.join("backups/backup-1");
+        std::fs::create_dir_all(old.join("files")).unwrap();
+        std::fs::write(old.join("files/live.txt"), "from the old backup").unwrap();
+        std::fs::write(old.join("backup.env"), "OLD=1\n").unwrap();
+        let old_id: i64 = sqlx::query_scalar(
+            "INSERT INTO backups(project_id, kind, path, size_bytes, note, created_at) VALUES($1, 'full-snapshot', $2, 10, 'old', 1) RETURNING id",
+        )
+        .bind(id)
+        .bind(old.to_string_lossy().to_string())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+
+        async fn restore_and_wait(router: &axum::Router, id: i64, backup_id: i64, admin_s: Option<(&str, &str)>) -> serde_json::Value {
+            let (st, res) = call(router, Method::POST, &format!("/api/projects/{id}/backups/restore"), admin_s, json!({"backupId": backup_id})).await;
+            assert_eq!(st, StatusCode::OK, "{res}");
+            for _ in 0..100 {
+                let (_, status) = call(router, Method::GET, &format!("/api/projects/{id}/backups/restore-status"), admin_s, json!({})).await;
+                if status["state"] == "done" || status["state"] == "failed" {
+                    return status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            serde_json::Value::Null
+        }
+
+        let done = restore_and_wait(&router, id, old_id, admin_s).await;
+        assert_eq!(done["state"], "done", "{done}");
+        assert_eq!(std::fs::read_to_string(app.join("live.txt")).unwrap(), "from the old backup");
+        assert!(!app.join("extra.txt").exists(), "older backups now replace files instead of merging");
+        assert!(state.projects.get_env_map(id).await.contains_key("OLD"));
+
+        // An environment-only backup restores the variables and leaves every file alone.
+        state.projects.set_env_var(id, "NEWER", "1", true).await.unwrap();
+        std::fs::write(app.join("later.txt"), "keep me").unwrap();
+        let env_dir = deploy.join("backups/backup-2");
+        std::fs::create_dir_all(&env_dir).unwrap();
+        std::fs::write(env_dir.join("backup.env"), "ONLY=1\n").unwrap();
+        let env_id: i64 = sqlx::query_scalar(
+            "INSERT INTO backups(project_id, kind, path, size_bytes, note, created_at) VALUES($1, 'env-only', $2, 5, 'env', 2) RETURNING id",
+        )
+        .bind(id)
+        .bind(env_dir.to_string_lossy().to_string())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        let done = restore_and_wait(&router, id, env_id, admin_s).await;
+        assert_eq!(done["state"], "done", "{done}");
+        assert!(done["message"].as_str().unwrap().contains("environment variables"), "{done}");
+        assert_eq!(std::fs::read_to_string(app.join("later.txt")).unwrap(), "keep me", "files untouched");
+        let env = state.projects.get_env_map(id).await;
+        assert!(env.contains_key("ONLY") && !env.contains_key("NEWER"));
+
+        // Deleting the app removes its archives.
+        let archive_dir = crate::backups::archive_dir(state.cluster.data_dir(), id);
+        std::fs::create_dir_all(&archive_dir).unwrap();
+        std::fs::write(archive_dir.join("backup-9.tar.gz"), "x").unwrap();
+        let (st, _) = call(&router, Method::DELETE, &format!("/api/projects/{id}"), admin_s, json!({"confirm": "old-backups"})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!archive_dir.exists());
+        let _ = std::fs::remove_dir_all(&deploy);
+    }
 }

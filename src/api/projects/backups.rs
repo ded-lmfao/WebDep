@@ -218,8 +218,8 @@ pub(crate) async fn create_backup_handler(
 
     // Apps on this server are backed up as one archive, built in the background. (A request for
     // an off-node copy keeps the earlier synchronous flow, which returns the finished copy.)
-    if remote_nid.is_none() && !payload.off_node {
-        return create_archive_backup(&state, &actor, &p, note, kind, &payload.ignore).await;
+    if !payload.off_node {
+        return create_archive_backup(&state, &actor, &p, note, kind, &payload.ignore, remote_nid).await;
     }
 
     let (mut total_size, backup_path_str, release_files_dir) = if let Some(nid) = remote_nid {
@@ -471,11 +471,11 @@ pub(crate) async fn restore_backup_handler(
         if status != "complete" {
             return Err((StatusCode::CONFLICT, "This backup isn't complete, so it can't be restored.".into()));
         }
+        // Restoring in place replaces the app's files; a target node moves the app there instead.
+        if payload.target_node_id.is_none() {
+            return start_restore(&state, &actor, &p, payload.backup_id).await;
+        }
         if !archive.is_empty() {
-            // Restoring in place replaces the app's files; a target node moves the app there.
-            if payload.target_node_id.is_none() {
-                return start_archive_restore(&state, &actor, &p, payload.backup_id).await;
-            }
             archive_for_cross_node = archive;
         }
     }
@@ -686,84 +686,16 @@ pub(crate) async fn restore_backup_handler(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
-    if let Some((rel_id, b_path, note, _storage_mode, _core_tgz)) = backup_row {
-        if let Some(nid) = remote_node_id {
-            let res = state
-                .cluster
-                .call_node(
-                    nid,
-                    "project.restore_backup",
-                    serde_json::json!({ "project": &p, "backupPath": b_path }),
-                    std::time::Duration::from_secs(120),
-                )
-                .await?;
-            let raw_env = res["rawEnv"].as_str().unwrap_or("");
-            if !raw_env.trim().is_empty() {
-                let _ = state.projects.set_bulk_env(id, raw_env, true, false).await;
-                state.cluster.sync_remote_env_and_keys(&state.projects, &p).await;
-            }
-            if let Some(target_rel) = rel_id {
-                let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore").await;
-                rollback_on_remote_node(&state, nid, &p, dep_id, target_rel).await?;
-            } else {
-                let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
-                let _ = state
-                    .cluster
-                    .call_node(
-                        nid,
-                        "project.restart",
-                        serde_json::json!({ "project": &p, "context": ctx }),
-                        std::time::Duration::from_secs(60),
-                    )
-                    .await;
-            }
-        } else {
-            let b_dir = std::path::PathBuf::from(&b_path);
-            // Restore .env if present in snapshot
-            let env_file = b_dir.join("backup.env");
-            if let Ok(raw_env) = tokio::fs::read_to_string(&env_file).await {
-                if !raw_env.trim().is_empty() {
-                    let _ = state.projects.set_bulk_env(id, &raw_env, true, false).await;
-                }
-            }
-            // Restore files if present in snapshot
-            let files_dir = b_dir.join("files");
-            let target_current = std::path::PathBuf::from(&p.deploy_dir).join("current");
-            if files_dir.exists() && target_current.exists() {
-                let _ = copy_backup_files(&files_dir, &target_current);
-            }
-            if let Some(target_rel) = rel_id {
-                let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore").await;
-                let deployer = state.deployer.clone();
-                tokio::spawn(async move {
-                    deployer.run_rollback(id, dep_id, target_rel).await;
-                });
-            } else {
-                let _ = state.runtime.stop_project(&p).await;
-                let env = state.projects.get_env_map(id).await;
-                let _ = state.runtime.start_project(&p, env, None).await;
-            }
-        }
-        log_audit_project(&state, Some(id), &actor.username, "backup.restore", Some(&p.name), Some(&note)).await;
-        state.logs.add(
-            Some(id),
-            None,
-            "backup",
-            "info",
-            &format!("Restored backup #{} ({}) for {}", payload.backup_id, note, p.name),
-        );
+    // No backup row: treat the id as a release id and roll back to it.
+    let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore").await;
+    let target_rel = payload.backup_id;
+    if let Some(nid) = remote_node_id {
+        rollback_on_remote_node(&state, nid, &p, dep_id, target_rel).await?;
     } else {
-        // Fallback: treat backup_id as release_id
-        let dep_id = state.deployer.create_deployment(&p, "rollback", &actor.username, "backup-restore").await;
-        let target_rel = payload.backup_id;
-        if let Some(nid) = remote_node_id {
-            rollback_on_remote_node(&state, nid, &p, dep_id, target_rel).await?;
-        } else {
-            let deployer = state.deployer.clone();
-            tokio::spawn(async move {
-                deployer.run_rollback(id, dep_id, target_rel).await;
-            });
-        }
+        let deployer = state.deployer.clone();
+        tokio::spawn(async move {
+            deployer.run_rollback(id, dep_id, target_rel).await;
+        });
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -791,11 +723,21 @@ pub(crate) async fn delete_backup_handler(
             return Err((StatusCode::CONFLICT, "This backup is still being created.".into()));
         }
         if !archive.is_empty() {
-            let root = crate::backups::archives_root(state.cluster.data_dir());
-            if let (Ok(file), Ok(root)) = (tokio::fs::canonicalize(archive).await, tokio::fs::canonicalize(&root).await) {
-                if file.starts_with(&root) {
-                    let _ = tokio::fs::remove_file(&file).await;
-                }
+            let remote = match state.projects.get(id).await.ok().flatten() {
+                Some(p) => state
+                    .cluster
+                    .should_proxy_to_node(p.node_id)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, e))?,
+                None => None,
+            };
+            if let Some(nid) = remote {
+                let _ = state
+                    .cluster
+                    .call_node(nid, "project.backup_delete", serde_json::json!({ "archivePath": archive }), std::time::Duration::from_secs(30))
+                    .await;
+            } else {
+                crate::backups::remove_archive_file(state.cluster.data_dir(), std::path::Path::new(archive));
             }
         }
     }
@@ -897,6 +839,7 @@ async fn create_archive_backup(
     note: String,
     kind: String,
     ignore: &[String],
+    remote: Option<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     const MB: u64 = 1024 * 1024;
     let ignore = if kind == "env-only" {
@@ -912,24 +855,30 @@ async fn create_archive_backup(
     if running > 0 {
         return Err((StatusCode::CONFLICT, "A backup of this app is already being created. Wait for it to finish.".into()));
     }
-    if crate::backups::is_restoring(p.id) {
+    if crate::backups::is_restoring(state.cluster.data_dir(), p.id) {
         return Err((StatusCode::CONFLICT, "This app is being restored. Wait for the restore to finish before backing it up.".into()));
     }
 
-    let root = crate::api::files::service_root(p)?;
     let data_dir = state.cluster.data_dir().to_path_buf();
-    let probe = root.clone();
-    let estimate = tokio::task::spawn_blocking(move || crate::monitor::get_path_disk_size(&probe))
-        .await
-        .unwrap_or(0);
-    if let Some(free) = crate::backups::free_space_bytes(&data_dir) {
-        if estimate > free {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("Not enough free disk space for this backup ({} MB needed, {} MB free).", estimate / MB, free / MB),
-            ));
+    // An app on another VPS is backed up there (the node checks its own disk space).
+    let root = if remote.is_none() {
+        let root = crate::api::files::service_root(p)?;
+        let probe = root.clone();
+        let estimate = tokio::task::spawn_blocking(move || crate::monitor::get_path_disk_size(&probe))
+            .await
+            .unwrap_or(0);
+        if let Some(free) = crate::backups::free_space_bytes(&data_dir) {
+            if estimate > free {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("Not enough free disk space for this backup ({} MB needed, {} MB free).", estimate / MB, free / MB),
+                ));
+            }
         }
-    }
+        Some(root)
+    } else {
+        None
+    };
 
     let source_node_id = p.node_id.or(state.cluster.default_local_node_id().await);
     let backup_id: i64 = sqlx::query_scalar(
@@ -948,7 +897,11 @@ async fn create_archive_backup(
     // Record where the archive will be right away, so the backup shows as the new format while it builds.
     let _ = sqlx::query("UPDATE backups SET archive_path = $2 WHERE id = $1")
         .bind(backup_id)
-        .bind(crate::backups::archive_path(&data_dir, p.id, backup_id).to_string_lossy().to_string())
+        .bind(if remote.is_some() {
+            crate::backups::PENDING_ARCHIVE.to_string()
+        } else {
+            crate::backups::archive_path(&data_dir, p.id, backup_id).to_string_lossy().to_string()
+        })
         .execute(&state.db)
         .await;
 
@@ -957,7 +910,11 @@ async fn create_archive_backup(
 
     let (state, p, actor_name) = (state.clone(), p.clone(), actor.username.clone());
     tokio::spawn(async move {
-        run_archive_backup(state, backup_id, p, root, ignore, actor_name).await;
+        match (remote, root) {
+            (Some(nid), _) => run_remote_archive_backup(state, backup_id, p, nid, ignore, kind, actor_name).await,
+            (None, Some(root)) => run_archive_backup(state, backup_id, p, root, ignore, actor_name).await,
+            (None, None) => {}
+        }
     });
 
     Ok(Json(serde_json::json!({ "ok": true, "backupId": backup_id, "status": "running", "storageMode": "local" })))
@@ -1022,25 +979,50 @@ async fn run_archive_backup(
 // Restore: replace the app's files with a backup
 // ---------------------------------------------------------------------------
 
-/// Starts restoring an archive backup in place and returns at once. Progress is reported by
-/// `GET /api/projects/:id/backups/restore-status`.
-async fn start_archive_restore(
+/// What a restore needs to know about one finished backup.
+struct BackupRow {
+    archive_path: String,
+    path: String,
+    checksum: String,
+    file_count: u64,
+    kind: String,
+    note: String,
+}
+
+impl BackupRow {
+    fn has_archive(&self) -> bool {
+        !self.archive_path.is_empty() && self.archive_path != crate::backups::PENDING_ARCHIVE
+    }
+
+    fn source(&self) -> crate::backups::RestoreSource {
+        if self.has_archive() {
+            crate::backups::RestoreSource::Archive {
+                path: PathBuf::from(&self.archive_path),
+                sha256: self.checksum.clone(),
+                files: self.file_count,
+            }
+        } else {
+            crate::backups::RestoreSource::Dir { path: PathBuf::from(&self.path) }
+        }
+    }
+}
+
+/// Starts restoring a backup in place and returns at once; progress is reported by
+/// `GET /api/projects/:id/backups/restore-status`. Works for archive and earlier folder backups,
+/// for apps on this server and on other VPSes.
+async fn start_restore(
     state: &AppState,
     actor: &crate::auth::User,
     p: &Project,
     backup_id: i64,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if state
+    let remote = state
         .cluster
         .should_proxy_to_node(p.node_id)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-        .is_some()
-    {
-        return Err((StatusCode::CONFLICT, "Restoring this kind of backup on another VPS isn't available yet.".into()));
-    }
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
     let row = sqlx::query(
-        "SELECT archive_path, checksum_sha256, file_count, note FROM backups WHERE id = $1 AND project_id = $2 AND status = 'complete'",
+        "SELECT archive_path, path, checksum_sha256, file_count, kind, note FROM backups WHERE id = $1 AND project_id = $2 AND status = 'complete'",
     )
     .bind(backup_id)
     .bind(p.id)
@@ -1048,13 +1030,20 @@ async fn start_archive_restore(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .ok_or((StatusCode::NOT_FOUND, format!("Backup #{backup_id} not found")))?;
-    let archive = PathBuf::from(row.get::<String, _>(0));
-    let sha: String = row.get(1);
-    let files = row.get::<i64, _>(2).max(0) as u64;
-    let note: String = row.get(3);
+    let backup = BackupRow {
+        archive_path: row.get(0),
+        path: row.get(1),
+        checksum: row.get(2),
+        file_count: row.get::<i64, _>(3).max(0) as u64,
+        kind: row.get(4),
+        note: row.get(5),
+    };
 
-    if !tokio::fs::try_exists(&archive).await.unwrap_or(false) {
-        return Err((StatusCode::CONFLICT, "The backup file is missing from this server, so it can't be restored.".into()));
+    if remote.is_none() {
+        let location = if backup.has_archive() { &backup.archive_path } else { &backup.path };
+        if !tokio::fs::try_exists(location).await.unwrap_or(false) {
+            return Err((StatusCode::CONFLICT, "The backup file is missing from this server, so it can't be restored.".into()));
+        }
     }
     let building: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM backups WHERE project_id = $1 AND status = 'running'")
         .bind(p.id)
@@ -1067,7 +1056,7 @@ async fn start_archive_restore(
     if state.deployer.has_active_deployment(p.id).await {
         return Err((StatusCode::CONFLICT, format!("A deployment of '{}' is in progress. Wait for it to finish, then restore.", p.name)));
     }
-    if !crate::backups::begin_restore(p.id, backup_id) {
+    if !crate::backups::begin_restore(state.cluster.data_dir(), p.id, backup_id) {
         return Err((StatusCode::CONFLICT, "A restore of this app is already running.".into()));
     }
 
@@ -1076,35 +1065,25 @@ async fn start_archive_restore(
     let (state, p, actor_name) = (state.clone(), p.clone(), actor.username.clone());
     tokio::spawn(async move {
         // If the restore task panics, don't leave the app locked as "restoring".
-        let project_id = p.id;
-        let task = tokio::spawn(run_archive_restore(state, p, actor_name, backup_id, archive, sha, files, note));
+        let (project_id, data_dir) = (p.id, state.cluster.data_dir().to_path_buf());
+        let task = tokio::spawn(run_restore(state, p, actor_name, backup_id, backup, remote));
         if let Err(e) = task.await {
-            crate::backups::finish_restore(project_id, false, format!("The restore stopped unexpectedly: {e}"));
+            crate::backups::finish_restore(&data_dir, project_id, false, format!("The restore stopped unexpectedly: {e}"));
         }
     });
 
     Ok(Json(serde_json::json!({ "ok": true, "status": "running", "backupId": backup_id })))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_archive_restore(
-    state: AppState,
-    p: Project,
-    actor: String,
-    backup_id: i64,
-    archive: PathBuf,
-    sha: String,
-    files: u64,
-    note: String,
-) {
-    match restore_archive_in_place(&state, &p, backup_id, &archive, &sha, files).await {
+async fn run_restore(state: AppState, p: Project, actor: String, backup_id: i64, backup: BackupRow, remote: Option<i64>) {
+    match restore_in_place(&state, &p, backup_id, &backup, remote).await {
         Ok(message) => {
-            crate::backups::finish_restore(p.id, true, message.clone());
-            state.logs.add(Some(p.id), None, "backup", "info", &format!("Restored backup #{backup_id} ({note}). {message}"));
-            log_audit_project(&state, Some(p.id), &actor, "backup.restore", Some(&p.name), Some(&format!("Restored backup #{backup_id} ({note})"))).await;
+            crate::backups::finish_restore(state.cluster.data_dir(), p.id, true, message.clone());
+            state.logs.add(Some(p.id), None, "backup", "info", &format!("Restored backup #{backup_id} ({}). {message}", backup.note));
+            log_audit_project(&state, Some(p.id), &actor, "backup.restore", Some(&p.name), Some(&format!("Restored backup #{backup_id} ({})", backup.note))).await;
         }
         Err(error) => {
-            crate::backups::finish_restore(p.id, false, error.clone());
+            crate::backups::finish_restore(state.cluster.data_dir(), p.id, false, error.clone());
             state.logs.add(Some(p.id), None, "backup", "error", &format!("Restore of backup #{backup_id} failed: {error}"));
             log_audit_project(&state, Some(p.id), &actor, "backup.restore_failed", Some(&p.name), Some(&error)).await;
         }
@@ -1112,73 +1091,106 @@ async fn run_archive_restore(
     state.cache.invalidate_all();
 }
 
-/// The restore itself. The backup is proven good and unpacked before the app is touched; the
-/// swap is two renames with rollback, so the app is never left half restored.
-async fn restore_archive_in_place(
+/// The restore itself. The backup is proven good and staged before the app is touched; the swap
+/// is two renames with rollback, so the app is never left half restored. For an app on another
+/// VPS the node does the file work and Core then replaces the environment variables.
+async fn restore_in_place(
     state: &AppState,
     p: &Project,
     backup_id: i64,
-    archive: &std::path::Path,
-    sha: &str,
-    files: u64,
+    backup: &BackupRow,
+    remote: Option<i64>,
 ) -> Result<String, String> {
-    let root = crate::api::files::service_root(p).map_err(|(_, e)| e)?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let work = crate::backups::deploy_base(&p.deploy_dir, &cwd);
-    let real_root = crate::backups::resolve_real_root(&root);
-    let label = root
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "app".to_string());
-
-    // 1-2. Verify the checksum and unpack into a staging folder. Nothing live changes yet.
-    let (archive_c, sha_c, work_c) = (archive.to_path_buf(), sha.to_string(), work.clone());
-    let staged = tokio::task::spawn_blocking(move || {
-        crate::backups::verify_archive(&archive_c, &sha_c)?;
-        crate::backups::stage_archive(&archive_c, &work_c, backup_id, files)
-    })
-    .await
-    .map_err(|e| format!("The restore stopped unexpectedly: {e}"))??;
-
-    // 3. Stop the app (remembering whether it was running).
     let fresh = state.projects.get(p.id).await.ok().flatten().unwrap_or_else(|| p.clone());
     let was_running = matches!(fresh.app_status.as_str(), "running" | "maintenance");
-    if was_running {
-        let _ = state.runtime.stop_project(&fresh).await;
-    }
+    let env_only = backup.kind == "env-only";
 
-    // 4. Swap the folders.
-    let (real_c, new_c, work_c, label_c) = (real_root, staged.new_root.clone(), work.clone(), label);
-    let swapped = tokio::task::spawn_blocking(move || crate::backups::swap_in(&real_c, &new_c, &work_c, &label_c))
-        .await
-        .map_err(|e| format!("The restore stopped unexpectedly: {e}"))?;
-    if let Err(e) = swapped {
-        crate::backups::discard_staged(&staged);
-        if was_running {
-            let env = state.projects.get_env_map(p.id).await;
-            let _ = state.runtime.start_project(&fresh, env, None).await;
+    let (env, files_replaced): (Option<String>, bool) = if let Some(nid) = remote {
+        let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+        let res = state
+            .cluster
+            .call_node(
+                nid,
+                "project.backup_restore",
+                serde_json::json!({
+                    "project": &fresh,
+                    "backupId": backup_id,
+                    "archivePath": if backup.has_archive() { backup.archive_path.as_str() } else { "" },
+                    "backupPath": backup.path,
+                    "sha256": backup.checksum,
+                    "files": backup.file_count,
+                    "envOnly": env_only,
+                    "wasRunning": was_running,
+                    "context": ctx,
+                }),
+                std::time::Duration::from_secs(1800),
+            )
+            .await
+            .map_err(|(_, e)| e)?;
+        (res["rawEnv"].as_str().map(str::to_string), res["filesReplaced"].as_bool().unwrap_or(true))
+    } else {
+        let root = crate::api::files::service_root(p).map_err(|(_, e)| e)?;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let work = crate::backups::deploy_base(&p.deploy_dir, &cwd);
+        let real_root = crate::backups::resolve_real_root(&root);
+        let label = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "app".to_string());
+        let stop = {
+            let (state, fresh) = (state.clone(), fresh.clone());
+            move || async move {
+                if was_running {
+                    let _ = state.runtime.stop_project(&fresh).await;
+                }
+            }
+        };
+        match crate::backups::restore_files(backup.source(), env_only, &work, &real_root, &label, backup_id, stop).await {
+            Ok(outcome) => (outcome.env, outcome.files_replaced),
+            Err(failure) => {
+                if failure.app_stopped && was_running {
+                    let env = state.projects.get_env_map(p.id).await;
+                    let _ = state.runtime.start_project(&fresh, env, None).await;
+                }
+                return Err(failure.message);
+            }
         }
-        let tail = if e.contains("old files back") { "" } else { " Your files were not changed." };
-        return Err(format!("{e}{tail}"));
-    }
+    };
 
-    // 5. Environment variables come back exactly as they were in the backup.
+    // Environment variables come back exactly as they were in the backup.
     let mut notes: Vec<String> = Vec::new();
-    if let Some(env) = &staged.env {
+    if let Some(env) = &env {
         if let Err(e) = state.projects.set_bulk_env(p.id, env, true, true).await {
             notes.push(format!("the environment variables were not restored ({e})"));
+        } else if remote.is_some() {
+            state.cluster.sync_remote_env_and_keys(&state.projects, &fresh).await;
         }
     }
 
-    // 6. Start the app again if it was running.
+    // Start the app again if it was running.
     if was_running {
-        let env = state.projects.get_env_map(p.id).await;
-        if let Err(e) = state.runtime.start_project(&fresh, env, None).await {
-            notes.push(format!("the app didn't start again ({e})"));
+        if let Some(nid) = remote {
+            let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
+            if let Err((_, e)) = state
+                .cluster
+                .call_node(nid, "project.start", serde_json::json!({ "project": &fresh, "context": ctx }), std::time::Duration::from_secs(60))
+                .await
+            {
+                notes.push(format!("the app didn't start again ({e})"));
+            }
+        } else {
+            let env = state.projects.get_env_map(p.id).await;
+            if let Err(e) = state.runtime.start_project(&fresh, env, None).await {
+                notes.push(format!("the app didn't start again ({e})"));
+            }
         }
     }
 
-    let mut message = "Restored. Files that weren't in the backup were removed; the previous files are kept for 24 hours.".to_string();
+    let mut message = if files_replaced {
+        "Restored. Files that weren't in the backup were removed; the previous files are kept for 24 hours.".to_string()
+    } else {
+        "Restored the environment variables. This backup holds only environment variables, so the app's files were not changed.".to_string()
+    };
     if !notes.is_empty() {
         message.push_str(&format!(" Note: {}.", notes.join("; ")));
     }
@@ -1191,7 +1203,7 @@ pub(crate) async fn restore_status_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     verify_power(&state, &headers, "backups", Some(id)).await?;
-    Ok(Json(match crate::backups::restore_status(id) {
+    Ok(Json(match crate::backups::restore_status(state.cluster.data_dir(), id) {
         Some(status) => serde_json::json!(status),
         None => serde_json::json!({ "state": "idle" }),
     }))
@@ -1203,7 +1215,7 @@ pub(crate) async fn undo_housekeeping(state: &AppState, at_startup: bool) {
     let Ok(projects) = state.projects.list().await else { return };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     for p in projects {
-        if crate::backups::is_restoring(p.id) {
+        if crate::backups::is_restoring(state.cluster.data_dir(), p.id) {
             continue;
         }
         let work = crate::backups::deploy_base(&p.deploy_dir, &cwd);
@@ -1280,6 +1292,17 @@ pub(crate) async fn download_backup_handler(
     if archive.is_empty() {
         return Err((StatusCode::CONFLICT, "Only backups made as a single archive can be downloaded.".into()));
     }
+    if let Some(p) = state.projects.get(id).await.ok().flatten() {
+        if state
+            .cluster
+            .should_proxy_to_node(p.node_id)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
+            .is_some()
+        {
+            return Err((StatusCode::CONFLICT, "This backup is stored on another VPS, so it can't be downloaded from here yet.".into()));
+        }
+    }
 
     // The file must be one of WebDep's own backup archives.
     let root = crate::backups::archives_root(state.cluster.data_dir());
@@ -1331,4 +1354,53 @@ pub(crate) async fn download_backup_handler(
         .header(axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
         .body(Body::from_stream(stream))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Builds a backup on the VPS where the app runs, and records where the node saved it.
+async fn run_remote_archive_backup(
+    state: AppState,
+    backup_id: i64,
+    p: Project,
+    node_id: i64,
+    ignore: Vec<String>,
+    kind: String,
+    actor: String,
+) {
+    let env = state.projects.export_raw_env(p.id).await.ok();
+    let result = state
+        .cluster
+        .call_node(
+            node_id,
+            "project.backup_archive",
+            serde_json::json!({ "project": &p, "backupId": backup_id, "kind": kind, "rawEnv": env, "ignore": ignore }),
+            std::time::Duration::from_secs(3600),
+        )
+        .await
+        .map_err(|(_, e)| e)
+        .and_then(|r| {
+            let path = r["archivePath"]
+                .as_str()
+                .ok_or_else(|| "The node didn't report where it saved the backup.".to_string())?
+                .to_string();
+            Ok((path, r["size"].as_u64().unwrap_or(0), r["files"].as_u64().unwrap_or(0), r["sha256"].as_str().unwrap_or("").to_string()))
+        });
+
+    let outcome = match result {
+        Ok((path, size, files, sha)) => crate::backups::finish_ok(&state.db, backup_id, std::path::Path::new(&path), size, files, &sha)
+            .await
+            .map(|()| (files, size))
+            .map_err(|e| format!("Couldn't save the backup record: {e}")),
+        Err(e) => Err(e),
+    };
+    match outcome {
+        Ok((files, size)) => {
+            state.logs.add(Some(p.id), None, "backup", "info", &format!("Backup #{backup_id} complete on its VPS: {files} files, {} KB", size / 1024));
+        }
+        Err(error) => {
+            crate::backups::finish_failed(&state.db, backup_id, &error).await;
+            state.logs.add(Some(p.id), None, "backup", "error", &format!("Backup #{backup_id} failed: {error}"));
+            log_audit_project(&state, Some(p.id), &actor, "backup.failed", Some(&p.name), Some(&error)).await;
+        }
+    }
+    state.cache.invalidate_project(p.id);
 }

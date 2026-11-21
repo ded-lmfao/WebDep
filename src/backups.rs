@@ -329,6 +329,167 @@ pub fn remove_stale_staging(work_dir: &Path) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared by Web-Core (apps on this server) and Web-Nodes (apps on other VPSes)
+// ---------------------------------------------------------------------------
+
+/// Archive path stored while a backup on another VPS is still being built.
+pub const PENDING_ARCHIVE: &str = "pending";
+
+pub struct ArchiveInfo {
+    pub path: PathBuf,
+    pub size: u64,
+    pub files: u64,
+    pub sha256: String,
+}
+
+/// Builds backup `backup_id` of an app: packs `source_root` (and `env`) into the app's archive
+/// folder under `data_dir`. Written as `.part` and renamed only when complete.
+pub fn create_archive_file(
+    data_dir: &Path,
+    project_id: i64,
+    backup_id: i64,
+    source_root: &Path,
+    env: Option<&str>,
+    ignore: &[String],
+) -> Result<ArchiveInfo, String> {
+    let dest = archive_path(data_dir, project_id, backup_id);
+    let part = part_path(&dest);
+    let stats = match crate::cluster::archive::pack_backup_archive(source_root, env, &part, ignore) {
+        Ok(stats) => stats,
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            return Err(e);
+        }
+    };
+    if let Err(e) = std::fs::rename(&part, &dest) {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("Couldn't finish the archive: {e}"));
+    }
+    Ok(ArchiveInfo { path: dest, size: stats.compressed_bytes, files: stats.files, sha256: stats.sha256 })
+}
+
+/// Deletes one backup archive, only if it is inside `data_dir`'s backup archive folder.
+pub fn remove_archive_file(data_dir: &Path, path: &Path) -> bool {
+    let (Ok(file), Ok(root)) = (std::fs::canonicalize(path), std::fs::canonicalize(archives_root(data_dir))) else {
+        return false;
+    };
+    file.starts_with(&root) && file != root && std::fs::remove_file(&file).is_ok()
+}
+
+/// Deletes every backup archive of an app (when the app is deleted).
+pub fn remove_project_archives(data_dir: &Path, project_id: i64) {
+    let _ = std::fs::remove_dir_all(archive_dir(data_dir, project_id));
+}
+
+/// Where a restore reads the backup from: a single archive, or the folder copy that earlier
+/// versions made (`<dir>/files` and `<dir>/backup.env`).
+#[derive(Clone)]
+pub enum RestoreSource {
+    Archive { path: PathBuf, sha256: String, files: u64 },
+    Dir { path: PathBuf },
+}
+
+pub struct RestoreOutcome {
+    pub env: Option<String>,
+    pub undo: Option<PathBuf>,
+    /// False for an environment-only backup, which never touches the app's files.
+    pub files_replaced: bool,
+}
+
+pub struct RestoreFailure {
+    pub message: String,
+    /// The app had already been stopped when this failed, so the caller should start it again.
+    pub app_stopped: bool,
+}
+
+fn read_env_only(src: &RestoreSource, work: &Path, backup_id: i64) -> Result<Option<String>, String> {
+    match src {
+        RestoreSource::Archive { path, sha256, .. } => {
+            verify_archive(path, sha256)?;
+            let extract = work.join(STAGE_DIR).join(format!("env-{backup_id}"));
+            let _ = std::fs::remove_dir_all(&extract);
+            let env = crate::cluster::archive::unpack_tar_gz_safe(path, &extract)
+                .map(|_| std::fs::read_to_string(extract.join("backup.env")).ok())
+                .map_err(|e| format!("{e} Nothing was changed."));
+            let _ = std::fs::remove_dir_all(&extract);
+            env
+        }
+        RestoreSource::Dir { path } => Ok(std::fs::read_to_string(path.join("backup.env")).ok()),
+    }
+}
+
+/// Copies an earlier-format folder backup into staging and checks that every file arrived.
+pub fn stage_dir(backup_dir: &Path, work: &Path, backup_id: i64) -> Result<Staged, String> {
+    let files_dir = backup_dir.join("files");
+    let new_root = work.join(STAGE_DIR).join(format!("new-{backup_id}"));
+    let _ = std::fs::remove_dir_all(&new_root);
+    std::fs::create_dir_all(&new_root).map_err(|e| format!("Couldn't prepare the restored files: {e}. Nothing was changed."))?;
+    crate::api::projects::backups::copy_backup_files(&files_dir, &new_root);
+    let (expected, copied) = (count_files(&files_dir), count_files(&new_root));
+    if expected != copied {
+        let _ = std::fs::remove_dir_all(&new_root);
+        return Err(format!("Only {copied} of the backup's {expected} files could be copied, so it can't be restored. Nothing was changed."));
+    }
+    Ok(Staged { new_root, env: std::fs::read_to_string(backup_dir.join("backup.env")).ok() })
+}
+
+/// Restores an app's files from a backup: replaces them, never merges. The backup is proven good
+/// and staged before `stop_app` runs; the swap rolls back if it fails. An environment-only
+/// backup (or an old folder backup with no files) only returns its environment variables.
+pub async fn restore_files<F, Fut>(
+    src: RestoreSource,
+    env_only: bool,
+    work: &Path,
+    real_root: &Path,
+    label: &str,
+    backup_id: i64,
+    stop_app: F,
+) -> Result<RestoreOutcome, RestoreFailure>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let fail = |message: String, app_stopped: bool| RestoreFailure { message, app_stopped };
+    let env_only = env_only || matches!(&src, RestoreSource::Dir { path } if !path.join("files").exists());
+
+    if env_only {
+        let (s, w) = (src, work.to_path_buf());
+        let env = tokio::task::spawn_blocking(move || read_env_only(&s, &w, backup_id))
+            .await
+            .map_err(|e| fail(format!("The restore stopped unexpectedly: {e}"), false))?
+            .map_err(|m| fail(m, false))?;
+        return Ok(RestoreOutcome { env, undo: None, files_replaced: false });
+    }
+
+    let (s, w) = (src, work.to_path_buf());
+    let staged = tokio::task::spawn_blocking(move || match s {
+        RestoreSource::Archive { path, sha256, files } => {
+            verify_archive(&path, &sha256)?;
+            stage_archive(&path, &w, backup_id, files)
+        }
+        RestoreSource::Dir { path } => stage_dir(&path, &w, backup_id),
+    })
+    .await
+    .map_err(|e| fail(format!("The restore stopped unexpectedly: {e}"), false))?
+    .map_err(|m| fail(m, false))?;
+
+    stop_app().await;
+
+    let (r, n, w, l) = (real_root.to_path_buf(), staged.new_root.clone(), work.to_path_buf(), label.to_string());
+    let swapped = tokio::task::spawn_blocking(move || swap_in(&r, &n, &w, &l))
+        .await
+        .map_err(|e| fail(format!("The restore stopped unexpectedly: {e}"), true))?;
+    match swapped {
+        Ok(undo) => Ok(RestoreOutcome { env: staged.env, undo, files_replaced: true }),
+        Err(e) => {
+            discard_staged(&staged);
+            let tail = if e.contains("old files back") { "" } else { " Your files were not changed." };
+            Err(fail(format!("{e}{tail}"), true))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // One restore at a time per app, and its progress
 // ---------------------------------------------------------------------------
 
@@ -341,35 +502,37 @@ pub struct RestoreStatus {
     pub message: String,
 }
 
-static RESTORES: std::sync::LazyLock<Mutex<HashMap<i64, RestoreStatus>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Keyed by the Core's data folder as well as the app id, so each Core instance has its own.
+static RESTORES: std::sync::LazyLock<Mutex<HashMap<(PathBuf, i64), RestoreStatus>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn restores() -> std::sync::MutexGuard<'static, HashMap<i64, RestoreStatus>> {
+fn restores() -> std::sync::MutexGuard<'static, HashMap<(PathBuf, i64), RestoreStatus>> {
     RESTORES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Marks a restore as started. False when one is already running for the app.
-pub fn begin_restore(project_id: i64, backup_id: i64) -> bool {
+pub fn begin_restore(data_dir: &Path, project_id: i64, backup_id: i64) -> bool {
     let mut map = restores();
-    if map.get(&project_id).is_some_and(|s| s.state == "running") {
+    let key = (data_dir.to_path_buf(), project_id);
+    if map.get(&key).is_some_and(|s| s.state == "running") {
         return false;
     }
-    map.insert(project_id, RestoreStatus { state: "running".into(), backup_id, message: String::new() });
+    map.insert(key, RestoreStatus { state: "running".into(), backup_id, message: String::new() });
     true
 }
 
-pub fn finish_restore(project_id: i64, ok: bool, message: String) {
-    if let Some(s) = restores().get_mut(&project_id) {
+pub fn finish_restore(data_dir: &Path, project_id: i64, ok: bool, message: String) {
+    if let Some(s) = restores().get_mut(&(data_dir.to_path_buf(), project_id)) {
         s.state = if ok { "done" } else { "failed" }.into();
         s.message = message;
     }
 }
 
-pub fn restore_status(project_id: i64) -> Option<RestoreStatus> {
-    restores().get(&project_id).cloned()
+pub fn restore_status(data_dir: &Path, project_id: i64) -> Option<RestoreStatus> {
+    restores().get(&(data_dir.to_path_buf(), project_id)).cloned()
 }
 
-pub fn is_restoring(project_id: i64) -> bool {
-    restores().get(&project_id).is_some_and(|s| s.state == "running")
+pub fn is_restoring(data_dir: &Path, project_id: i64) -> bool {
+    restores().get(&(data_dir.to_path_buf(), project_id)).is_some_and(|s| s.state == "running")
 }
 
 #[cfg(test)]
@@ -599,15 +762,123 @@ mod tests {
 
     #[test]
     fn only_one_restore_runs_per_app() {
-        assert!(begin_restore(990_001, 1));
-        assert!(!begin_restore(990_001, 2), "second restore refused while one runs");
-        assert!(is_restoring(990_001));
-        assert!(begin_restore(990_002, 1), "other apps are independent");
-        finish_restore(990_001, false, "boom".into());
-        assert!(!is_restoring(990_001));
-        assert_eq!(restore_status(990_001).unwrap().state, "failed");
-        assert!(begin_restore(990_001, 3), "a finished restore doesn't block the next");
-        finish_restore(990_001, true, String::new());
-        finish_restore(990_002, true, String::new());
+        let core = Path::new("core-a");
+        assert!(begin_restore(core, 990_001, 1));
+        assert!(!begin_restore(core, 990_001, 2), "second restore refused while one runs");
+        assert!(is_restoring(core, 990_001));
+        assert!(begin_restore(core, 990_002, 1), "other apps are independent");
+        assert!(!is_restoring(Path::new("core-b"), 990_001), "another Core instance has its own state");
+        finish_restore(core, 990_001, false, "boom".into());
+        assert!(!is_restoring(core, 990_001));
+        assert_eq!(restore_status(core, 990_001).unwrap().state, "failed");
+        assert!(begin_restore(core, 990_001, 3), "a finished restore doesn't block the next");
+        finish_restore(core, 990_001, true, String::new());
+        finish_restore(core, 990_002, true, String::new());
+    }
+
+    #[tokio::test]
+    async fn an_environment_only_backup_never_touches_the_files() {
+        let dir = scratch("envonly");
+        let work = dir.join("w");
+        let root = work.join("app");
+        tree(&root, &[("a.txt", "live")]);
+        // An env-only backup is an archive with no files in it.
+        let archive = dir.join("e.tar.gz");
+        let stats = pack_backup_archive(&root, Some("K=1\n"), &archive, &["*".to_string()]).unwrap();
+        assert_eq!(stats.files, 0);
+
+        let src = RestoreSource::Archive { path: archive, sha256: stats.sha256, files: 0 };
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        let outcome = restore_files(src, true, &work, &root, "app", 1, || async { stopped.store(true, std::sync::atomic::Ordering::SeqCst) })
+            .await
+            .map_err(|f| f.message)
+            .unwrap();
+        assert_eq!(outcome.env.as_deref(), Some("K=1\n"));
+        assert!(!outcome.files_replaced);
+        assert!(!stopped.load(std::sync::atomic::Ordering::SeqCst), "the app isn't stopped for an env-only restore");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "live", "files untouched");
+        assert!(!work.join(UNDO_DIR).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_older_folder_backup_replaces_files_and_one_without_files_changes_nothing() {
+        let dir = scratch("legacy");
+        let work = dir.join("w");
+        let root = work.join("current");
+        tree(&root, &[("a.txt", "live edit"), ("extra.txt", "added later")]);
+        // The folder layout earlier versions wrote: <backup>/files/... and <backup>/backup.env
+        let backup = work.join("backups/backup-1");
+        tree(&backup, &[("files/a.txt", "from backup"), ("files/sub/b.txt", "kept"), ("backup.env", "OLD=1\n")]);
+
+        let outcome = restore_files(RestoreSource::Dir { path: backup.clone() }, false, &work, &root, "current", 1, || async {})
+            .await
+            .map_err(|f| f.message)
+            .unwrap();
+        assert!(outcome.files_replaced);
+        assert_eq!(outcome.env.as_deref(), Some("OLD=1\n"));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "from backup");
+        assert_eq!(std::fs::read_to_string(root.join("sub/b.txt")).unwrap(), "kept");
+        assert!(!root.join("extra.txt").exists(), "replaced, not merged");
+        assert_eq!(std::fs::read_to_string(outcome.undo.unwrap().join("extra.txt")).unwrap(), "added later");
+
+        // A folder backup with no files folder (an env-only one) must never wipe the app.
+        let env_only = work.join("backups/backup-2");
+        tree(&env_only, &[("backup.env", "ONLY=1\n")]);
+        let outcome = restore_files(RestoreSource::Dir { path: env_only }, false, &work, &root, "current", 2, || async {})
+            .await
+            .map_err(|f| f.message)
+            .unwrap();
+        assert!(!outcome.files_replaced);
+        assert_eq!(outcome.env.as_deref(), Some("ONLY=1\n"));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "from backup", "files untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_app_is_only_stopped_after_the_backup_is_proven_good() {
+        let dir = scratch("stoporder");
+        let work = dir.join("w");
+        let root = work.join("app");
+        tree(&root, &[("a.txt", "live")]);
+        let (archive, sha, files) = make_backup(&dir, &root, "");
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&archive, &bytes).unwrap();
+
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        let src = RestoreSource::Archive { path: archive, sha256: sha, files };
+        let failure = restore_files(src, false, &work, &root, "app", 3, || async { stopped.store(true, std::sync::atomic::Ordering::SeqCst) })
+            .await
+            .err()
+            .expect("a damaged backup fails");
+        assert!(failure.message.contains("damaged"), "{}", failure.message);
+        assert!(!failure.app_stopped);
+        assert!(!stopped.load(std::sync::atomic::Ordering::SeqCst), "the app keeps running when the backup is bad");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "live");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_files_inside_the_archive_folder_can_be_removed() {
+        let dir = scratch("remove");
+        let inside = archive_dir(&dir, 9);
+        std::fs::create_dir_all(&inside).unwrap();
+        let archive = inside.join("backup-1.tar.gz");
+        std::fs::write(&archive, "x").unwrap();
+        let outside = dir.join("precious.txt");
+        std::fs::write(&outside, "keep me").unwrap();
+
+        assert!(!remove_archive_file(&dir, &outside), "a file outside the archive folder is refused");
+        assert!(outside.exists());
+        assert!(!remove_archive_file(&dir, &archives_root(&dir)), "the folder itself is refused");
+        assert!(remove_archive_file(&dir, &archive));
+        assert!(!archive.exists());
+
+        std::fs::write(&archive, "x").unwrap();
+        remove_project_archives(&dir, 9);
+        assert!(!inside.exists(), "deleting an app removes all of its archives");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

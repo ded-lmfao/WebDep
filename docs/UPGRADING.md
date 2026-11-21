@@ -81,12 +81,16 @@ doesn't read.
   it is stopped and can't be started until it is under the limit or an admin raises it (apps on
   other nodes are not measured yet). The backup limit refuses a new backup once the app holds
   that many; databases have no backups.
-- **Backups of websites and services** (**Releases › Snapshots & Off-Node Backups**): a backup
-  is now one `.tar.gz` under `data/backups/apps/project-<id>/`, outside the app's own folder, with
-  its size, file count, creator, status (Creating, Complete, Failed) and SHA-256. It is built in
-  the background and includes everything under the app's Files folder (including `node_modules`
-  and `.git`) plus its environment variables. A backup cut off by a restart is marked Failed and
-  its unfinished file is removed. Backups made before this release still work and still restore.
+- **Backups of websites and services**: a backup is now one `.tar.gz` under
+  `data/backups/apps/project-<id>/` on the server where the app runs (Web-Core for apps on the
+  Core server, the VPS itself for apps on other VPSes), outside the app's own folder, with its
+  size, file count, creator, status (Creating, Complete, Failed) and SHA-256. It is built in the
+  background and includes everything under the app's Files folder (including `node_modules` and
+  `.git`) plus its environment variables. A backup cut off by a restart is marked Failed and its
+  unfinished file is removed. Deleting a backup deletes its file, and deleting an app removes all
+  of its archives. Backups made before this release still work. The optional "also keep a copy on
+  Web-Core" for apps on other VPSes is off by default and still makes the earlier folder copy; a
+  backup stored on a VPS can't be downloaded from Core yet.
 - **Backups screen** (**Releases › Backups**): each backup shows its note, status (Creating,
   Complete, Failed with the reason), size and file count, when it was made and by whom. The
   buttons restore it, download it as a `.tar.gz`, lock it (a locked backup can't be deleted),
@@ -97,8 +101,12 @@ doesn't read.
   checksum, unpacks it beside the app, stops the app, swaps the folders, restores the saved
   environment variables (replacing the current ones), and starts the app again if it was
   running. Files that weren't in the backup are removed. If anything fails before the swap,
-  nothing changes; if the swap itself fails, the old files are put back. The files that were
-  replaced are kept for 24 hours in `.pre-restore/` inside the app's folder so you can undo.
-  Restoring and deploying can't run at the same time for one app.
+  nothing changes and the app keeps running; if the swap itself fails, the old files are put
+  back. The files that were replaced are kept for 24 hours in `.pre-restore/` inside the app's
+  folder so you can undo. Restoring and deploying can't run at the same time for one app. This
+  also applies to backups made by earlier versions (they used to merge) and to apps on other
+  VPSes (the VPS does the file work; a VPS running an older WebDep shows the usual "update this
+  node" message). A backup that holds only environment variables restores just those and never
+  touches the files.
 - **Audit history per app** keeps the newest 50 entries for each website or service; older ones
   are deleted as new ones arrive. Panel-wide entries keep the days-based retention.
