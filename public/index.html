@@ -104,7 +104,7 @@
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
                 <circle cx="12" cy="7" r="4"></circle>
               </svg>
-              <input type="text" id="login-username" class="form-control" placeholder="username" required
+              <input type="text" id="login-username" class="form-control" placeholder="Username or email" required
                 autocomplete="username webauthn">
             </div>
           </div>
@@ -122,7 +122,7 @@
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
                 <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
               </svg>
-              <input type="password" id="login-password" class="form-control" placeholder="••••••••••••" required
+              <input type="password" id="login-password" class="form-control" placeholder="Password" required
                 autocomplete="current-password">
             </div>
           </div>
@@ -188,7 +188,7 @@
           </div>
           <div class="form-group">
             <label class="form-label" for="register-email">Email</label>
-            <input type="email" id="register-email" class="form-control" required autocomplete="email" placeholder="name@company.com">
+            <input type="email" id="register-email" class="form-control" required autocomplete="email" placeholder="Email address">
           </div>
           <div class="form-group">
             <label class="form-label" for="register-username">Username</label>
@@ -216,7 +216,7 @@
           <div class="form-group">
             <label class="form-label" for="login-2fa-code">Authenticator or Recovery Code</label>
             <input type="text" id="login-2fa-code" class="form-control login-2fa-input"
-              placeholder="123456 or ABCD-1234" required autocomplete="one-time-code">
+              placeholder="Authenticator or recovery code" required autocomplete="one-time-code">
           </div>
           <button type="submit" class="btn btn-primary btn-login-submit" id="login-2fa-btn">
             <span>Verify &amp; Sign In</span>
@@ -1525,12 +1525,12 @@
               <div class="env-quick-field env-quick-key">
                 <label class="env-quick-label" for="env-quick-key-input">Key</label>
                 <input type="text" id="env-quick-key-input" class="form-control env-mono-input"
-                  placeholder="e.g. API_SECRET (or paste KEY=VALUE)" autocomplete="off">
+                  placeholder="Variable name (or paste KEY=VALUE)" autocomplete="off">
               </div>
               <div class="env-quick-field env-quick-val">
                 <label class="env-quick-label" for="env-quick-val-input">Value</label>
                 <input type="text" id="env-quick-val-input" class="form-control env-mono-input"
-                  placeholder="e.g. your-secret-value" autocomplete="off">
+                  placeholder="Variable value" autocomplete="off">
               </div>
               <div class="env-quick-field env-quick-type">
                 <span class="env-quick-label">Visibility</span>
@@ -1696,7 +1696,7 @@
                 </div>
               </div>
               <textarea id="env-raw-editor-textarea" class="form-control env-raw-textarea" rows="16" spellcheck="false"
-                placeholder="# Paste or edit your .env variables here&#10;PORT=3000&#10;NODE_ENV=production&#10;JWT_SECRET=your-secret-key"
+                placeholder="Paste or edit KEY=VALUE lines, one per line"
                 aria-label="Raw .env editor"></textarea>
               <div
                 style="display: flex; justify-content: space-between; align-items: center; margin-top: 12px; flex-wrap: wrap; gap: 10px;">
@@ -1824,7 +1824,7 @@
 
               <div style="display: flex; align-items: center; gap: 8px;">
                 <input type="text" class="form-control" id="platform-update-repo-input"
-                  placeholder="owner/repo or https://github.com/owner/repo.git"
+                  placeholder="Repository (owner/name or Git URL)"
                   style="flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11.5px;"
                   aria-label="Platform update repository">
                 <button type="button" class="btn btn-secondary btn-sm" id="save-platform-repo-btn"
@@ -2035,7 +2035,7 @@
                 </div>
                 <div class="form-group">
                   <label class="form-label" for="account-email">Email</label>
-                  <input type="email" id="account-email" class="form-control" placeholder="name@company.com">
+                  <input type="email" id="account-email" class="form-control" placeholder="Email address">
                 </div>
                 <div class="project-card-actions" style="justify-content: flex-start;">
                   <button type="submit" class="btn btn-primary btn-sm" id="account-profile-save">Save profile</button>
@@ -2455,11 +2455,11 @@
             style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; margin-bottom: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-name">Website Name *</label>
-              <input type="text" id="website-name" class="form-control" placeholder="e.g. LSMD Portal" required>
+              <input type="text" id="website-name" class="form-control" placeholder="Website name" required>
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-port">Port *</label>
-              <input type="number" id="website-port" class="form-control" placeholder="3000" required min="1"
+              <input type="number" id="website-port" class="form-control" placeholder="Port" required min="1"
                 max="65535">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
@@ -2480,14 +2480,14 @@
                   Repos &nearr;</a>
               </div>
               <input type="text" id="website-repo" class="form-control"
-                placeholder="https://github.com/owner/repo.git (optional)">
+                placeholder="Git repository URL (optional)">
               <select id="github-repos-select" class="form-control"
                 style="display: none; margin-top: 6px; font-size: 12px;" aria-label="Select GitHub repository"></select>
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-domains">Custom Domains <span
                   style="color:var(--text-dim); font-weight:400;">(optional)</span></label>
-              <input type="text" id="website-domains" class="form-control" placeholder="app.example.com">
+              <input type="text" id="website-domains" class="form-control" placeholder="Domain name">
             </div>
           </div>
 
@@ -2496,15 +2496,15 @@
             style="display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; margin-bottom: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-install-cmd">Install Command</label>
-              <input type="text" id="website-install-cmd" class="form-control" placeholder="npm ci">
+              <input type="text" id="website-install-cmd" class="form-control" placeholder="Install command">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-build-cmd">Build Command</label>
-              <input type="text" id="website-build-cmd" class="form-control" placeholder="npm run build">
+              <input type="text" id="website-build-cmd" class="form-control" placeholder="Build command">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-start-cmd">Start Command *</label>
-              <input type="text" id="website-start-cmd" class="form-control" placeholder="node server.js" required>
+              <input type="text" id="website-start-cmd" class="form-control" placeholder="Start command" required>
             </div>
           </div>
 
@@ -2530,7 +2530,7 @@
           <div class="form-group" id="website-allowed-ips-wrap" style="display: none; margin-bottom: 12px;">
             <label class="form-label" for="website-allowed-ips">Allowed Client IP Addresses / CIDRs</label>
             <textarea id="website-allowed-ips" class="form-control" rows="2"
-              placeholder="e.g. 203.0.113.80, 198.51.100.0/24 (comma or newline separated)"
+              placeholder="IP addresses or CIDR ranges, comma or newline separated"
               style="font-family: var(--font-mono); font-size: 12.5px;"></textarea>
             <span class="form-hint">Firewall rules (UFW) will be configured to strictly permit connections to this port
               from these remote IPs.</span>
@@ -2615,7 +2615,7 @@
             style="display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="service-name">Service Name *</label>
-              <input type="text" id="service-name" class="form-control" placeholder="e.g. My Backend Service" required>
+              <input type="text" id="service-name" class="form-control" placeholder="Service name" required>
             </div>
             <div class="form-group" id="service-branch-group" style="margin-bottom: 0; display: none;">
               <label class="form-label" for="service-branch">Branch *</label>
@@ -2632,7 +2632,7 @@
                 Repos &nearr;</a>
             </div>
             <input type="text" id="service-repo" class="form-control"
-              placeholder="https://github.com/owner/repository.git">
+              placeholder="Git repository URL">
             <select id="service-github-repos-select" class="form-control"
               style="display: none; margin-top: 6px; font-size: 12px;" aria-label="Select GitHub repository"></select>
           </div>
@@ -2644,12 +2644,12 @@
               <label class="form-label" for="service-install-cmd">Install Command <span
                   style="color:var(--text-dim); font-weight:400;">(optional)</span></label>
               <input type="text" id="service-install-cmd" class="form-control"
-                placeholder="e.g. npm ci or pip install -r requirements.txt">
+                placeholder="Install command">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="service-start-cmd">Start Command *</label>
               <input type="text" id="service-start-cmd" class="form-control"
-                placeholder="e.g. java -jar Lavalink.jar or node index.js" required>
+                placeholder="Start command" required>
             </div>
           </div>
 
@@ -2658,13 +2658,13 @@
             style="display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-bottom: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="service-port">Assigned Port *</label>
-              <input type="number" id="service-port" class="form-control" placeholder="e.g. 1112 or 8000" min="1"
+              <input type="number" id="service-port" class="form-control" placeholder="Port" min="1"
                 max="65535" required>
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="service-domain">Custom Domain <span
                   style="color:var(--text-dim); font-weight:400;">(optional)</span></label>
-              <input type="text" id="service-domain" class="form-control" placeholder="e.g. service.yourdomain.com">
+              <input type="text" id="service-domain" class="form-control" placeholder="Domain name">
             </div>
           </div>
 
@@ -2690,7 +2690,7 @@
           <div class="form-group" id="service-allowed-ips-wrap" style="display: none; margin-bottom: 12px;">
             <label class="form-label" for="service-allowed-ips">Allowed Client IP Addresses / CIDRs</label>
             <textarea id="service-allowed-ips" class="form-control" rows="2"
-              placeholder="e.g. 203.0.113.80, 198.51.100.0/24 (comma or newline separated)"
+              placeholder="IP addresses or CIDR ranges, comma or newline separated"
               style="font-family: var(--font-mono); font-size: 12.5px;"></textarea>
             <span class="form-hint">Firewall rules (UFW) will be configured to strictly permit connections to this port
               from these remote IPs.</span>
@@ -2729,7 +2729,7 @@
             </label>
             <div style="display: flex; gap: 8px;">
               <input type="text" id="caddy-domains-input" class="form-control"
-                placeholder="e.g. portal.example.com, app.example.com">
+                placeholder="Domain names, comma separated">
               <button class="btn btn-primary" id="caddy-save-domains-btn" onclick="saveCaddyDomains()"
                 style="white-space: nowrap;">Save &amp; Apply</button>
             </div>
@@ -2791,11 +2791,11 @@
           <form id="add-env-form" autocomplete="off" onsubmit="handleSaveEnv(event); return false;">
             <div class="form-group">
               <label class="form-label" for="env-key-input">Variable Key *</label>
-              <input type="text" id="env-key-input" class="form-control" placeholder="API_SECRET" autocomplete="off">
+              <input type="text" id="env-key-input" class="form-control" placeholder="Variable name" autocomplete="off">
             </div>
             <div class="form-group">
               <label class="form-label" for="env-value-input">Value *</label>
-              <textarea id="env-value-input" class="form-control" rows="3" placeholder="your-secret-value" autocomplete="off"></textarea>
+              <textarea id="env-value-input" class="form-control" rows="3" placeholder="Variable value" autocomplete="off"></textarea>
             </div>
             <div class="form-group">
               <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
@@ -2817,7 +2817,7 @@
           </div>
           <div class="form-group">
             <textarea id="env-bulk-input" class="form-control" rows="11"
-              placeholder="# Paste your .env file here&#10;PORT=3000&#10;JWT_SECRET=supersecret123&#10;NODE_ENV=production"
+              placeholder="Paste KEY=VALUE lines, one per line"
               style="font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.5; tab-size: 2; white-space: pre;"></textarea>
             <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Supports KEY=VALUE, comments (#),
               optional "export", and quoted strings.</p>
@@ -2896,27 +2896,27 @@
           <p class="acct-editor-note" style="margin-top:0">Adds a tool to the module list on every VPS. The panel installs it with the server's own package manager and checks it by running the command below.</p>
           <div class="acct-grid-2">
             <div class="form-group"><label class="form-label" for="cm-name">Name</label>
-              <input id="cm-name" class="form-control" maxlength="40" placeholder="FFmpeg" required></div>
+              <input id="cm-name" class="form-control" maxlength="40" placeholder="Module name" required></div>
             <div class="form-group"><label class="form-label" for="cm-command">Check command</label>
-              <input id="cm-command" class="form-control" maxlength="64" placeholder="ffmpeg" required></div>
+              <input id="cm-command" class="form-control" maxlength="64" placeholder="Command name" required></div>
             <div class="form-group"><label class="form-label" for="cm-version">Version flag</label>
-              <input id="cm-version" class="form-control" maxlength="80" placeholder="-version"></div>
+              <input id="cm-version" class="form-control" maxlength="80" placeholder="Version flag"></div>
             <div class="form-group"><label class="form-label" for="cm-desc">Description</label>
-              <input id="cm-desc" class="form-control" maxlength="200" placeholder="Video and audio converter"></div>
+              <input id="cm-desc" class="form-control" maxlength="200" placeholder="Short description"></div>
           </div>
           <div class="acct-editor-heading" style="margin-top:6px">Package names</div>
           <p class="acct-editor-note">Fill in the managers your servers use. Separate several packages with spaces.</p>
           <div class="acct-grid-2">
             <div class="form-group"><label class="form-label" for="cm-pkg-apt">apt (Debian, Ubuntu)</label>
-              <input id="cm-pkg-apt" class="form-control" placeholder="ffmpeg"></div>
+              <input id="cm-pkg-apt" class="form-control" placeholder="Package names"></div>
             <div class="form-group"><label class="form-label" for="cm-pkg-dnf">dnf / yum (Fedora, RHEL)</label>
-              <input id="cm-pkg-dnf" class="form-control" placeholder="ffmpeg-free"></div>
+              <input id="cm-pkg-dnf" class="form-control" placeholder="Package names"></div>
             <div class="form-group"><label class="form-label" for="cm-pkg-apk">apk (Alpine)</label>
-              <input id="cm-pkg-apk" class="form-control" placeholder="ffmpeg"></div>
+              <input id="cm-pkg-apk" class="form-control" placeholder="Package names"></div>
             <div class="form-group"><label class="form-label" for="cm-pkg-pacman">pacman (Arch)</label>
-              <input id="cm-pkg-pacman" class="form-control" placeholder="ffmpeg"></div>
+              <input id="cm-pkg-pacman" class="form-control" placeholder="Package names"></div>
             <div class="form-group"><label class="form-label" for="cm-pkg-winget">winget (Windows)</label>
-              <input id="cm-pkg-winget" class="form-control" placeholder="Gyan.FFmpeg"></div>
+              <input id="cm-pkg-winget" class="form-control" placeholder="Package IDs"></div>
           </div>
         </form>
       </div>
@@ -3024,7 +3024,7 @@
             </div>
             <div style="display: flex; gap: 8px; flex-wrap: wrap;">
               <input type="text" id="passkey-device-name" class="form-control"
-                placeholder="e.g. iPhone Face ID or Android Fingerprint" style="flex: 1; min-width: 190px;">
+                placeholder="Device name" style="flex: 1; min-width: 190px;">
               <button type="button" class="btn btn-primary" id="register-passkey-btn" onclick="registerNewPasskey()"
                 style="display: inline-flex; align-items: center; gap: 8px;">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -3090,7 +3090,7 @@
             </div>
             <div class="form-group" id="pwd-2fa-group" style="display: none;">
               <label class="form-label" for="pwd-2fa-code">6-Digit 2FA Authenticator Code *</label>
-              <input type="text" id="pwd-2fa-code" class="form-control" placeholder="123456" autocomplete="off"
+              <input type="text" id="pwd-2fa-code" class="form-control" placeholder="6-digit code" autocomplete="off"
                 style="font-family: var(--font-mono); letter-spacing: 0.12em;">
             </div>
             <label
@@ -3156,7 +3156,7 @@
               </div>
               <div class="form-group">
                 <label class="form-label" for="tfa-verify-code">2. Enter 6-Digit Code from Authenticator App *</label>
-                <input type="text" id="tfa-verify-code" class="form-control" placeholder="123456" maxlength="10"
+                <input type="text" id="tfa-verify-code" class="form-control" placeholder="6-digit code" maxlength="10"
                   autocomplete="one-time-code"
                   style="font-family: var(--font-mono); font-size: 16px; letter-spacing: 0.14em; text-align: center; font-weight: 600;">
               </div>
@@ -3206,7 +3206,7 @@
             </div>
             <div class="form-group">
               <label class="form-label" for="tfa-disable-code">6-Digit Authenticator Code or Recovery Code *</label>
-              <input type="text" id="tfa-disable-code" class="form-control" placeholder="123456 or ABCD-1234"
+              <input type="text" id="tfa-disable-code" class="form-control" placeholder="Authenticator or recovery code"
                 autocomplete="off" style="font-family: var(--font-mono);">
             </div>
             <button type="button" class="btn btn-danger" style="width: 100%;" onclick="disable2fa()">
@@ -3265,7 +3265,7 @@
           <div class="form-group">
             <label class="form-label" for="release-note-input">Release Note / Version Tag</label>
             <input type="text" id="release-note-input" class="form-control"
-              placeholder="e.g. Release v2.0 - Production">
+              placeholder="Release note">
             <span class="form-hint">Recorded in the control database and kept as an instant rollback target.</span>
           </div>
         </form>
@@ -3289,23 +3289,23 @@
         <form id="create-database-form" autocomplete="off" onsubmit="handleCreateDatabaseSubmit(event)">
           <div class="form-group">
             <label class="form-label" for="db-create-name">Display Name</label>
-            <input type="text" id="db-create-name" class="form-control" placeholder="e.g. Production PostgreSQL"
+            <input type="text" id="db-create-name" class="form-control" placeholder="Display name"
               required autocomplete="off">
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
             <div class="form-group">
               <label class="form-label" for="db-create-dbname">Database Name</label>
-              <input type="text" id="db-create-dbname" class="form-control" placeholder="e.g. app_production" required autocomplete="off">
+              <input type="text" id="db-create-dbname" class="form-control" placeholder="Database name" required autocomplete="off">
             </div>
             <div class="form-group">
               <label class="form-label" for="db-create-user">Database User</label>
-              <input type="text" id="db-create-user" class="form-control" placeholder="e.g. app_user" required autocomplete="off">
+              <input type="text" id="db-create-user" class="form-control" placeholder="Database user" required autocomplete="off">
             </div>
           </div>
           <div class="form-group">
             <label class="form-label" for="db-create-password">Password</label>
             <div style="display: flex; gap: 8px;">
-              <input type="password" id="db-create-password" class="form-control" placeholder="Strong password" required
+              <input type="password" id="db-create-password" class="form-control" placeholder="Password" required
                 autocomplete="new-password" style="font-family: var(--font-mono);">
               <button type="button" class="btn btn-secondary btn-sm"
                 onclick="togglePasswordVisibility('db-create-password')">Show</button>
@@ -3330,7 +3330,7 @@
           <div class="form-group">
             <label class="form-label" for="db-create-domain">Custom Domain / Hostname <span
                 style="color:var(--text-dim); font-weight:400;">(optional)</span></label>
-            <input type="text" id="db-create-domain" class="form-control" placeholder="e.g. postgres.yourdomain.com">
+            <input type="text" id="db-create-domain" class="form-control" placeholder="Domain name">
             <span class="form-hint">If set, external connection URLs and psql commands will use this hostname instead of
               the VPS IP address.</span>
           </div>
@@ -3346,7 +3346,7 @@
           <div class="form-group" id="db-create-allowed-ips-wrap" style="display: none;">
             <label class="form-label" for="db-create-allowed-ips">Allowed Client IP Addresses / CIDRs</label>
             <textarea id="db-create-allowed-ips" class="form-control" rows="2"
-              placeholder="e.g. 203.0.113.80, 198.51.100.0/24"
+              placeholder="IP addresses or CIDR ranges"
               style="font-family: var(--font-mono); font-size: 12.5px;"></textarea>
             <span class="form-hint">Firewall rules (UFW) will be configured to strictly permit connections from these
               remote IPs.</span>
@@ -3498,18 +3498,18 @@
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="add-node-label">Name</label>
-              <input type="text" class="form-control" id="add-node-label" value="VPS-2" placeholder="e.g. VPS-2">
+              <input type="text" class="form-control" id="add-node-label" value="VPS-2" placeholder="Node name">
             </div>
             <div class="form-group">
               <label class="form-label" for="add-node-region">Region</label>
-              <input type="text" class="form-control" id="add-node-region" value="mumbai-IND" placeholder="e.g. mumbai-IND">
+              <input type="text" class="form-control" id="add-node-region" value="mumbai-IND" placeholder="Region">
             </div>
           </div>
 
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="add-node-target-ip">New VPS public IP <span style="color: var(--text-dim); font-weight: 400;">(optional)</span></label>
-              <input type="text" class="form-control" id="add-node-target-ip" placeholder="e.g. 203.0.113.25">
+              <input type="text" class="form-control" id="add-node-target-ip" placeholder="Public IP address">
             </div>
             <div class="form-group">
               <label class="form-label" for="add-node-ttl">Command expires in</label>

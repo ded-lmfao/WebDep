@@ -260,7 +260,7 @@ export async function deleteDatabase(id, name) {
   const typed = await showPromptDialog({
     title: `Delete database "${name}"`,
     message: `This stops the database and permanently deletes all of its data on disk. It can't be undone.\n\nType "${name}" to confirm:`,
-    placeholder: name,
+    placeholder: 'Type the name to confirm',
     confirmText: 'Delete database',
     danger: true,
   });

@@ -490,7 +490,7 @@ export async function renameClusterNode(nodeId) {
   const value = await showPromptDialog({
     title: 'Rename node',
     message: `Name shown for this node in the panel. Leave empty to use its own name (${node.name}). Letters, digits, spaces and - _ . ( ) # only, up to 48 characters.`,
-    placeholder: node.name,
+    placeholder: 'Node name',
     defaultValue: node.displayName || '',
     confirmText: 'Save',
   });

@@ -653,7 +653,7 @@ async function deleteProject(id) {
   const typed = await showPromptDialog({
     title: `Delete ${delNoun} "${name}"`,
     message: `This stops the ${delNoun} and permanently removes its files, settings, releases, and data. It can't be undone.\n\nType "${name}" to confirm:`,
-    placeholder: name,
+    placeholder: 'Type the name to confirm',
     confirmText: `Delete ${delNoun}`,
     danger: true,
   });

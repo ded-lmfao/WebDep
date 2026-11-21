@@ -207,7 +207,7 @@ function renderEnvTableFromState() {
               <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleSelectEnvVar(${keyJs}, this.checked)">
             </td>
             <td>
-              <input type="text" id="env-inline-edit-key" class="form-control env-mono-input" value="${escapeHtml(envUiState.editDraft.key)}" placeholder="KEY_NAME" autocomplete="off" onkeydown="handleInlineEditKeydown(event, ${keyJs})">
+              <input type="text" id="env-inline-edit-key" class="form-control env-mono-input" value="${escapeHtml(envUiState.editDraft.key)}" placeholder="Variable name" autocomplete="off" onkeydown="handleInlineEditKeydown(event, ${keyJs})">
             </td>
             <td>
               <input type="text" id="env-inline-edit-val" class="form-control env-mono-input" value="${escapeHtml(envUiState.editDraft.value)}" placeholder="Variable value" autocomplete="off" onkeydown="handleInlineEditKeydown(event, ${keyJs})">
@@ -514,7 +514,7 @@ function renderMultiEditTable() {
   tbody.innerHTML = envUiState.multiRows.map((row, idx) => `
     <tr data-multi-idx="${idx}">
       <td>
-        <input type="text" class="form-control env-mono-input multi-env-key" value="${escapeHtml(row.key)}" placeholder="KEY_NAME" autocomplete="off">
+        <input type="text" class="form-control env-mono-input multi-env-key" value="${escapeHtml(row.key)}" placeholder="Variable name" autocomplete="off">
       </td>
       <td>
         <input type="text" class="form-control env-mono-input multi-env-val" value="${escapeHtml(row.value)}" placeholder="Value" autocomplete="off">

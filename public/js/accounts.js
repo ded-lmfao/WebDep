@@ -570,7 +570,7 @@ function renderEditor() {
       <div class="form-group"><label class="form-label" for="ue-name">Full name</label>
         <input id="ue-name" class="form-control" maxlength="80" value="${escapeHtml(user?.displayName || '')}" ${canEditProfile ? '' : 'disabled'}></div>
       <div class="form-group"><label class="form-label" for="ue-email">Email</label>
-        <input id="ue-email" type="email" class="form-control" value="${escapeHtml(user?.email || '')}" placeholder="name@company.com" ${canEditProfile ? '' : 'disabled'}></div>
+        <input id="ue-email" type="email" class="form-control" value="${escapeHtml(user?.email || '')}" placeholder="Email address" ${canEditProfile ? '' : 'disabled'}></div>
       <div class="form-group"><label class="form-label" for="ue-username">Username</label>
         <input id="ue-username" class="form-control" value="${escapeHtml(user?.username || '')}" ${isNew ? '' : 'disabled'} autocomplete="off"></div>
       <div class="form-group"><label class="form-label" for="ue-password">${isNew ? 'Temporary password' : 'Reset password'}</label>
