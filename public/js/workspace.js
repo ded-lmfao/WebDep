@@ -689,7 +689,7 @@ function renderWebsiteWorkspaceHeader() {
           ${canMaint ? `<button class="btn btn-secondary btn-sm" onclick="toggleMaintenanceMode(${p.id})" title="${isMaintenance ? 'Show the live site to visitors again' : 'Show visitors a maintenance page'}">${I.maint}<span>${isMaintenance ? 'Exit maintenance' : 'Maintenance'}</span></button>` : ''}
           ${canDomains ? `<button class="btn btn-secondary btn-sm" onclick="openNginxModal(${p.id})" title="Domains and SSL certificates">${I.globe}<span>Domains</span></button>` : ''}
           ${canManage ? `<button class="btn btn-secondary btn-sm" onclick="${settingsAction}" title="${isService ? 'Service settings' : 'Website settings'}">${I.gear}<span>Settings</span></button>` : ''}
-          ${canDelete ? `<button class="btn btn-sm ws-btn-delete" onclick="deleteProject(${p.id})" title="Delete this ${isService ? 'service' : 'website'}">${I.trash}<span>Delete</span></button>` : ''}
+          ${canDelete ? `<button class="btn btn-sm btn-icon ws-btn-delete" onclick="deleteProject(${p.id})" title="Delete this ${isService ? 'service' : 'website'}" aria-label="Delete this ${isService ? 'service' : 'website'}">${I.trash}</button>` : ''}
         </div>
       `;
     }
