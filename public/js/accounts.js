@@ -118,6 +118,9 @@ document.querySelector('[data-admin-enter]')?.addEventListener('click', () => {
 });
 document.querySelector('[data-admin-exit]')?.addEventListener('click', () => nav('overview'));
 byId('user-profile-snippet')?.addEventListener('click', () => nav('account'));
+byId('user-profile-snippet')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nav('account'); }
+});
 
 async function refreshRequestBadge() {
   const badges = [byId('badge-requests-count'), byId('badge-admin-requests')];

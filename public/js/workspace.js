@@ -810,7 +810,7 @@ function renderCurrentView() {
       activeSidebarView = (curP && curP.project_kind === 'service') ? 'services' : 'projects';
     }
   }
-  document.querySelectorAll('.nav-item').forEach((item) => {
+  document.querySelectorAll('.nav-item, .user-snippet[data-view]').forEach((item) => {
     item.classList.toggle('active', item.getAttribute('data-view') === activeSidebarView);
   });
   document.querySelectorAll('#mobile-bottom-nav .mobile-nav-item[data-mobile-view]').forEach((item) => {

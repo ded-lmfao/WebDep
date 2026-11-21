@@ -408,13 +408,6 @@
 
       <div class="sidebar-footer" style="flex-direction: column; align-items: stretch; gap: 8px;">
         <div class="nav-group nav-group-account">
-          <a class="nav-item" data-view="account">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-              <circle cx="12" cy="7" r="4"></circle>
-            </svg>
-            <span>My Account</span>
-          </a>
           <a class="nav-item nav-item-admin-entry" data-admin-enter hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
@@ -425,8 +418,8 @@
           </a>
         </div>
         <div class="sidebar-user-row" style="display: flex; align-items: center; justify-content: space-between;">
-          <div class="user-snippet" id="user-profile-snippet" style="cursor: pointer;"
-            title="Open My Account">
+          <div class="user-snippet" id="user-profile-snippet" data-view="account" role="button" tabindex="0" style="cursor: pointer;"
+            title="My Account" aria-label="My Account">
             <div class="user-avatar" id="current-user-avatar">AD</div>
             <div class="user-info">
               <span class="user-name" id="current-user-name">Admin</span>
