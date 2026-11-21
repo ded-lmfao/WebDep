@@ -87,6 +87,12 @@ doesn't read.
   the background and includes everything under the app's Files folder (including `node_modules`
   and `.git`) plus its environment variables. A backup cut off by a restart is marked Failed and
   its unfinished file is removed. Backups made before this release still work and still restore.
+- **Backups screen** (**Releases › Backups**): each backup shows its note, status (Creating,
+  Complete, Failed with the reason), size and file count, when it was made and by whom. The
+  buttons restore it, download it as a `.tar.gz`, lock it (a locked backup can't be deleted),
+  or delete it. **Create backup** asks for an optional note and optional file or folder names to
+  leave out. The header shows how many backups the app holds against its limit. Restoring asks
+  you to type the app's name first.
 - **Restoring a backup replaces the app's files; it never merges.** WebDep checks the backup's
   checksum, unpacks it beside the app, stops the app, swaps the folders, restores the saved
   environment variables (replacing the current ones), and starts the app again if it was

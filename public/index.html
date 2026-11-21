@@ -1097,38 +1097,30 @@
           </div>
 
           <div class="card" style="margin-top: 16px;">
-            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+            <div class="card-header bk-header">
               <div>
-                <span class="card-title">Snapshots &amp; Off-Node Backups</span>
-                <span style="font-size: 12px; color: var(--text-dim); margin-left: 8px;">Off-Node archives are stored on Web-Core for cross-node disaster recovery</span>
+                <span class="card-title">Backups</span>
+                <span class="bk-usage" id="backups-usage"></span>
               </div>
-              <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); cursor: pointer;">
-                  <input type="checkbox" id="backup-offnode-checkbox" checked>
-                  <span>Off-Node Archive (Web-Core)</span>
-                </label>
-                <button class="btn btn-secondary btn-sm" id="create-backup-snapshot-btn" onclick="createProjectBackupSnapshot()">
-                  + Take Snapshot
-                </button>
-              </div>
+              <button class="btn btn-primary btn-sm" id="create-backup-snapshot-btn" onclick="openCreateBackupModal()">Create backup</button>
             </div>
+            <div class="bk-banner" id="backups-restore-banner" role="status" hidden></div>
             <div class="card-body" style="padding: 0;">
               <div class="table-responsive">
-                <table class="table">
+                <table class="table bk-table">
                   <thead>
                     <tr>
                       <th>Backup</th>
                       <th>Status</th>
                       <th>Storage</th>
                       <th>Size</th>
-                      <th>Note</th>
                       <th>Created</th>
-                      <th>Restore Target &amp; Actions</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody id="backups-table-body">
                     <tr>
-                      <td colspan="7" style="text-align: center; padding: 20px;">Select a website to view backups.</td>
+                      <td colspan="6" style="text-align: center; padding: 20px;">Select a website to view backups.</td>
                     </tr>
                   </tbody>
                 </table>
@@ -3736,6 +3728,38 @@
       </div>
       <div class="modal-footer" style="padding: 12px 20px; justify-content: flex-end;" id="update-modal-footer">
         <button class="btn btn-secondary btn-sm" id="update-dismiss-btn" data-close-modal disabled>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: CREATE BACKUP -->
+  <div class="modal-overlay" id="modal-create-backup">
+    <div class="modal-container" style="max-width: 480px;">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title">Create backup</h3>
+          <div style="font-size: 11.5px; color: var(--text-dim); margin-top: 2px;">Saves every file in the app's Files folder and its environment variables.</div>
+        </div>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="backup-note">Note</label>
+          <input type="text" id="backup-note" class="form-control" maxlength="200" placeholder="What this backup is for" autocomplete="off">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="backup-ignore">Leave out (optional)</label>
+          <textarea id="backup-ignore" class="form-control" rows="3" placeholder="File or folder names, one per line"></textarea>
+          <span class="form-hint">Matches names at any depth. A name, <code>*.ext</code>, or <code>prefix*</code>. Nothing is left out by default.</span>
+        </div>
+        <label id="backup-offnode-wrap" class="form-checkbox" style="font-size: 13px;" hidden>
+          <input type="checkbox" id="backup-offnode-checkbox" checked>
+          <span>Also keep a copy on Web-Core (for recovery if this VPS is lost)</span>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-close-modal>Cancel</button>
+        <button class="btn btn-primary" id="backup-create-confirm" onclick="submitCreateBackup()">Create backup</button>
       </div>
     </div>
   </div>

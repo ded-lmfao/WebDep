@@ -14,6 +14,7 @@ import {
   openModal,
   closeModal,
   showConfirmDialog,
+  showPromptDialog,
   nodeLabel,
 } from './state.js';
 import { api, toast } from './api.js';
@@ -35,6 +36,8 @@ async function loadReleasesView() {
       tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; padding: 24px;">No releases created yet.</td></tr>';
       const bar = document.getElementById('releases-pagination');
       if (bar) bar.innerHTML = '';
+      // Backups don't depend on releases: still load them.
+      await loadProjectBackupsTable(p);
       return;
     }
 
@@ -77,21 +80,74 @@ function formatBackupSize(bytes) {
 }
 
 let backupPollTimer = null;
+const lastBackupStatus = new Map();
+const lastRestoreState = new Map();
+const backupsById = new Map();
+
+const BK_ICONS = {
+  restore: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 3"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  unlock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
+};
+
+function bkButton(icon, cls, label, onclick, disabled = false) {
+  const svg = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${BK_ICONS[icon]}</svg>`;
+  return `<button type="button" class="btn btn-sm btn-icon bk-btn ${cls}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}" onclick="${onclick}" ${disabled ? 'disabled' : ''}>${svg}</button>`;
+}
 
 function appIsOnCoreServer(p) {
   const local = (state.nodes || []).find((n) => n.isLocal);
   return !p.node_id || (local && Number(p.node_id) === Number(local.id));
 }
-const lastBackupStatus = new Map();
 
 function backupStatusBadge(b) {
   if (b.status === 'running') return '<span class="badge badge-warning"><span class="btn-spinner"></span> Creating</span>';
-  if (b.status === 'failed') return `<span class="badge badge-danger" title="${escapeHtml(b.error || 'The backup failed')}">Failed</span>`;
+  if (b.status === 'failed') return `<span class="badge badge-danger" title="${escapeHtml(b.error || 'The backup failed')}">Failed</span>${b.error ? `<div class="bk-error">${escapeHtml(b.error)}</div>` : ''}`;
   return '<span class="badge badge-success">Complete</span>';
 }
 
-/** Toasts when a backup this page was waiting on finishes, and keeps refreshing while any is running. */
-function trackBackupProgress(p, backups) {
+/** "3 of 5 backups, 190 MB" above the table, and the Create button when the limit is reached. */
+function updateBackupsHeader(p, backups) {
+  const held = backups.filter((b) => b.status !== 'failed');
+  const bytes = held.filter((b) => b.status === 'complete').reduce((n, b) => n + (b.size || 0), 0);
+  const limit = Number(p.backup_limit) || 0;
+  const count = limit > 0 ? `${held.length} of ${limit} backups` : `${held.length} backup${held.length === 1 ? '' : 's'}`;
+  const usage = document.getElementById('backups-usage');
+  if (usage) usage.textContent = `${count}${bytes ? ` · ${formatBackupSize(bytes)}` : ''}`;
+  const btn = document.getElementById('create-backup-snapshot-btn');
+  if (btn) {
+    const atLimit = limit > 0 && held.length >= limit;
+    btn.hidden = !hasPower('backups');
+    btn.disabled = atLimit;
+    btn.title = atLimit ? 'This app holds its limit of backups. Delete one first or ask an admin to raise the limit.' : '';
+  }
+}
+
+/** Shows "Restoring..." while a restore runs; reports how it ended. Returns true while running. */
+async function refreshRestoreBanner(p) {
+  const banner = document.getElementById('backups-restore-banner');
+  let status = null;
+  try {
+    status = await api(`/api/projects/${p.id}/backups/restore-status`, { noCache: true });
+  } catch (_) { /* leave as is */ }
+  const running = status?.state === 'running';
+  if (banner) {
+    banner.hidden = !running;
+    if (running) banner.textContent = `Restoring backup #${status.backupId}. The app is stopped until it finishes.`;
+  }
+  if (lastRestoreState.get(p.id) === 'running' && status && status.state !== 'running') {
+    if (status.state === 'done') toast(status.message || 'Restore finished.', 'success');
+    else toast(`Restore failed: ${status.message}`, 'error');
+    if (typeof window.refreshProjects === 'function') void window.refreshProjects();
+  }
+  lastRestoreState.set(p.id, status?.state ?? null);
+  return running;
+}
+
+/** Toasts when a backup this page was waiting on finishes, and keeps refreshing while anything runs. */
+function trackBackupProgress(p, backups, restoring) {
   clearTimeout(backupPollTimer);
   for (const b of backups) {
     const was = lastBackupStatus.get(b.id);
@@ -99,7 +155,7 @@ function trackBackupProgress(p, backups) {
     if (was === 'running' && b.status === 'failed') toast(`Backup #${b.id} failed: ${b.error || 'unknown error'}`, 'error');
     lastBackupStatus.set(b.id, b.status);
   }
-  if (backups.some((b) => b.status === 'running')) {
+  if (restoring || backups.some((b) => b.status === 'running')) {
     backupPollTimer = setTimeout(() => {
       if (state.currentView === 'releases' && getSelectedProject()?.id === p.id) void loadProjectBackupsTable(p);
     }, 2000);
@@ -109,19 +165,23 @@ function trackBackupProgress(p, backups) {
 async function loadProjectBackupsTable(p) {
   const tbody = document.getElementById('backups-table-body');
   if (!tbody || !p) return;
-  // The off-node copy only matters for apps on other VPSes; apps on this server are already on Web-Core.
-  const offNodeLabel = document.getElementById('backup-offnode-checkbox')?.closest('label');
-  if (offNodeLabel) offNodeLabel.style.display = appIsOnCoreServer(p) ? 'none' : '';
   try {
+    const restoring = await refreshRestoreBanner(p);
     const backups = await api(`/api/projects/${p.id}/backups`, { noCache: true });
+    backupsById.clear();
+    (Array.isArray(backups) ? backups : []).forEach((b) => backupsById.set(b.id, b));
+    updateBackupsHeader(p, Array.isArray(backups) ? backups : []);
     if (!Array.isArray(backups) || !backups.length) {
-      setHtmlIfChanged(tbody, '<tr><td colspan="7" style="text-align: center; padding: 20px;">No backups or snapshots recorded yet.</td></tr>');
+      setHtmlIfChanged(tbody, '<tr><td colspan="6" style="text-align: center; padding: 20px;">No backups yet. Create one to be able to restore this app later.</td></tr>');
       return;
     }
-    trackBackupProgress(p, backups);
+    trackBackupProgress(p, backups, restoring);
+    const canManage = hasPower('backups');
     const onlineNodes = (state.nodes || []).filter((n) => n.status === 'online');
     const html = backups.map((b) => {
       const isOffNode = b.storageMode === 'off-node';
+      const done = b.status === 'complete';
+      const archive = b.format === 'archive';
       const storageBadge = isOffNode
         ? '<span class="badge badge-info">Off-Node (Core)</span>'
         : '<span class="badge badge-neutral">Local</span>';
@@ -130,48 +190,59 @@ async function loadProjectBackupsTable(p) {
             `<option value="${n.id}" ${Number(n.id) === Number(p.node_id) ? 'selected' : ''}>${escapeHtml(nodeLabel(n))}</option>`
           ).join('')
         : '<option value="">Current Node</option>';
+      const actions = canManage ? [
+        isOffNode && onlineNodes.length && state.user?.isAdmin
+          ? `<select id="backup-restore-node-${b.id}" class="form-control bk-node" aria-label="Restore onto node">${nodeOptions}</select>` : '',
+        done ? bkButton('restore', 'bk-restore', `Restore backup #${b.id}`, `restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})`, restoring) : '',
+        done && archive ? bkButton('download', 'bk-download', `Download backup #${b.id}`, `downloadProjectBackup(${p.id}, ${b.id})`) : '',
+        bkButton(b.locked ? 'lock' : 'unlock', `bk-lock ${b.locked ? 'is-locked' : ''}`, b.locked ? 'Unlock: allow deleting' : 'Lock: prevent deleting', `toggleBackupLock(${p.id}, ${b.id}, ${!b.locked})`, b.status === 'running'),
+        bkButton('trash', 'bk-delete', b.locked ? 'Locked: unlock it to delete' : `Delete backup #${b.id}`, `deleteProjectBackup(${p.id}, ${b.id})`, b.status === 'running' || b.locked),
+      ].join('') : '';
       return `
         <tr>
-          <td><strong>#${b.id}</strong> <span style="font-size:11.5px; color:var(--text-dim);">${escapeHtml(b.kind || '')}${b.createdBy ? ` &middot; ${escapeHtml(b.createdBy)}` : ''}</span></td>
+          <td class="bk-name"><strong>${escapeHtml(b.note || `Backup #${b.id}`)}</strong>
+            <small>#${b.id} &middot; ${escapeHtml(b.kind || '')}${b.createdBy ? ` &middot; by ${escapeHtml(b.createdBy)}` : ''}${b.locked ? ' &middot; locked' : ''}</small></td>
           <td>${backupStatusBadge(b)}</td>
           <td>${storageBadge}</td>
-          <td>${b.status === 'running' ? '-' : `${formatBackupSize(b.size)}${b.fileCount ? ` <span style="font-size:11.5px; color:var(--text-dim);">${b.fileCount} files</span>` : ''}`}</td>
-          <td style="max-width:220px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(b.note || '')}</td>
-          <td>${formatDate(b.ts)}</td>
-          <td>
-            <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-              ${isOffNode && onlineNodes.length && state.user?.isAdmin ? `<select id="backup-restore-node-${b.id}" class="form-control" style="width:130px; height:28px; font-size:11.5px; padding:2px 6px;">${nodeOptions}</select>` : ''}
-              ${hasPower('backups') && b.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})">Restore</button>` : ''}
-              ${hasPower('backups') ? `<button class="btn btn-danger btn-sm" onclick="deleteProjectBackup(${p.id}, ${b.id})" ${b.status === 'running' ? 'disabled' : ''} ${b.locked ? 'title="Locked: unlock it before deleting"' : ''}>Delete</button>` : ''}
-            </div>
-          </td>
+          <td>${b.status === 'running' ? '-' : `${formatBackupSize(b.size)}${b.fileCount ? `<small class="bk-sub">${b.fileCount} files</small>` : ''}`}</td>
+          <td class="bk-created" title="${escapeHtml(formatDate(b.ts))}">${escapeHtml(formatDate(b.ts))}<small class="bk-sub">${escapeHtml(formatRelativeTime(b.ts))}</small></td>
+          <td><div class="bk-actions">${actions}</div></td>
         </tr>
       `;
     }).join('');
     setHtmlIfChanged(tbody, html);
   } catch (err) {
-    setHtmlIfChanged(tbody, `<tr><td colspan="7" style="text-align: center; color: var(--danger); padding: 20px;">${escapeHtml(err.message)}</td></tr>`);
+    setHtmlIfChanged(tbody, `<tr><td colspan="6" style="text-align: center; color: var(--danger); padding: 20px;">${escapeHtml(err.message)}</td></tr>`);
   }
 }
 
-async function createProjectBackupSnapshot() {
+function openCreateBackupModal() {
   const p = getSelectedProject();
   if (!p) {
     toast('Select a website first.', 'warning');
     return;
   }
+  document.getElementById('backup-note').value = '';
+  document.getElementById('backup-ignore').value = '';
+  const wrap = document.getElementById('backup-offnode-wrap');
+  if (wrap) wrap.hidden = appIsOnCoreServer(p);
+  openModal('modal-create-backup');
+}
+
+async function submitCreateBackup() {
+  const p = getSelectedProject();
+  if (!p) return;
+  const btn = document.getElementById('backup-create-confirm');
+  const note = document.getElementById('backup-note').value.trim();
+  const ignore = document.getElementById('backup-ignore').value.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
   const offNode = !appIsOnCoreServer(p) && Boolean(document.getElementById('backup-offnode-checkbox')?.checked);
-  const btn = document.getElementById('create-backup-snapshot-btn');
   if (btn) btn.disabled = true;
   try {
     const res = await api(`/api/projects/${p.id}/backup`, {
       method: 'POST',
-      body: {
-        kind: 'full-snapshot',
-        note: offNode ? 'Off-node archive snapshot' : 'Manual snapshot',
-        offNode,
-      },
+      body: { kind: 'full-snapshot', note: note || (offNode ? 'Off-node archive snapshot' : 'Manual backup'), offNode, ignore },
     });
+    closeModal('modal-create-backup');
     toast(res.status === 'running' ? `Backup #${res.backupId} started. It keeps running in the background.` : `Created ${res.storageMode || 'local'} backup #${res.backupId}`, 'success');
     lastBackupStatus.set(res.backupId, res.status || 'complete');
     await loadProjectBackupsTable(p);
@@ -182,45 +253,46 @@ async function createProjectBackupSnapshot() {
   }
 }
 
-/** Waits for an in-place restore to finish, then reports how it went. */
-async function waitForRestore(projectId, backupId) {
-  for (let i = 0; i < 800; i += 1) {
-    await new Promise((r) => setTimeout(r, 1500));
-    const status = await api(`/api/projects/${projectId}/backups/restore-status`, { noCache: true });
-    if (status.state === 'done') {
-      toast(status.message || `Restored backup #${backupId}`, 'success');
-      return true;
-    }
-    if (status.state === 'failed') {
-      toast(`Restore failed: ${status.message}`, 'error');
-      return false;
-    }
-  }
-  toast('The restore is taking longer than expected. Check the backups list.', 'warning');
-  return false;
-}
-
 async function restoreProjectBackup(projectId, backupId, isOffNode) {
   const sel = document.getElementById(`backup-restore-node-${backupId}`);
   const targetNodeId = isOffNode && sel && sel.value ? Number(sel.value) : null;
-  const ok = await showConfirmDialog({
-    title: `Restore Backup #${backupId}`,
-    message: targetNodeId
-      ? `Restore off-node backup #${backupId} onto Node #${targetNodeId}?`
-      : `Replace ALL current files with backup #${backupId}? Files added or changed since the backup are removed (the current files are kept for 24 hours so you can undo). The app is stopped during the restore and started again if it was running.`,
-    confirmText: 'Restore Backup',
-    danger: true,
-  });
-  if (!ok) return;
+  const p = (state.projects || []).find((x) => x.id === projectId);
+  const b = backupsById.get(backupId);
+
+  if (!targetNodeId && b?.format === 'archive' && p) {
+    const typed = await showPromptDialog({
+      title: `Restore backup #${backupId}`,
+      message: `Backup #${backupId} (${formatDate(b.ts)}${b.note ? `, "${b.note}"` : ''}) will replace ALL current files of "${p.name}". Files added or changed since then are removed; the current files are kept for 24 hours so you can undo. The app is stopped during the restore and started again if it was running.\n\nType "${p.name}" to confirm:`,
+      placeholder: 'Type the app name to confirm',
+      confirmText: 'Restore backup',
+      danger: true,
+    });
+    if (typed === null) return;
+    if (typed.trim() !== p.name) {
+      toast("The name didn't match, so nothing was restored.", 'warning');
+      return;
+    }
+  } else {
+    const ok = await showConfirmDialog({
+      title: `Restore Backup #${backupId}`,
+      message: targetNodeId
+        ? `Restore off-node backup #${backupId} onto Node #${targetNodeId}?`
+        : `Restore backup #${backupId} on the active node?`,
+      confirmText: 'Restore Backup',
+      danger: true,
+    });
+    if (!ok) return;
+  }
   try {
     const body = targetNodeId ? { backupId, targetNodeId } : { backupId };
     const res = await api(`/api/projects/${projectId}/backups/restore`, { method: 'POST', body });
     if (res && res.status === 'running') {
       toast(`Restoring backup #${backupId}. The app is stopped until it finishes.`, 'info');
-      await waitForRestore(projectId, backupId);
-    } else {
-      toast(`Restored backup #${backupId}`, 'success');
+      lastRestoreState.set(projectId, 'running');
+      if (p) await loadProjectBackupsTable(p);
+      return;
     }
+    toast(`Restored backup #${backupId}`, 'success');
     if (typeof window.refreshProjects === 'function') await window.refreshProjects();
     await loadReleasesView();
   } catch (err) {
@@ -228,10 +300,31 @@ async function restoreProjectBackup(projectId, backupId, isOffNode) {
   }
 }
 
+function downloadProjectBackup(projectId, backupId) {
+  // A normal navigation, so the browser streams the file to disk instead of holding it in memory.
+  const a = document.createElement('a');
+  a.href = `/api/projects/${projectId}/backups/${backupId}/download`;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function toggleBackupLock(projectId, backupId, locked) {
+  try {
+    await api(`/api/projects/${projectId}/backups/${backupId}/lock`, { method: 'PUT', body: { locked } });
+    toast(locked ? `Backup #${backupId} locked.` : `Backup #${backupId} unlocked.`, 'info');
+    const p = (state.projects || []).find((x) => x.id === projectId);
+    if (p) await loadProjectBackupsTable(p);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 async function deleteProjectBackup(projectId, backupId) {
   const ok = await showConfirmDialog({
     title: `Delete Backup #${backupId}`,
-    message: `Remove backup #${backupId} permanently?`,
+    message: `Remove backup #${backupId} permanently? This also deletes its file.`,
     confirmText: 'Delete Backup',
     danger: true,
   });
@@ -433,7 +526,11 @@ window.rollbackToRelease = rollbackToRelease;
 window.deleteRelease = deleteRelease;
 window.openCreateReleaseModal = openCreateReleaseModal;
 window.confirmCreateRelease = confirmCreateRelease;
-window.createProjectBackupSnapshot = createProjectBackupSnapshot;
+window.openCreateBackupModal = openCreateBackupModal;
+window.createProjectBackupSnapshot = openCreateBackupModal;
+window.submitCreateBackup = submitCreateBackup;
+window.downloadProjectBackup = downloadProjectBackup;
+window.toggleBackupLock = toggleBackupLock;
 window.restoreProjectBackup = restoreProjectBackup;
 window.deleteProjectBackup = deleteProjectBackup;
 

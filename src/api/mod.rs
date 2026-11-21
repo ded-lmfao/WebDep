@@ -106,6 +106,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/projects/:id/backups/restore", post(restore_backup_handler))
         .route("/api/projects/:id/backups/restore-status", get(restore_status_handler))
         .route("/api/projects/:id/backups/:backup_id", delete(delete_backup_handler))
+        .route("/api/projects/:id/backups/:backup_id/lock", put(lock_backup_handler))
+        .route("/api/projects/:id/backups/:backup_id/download", get(download_backup_handler))
         // Project Env
         .route("/api/projects/:id/env", get(get_env_handler).put(set_env_handler).post(set_env_handler))
         .route("/api/projects/:id/env/bulk", post(bulk_set_env_handler))

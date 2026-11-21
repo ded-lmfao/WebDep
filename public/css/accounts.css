@@ -270,3 +270,22 @@
 .lim-table .limits-disk .lim-input { width: 90px; }
 .lim-table .limits-disk select { height: 30px; padding: 2px 6px; font-size: 12.5px; width: 64px; }
 @media (max-width: 560px) { .limits-grid { grid-template-columns: 1fr; } }
+
+/* Backups card */
+.bk-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.bk-usage { font-size: 12px; color: var(--text-dim); margin-left: 8px; }
+.bk-banner { margin: 0 16px 12px; padding: 8px 12px; border-radius: var(--radius-sm, 6px); font-size: 12.5px; background: var(--warning-bg); border: 1px solid var(--warning-border); color: var(--warning-light); }
+.bk-name small, .bk-sub { display: block; color: var(--text-dim); font-size: 11.5px; font-weight: 400; }
+.bk-error { color: var(--danger-light); font-size: 11.5px; margin-top: 4px; max-width: 220px; }
+.bk-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.bk-node { width: 130px; height: 28px; font-size: 11.5px; padding: 2px 6px; }
+.bk-btn { width: 30px; height: 30px; padding: 0 !important; justify-content: center; background: transparent !important; border: 1px solid var(--border) !important; color: var(--text-muted) !important; }
+.bk-btn:disabled { opacity: .4; cursor: not-allowed; }
+.bk-restore { color: var(--warning-light) !important; border-color: var(--warning-border) !important; }
+.bk-restore:hover:not(:disabled) { background: var(--warning-bg) !important; }
+.bk-download { color: var(--info-light, var(--accent)) !important; border-color: var(--info-border, var(--border)) !important; }
+.bk-download:hover:not(:disabled) { background: var(--info-bg) !important; }
+.bk-lock:hover:not(:disabled) { background: var(--ink-2) !important; }
+.bk-lock.is-locked { color: var(--warning-light) !important; border-color: var(--warning-border) !important; background: var(--warning-bg) !important; }
+.bk-delete { color: var(--danger-light) !important; border-color: var(--danger-border) !important; }
+.bk-delete:hover:not(:disabled) { background: var(--danger-fill) !important; color: #fff !important; }

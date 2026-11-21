@@ -993,12 +993,39 @@ mod tests {
         assert!(archive.is_file());
         assert!(!archive.starts_with(&deploy));
 
+        // The archive downloads as a file whose bytes match its checksum.
+        let (sid, csrf) = admin_s.unwrap();
+        let dl = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/projects/{id}/backups/{bid}/download"))
+                    .header(header::COOKIE, format!("nd_session={sid}"))
+                    .header("x-csrf-token", csrf)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dl.status(), StatusCode::OK);
+        assert!(dl.headers()[header::CONTENT_DISPOSITION].to_str().unwrap().contains(&format!("-{bid}.tar.gz")));
+        let bytes = axum::body::to_bytes(dl.into_body(), 64 * 1024 * 1024).await.unwrap();
+        assert_eq!(bytes.len() as u64, std::fs::metadata(&archive).unwrap().len());
+        assert_eq!(format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes)), item["checksumSha256"].as_str().unwrap());
+
         // A locked backup can't be deleted; once unlocked, deleting removes the archive too.
-        sqlx::query("UPDATE backups SET locked = TRUE WHERE id = $1").bind(bid).execute(&state.db).await.unwrap();
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{id}/backups/{bid}/lock"), admin_s, json!({"locked": true})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, list) = call(&router, Method::GET, &format!("/api/projects/{id}/backups"), admin_s, json!({})).await;
+        assert!(list.as_array().unwrap().iter().any(|b| b["id"] == bid && b["locked"] == true));
         let (st, _) = call(&router, Method::DELETE, &format!("/api/projects/{id}/backups/{bid}"), admin_s, json!({})).await;
         assert_eq!(st, StatusCode::CONFLICT);
         assert!(archive.is_file());
-        sqlx::query("UPDATE backups SET locked = FALSE WHERE id = $1").bind(bid).execute(&state.db).await.unwrap();
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{id}/backups/{bid}/lock"), admin_s, json!({"locked": false})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{id}/backups/99999/lock"), admin_s, json!({"locked": true})).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
         let (st, _) = call(&router, Method::DELETE, &format!("/api/projects/{id}/backups/{bid}"), admin_s, json!({})).await;
         assert_eq!(st, StatusCode::OK);
         assert!(!archive.exists());

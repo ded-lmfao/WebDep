@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use axum::{
+    body::Body,
     extract::{Path as AxPath, State},
     http::{HeaderMap, StatusCode},
     response::Response,
@@ -1215,4 +1216,119 @@ pub(crate) async fn undo_housekeeping(state: &AppState, at_startup: bool) {
         .await
         .ok();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lock and download
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub(crate) struct LockBackupPayload {
+    pub locked: bool,
+}
+
+/// Locks a backup so it can't be deleted by mistake, or unlocks it.
+pub(crate) async fn lock_backup_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath((id, backup_id)): AxPath<(i64, i64)>,
+    Json(payload): Json<LockBackupPayload>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_power(&state, &headers, "backups", Some(id)).await?;
+    let done = sqlx::query("UPDATE backups SET locked = $3 WHERE id = $1 AND project_id = $2")
+        .bind(backup_id)
+        .bind(id)
+        .bind(payload.locked)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if done.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, format!("Backup #{backup_id} not found")));
+    }
+    state.cache.invalidate_project(id);
+    log_audit_project(
+        &state,
+        Some(id),
+        &actor.username,
+        if payload.locked { "backup.lock" } else { "backup.unlock" },
+        Some(&format!("Backup #{backup_id}")),
+        Some(if payload.locked { "Locked the backup" } else { "Unlocked the backup" }),
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "ok": true, "locked": payload.locked })))
+}
+
+/// Streams a finished backup archive to the browser.
+pub(crate) async fn download_backup_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath((id, backup_id)): AxPath<(i64, i64)>,
+) -> Result<Response, (StatusCode, String)> {
+    let actor = verify_power(&state, &headers, "backups", Some(id)).await?;
+    let row = sqlx::query("SELECT archive_path, status FROM backups WHERE id = $1 AND project_id = $2")
+        .bind(backup_id)
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, format!("Backup #{backup_id} not found")))?;
+    let archive: String = row.get(0);
+    let status: String = row.get(1);
+    if status != "complete" {
+        return Err((StatusCode::CONFLICT, "This backup isn't complete yet.".into()));
+    }
+    if archive.is_empty() {
+        return Err((StatusCode::CONFLICT, "Only backups made as a single archive can be downloaded.".into()));
+    }
+
+    // The file must be one of WebDep's own backup archives.
+    let root = crate::backups::archives_root(state.cluster.data_dir());
+    let file_path = tokio::fs::canonicalize(&archive)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "The backup file is missing from this server.".to_string()))?;
+    let canon_root = tokio::fs::canonicalize(&root)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "The backup file is missing from this server.".to_string()))?;
+    if !file_path.starts_with(&canon_root) {
+        return Err((StatusCode::FORBIDDEN, "That file isn't a WebDep backup.".into()));
+    }
+
+    let file = tokio::fs::File::open(&file_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Couldn't open the backup file: {e}")))?;
+    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let slug: String = state
+        .projects
+        .get(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.slug)
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .collect();
+    let name = format!("webdep-backup-{}-{backup_id}.tar.gz", if slug.is_empty() { "app" } else { &slug });
+
+    let stream = futures_util::stream::unfold(file, |mut f| async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 64 * 1024];
+        match f.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)), f))
+            }
+            Err(e) => Some((Err(e), f)),
+        }
+    });
+
+    log_audit_project(&state, Some(id), &actor.username, "backup.download", Some(&format!("Backup #{backup_id}")), Some("Downloaded the backup archive")).await;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "application/gzip")
+        .header(axum::http::header::CONTENT_LENGTH, len.to_string())
+        .header(axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
+        .body(Body::from_stream(stream))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
