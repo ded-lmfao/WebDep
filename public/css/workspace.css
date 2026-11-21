@@ -28,6 +28,8 @@
 .ws-btn-stop { color: var(--danger-light) !important; border-color: var(--danger-border) !important; }
 .ws-btn-stop:hover { background: var(--danger-bg) !important; }
 .ws-btn-delete { background: transparent !important; border: 1px solid var(--danger-border) !important; color: var(--danger-light) !important; padding: 0 8px !important; }
+.ws-btn-restart { background: transparent !important; border: 1px solid var(--warning-border) !important; color: var(--warning-light) !important; }
+.ws-btn-restart:hover:not(:disabled) { background: var(--warning-bg) !important; border-color: var(--warning) !important; }
 .ws-btn-delete:hover { background: var(--danger-fill) !important; border-color: var(--danger-fill) !important; color: #ffffff !important; }
 
 .ws-tabs-bar {

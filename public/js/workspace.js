@@ -386,9 +386,8 @@ function renderDatabaseWorkspaceHeader(banner) {
                 ? `<span class="btn-spinner"></span><span>Stopping</span>`
                 : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg><span>Start</span>`}
             </button>
-            <button class="btn btn-secondary btn-sm ws-btn-restart" onclick="restartDatabase(${d.id})" title="Restart PostgreSQL cluster" ${(isStarting || isStopping) ? 'disabled' : ''}>
+            <button class="btn btn-sm btn-icon ws-btn-restart" onclick="restartDatabase(${d.id})" title="Restart PostgreSQL cluster" aria-label="Restart PostgreSQL cluster" ${(isStarting || isStopping) ? 'disabled' : ''}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"></path></svg>
-              <span>Restart</span>
             </button>
           ` : ''}
         </div>
@@ -681,7 +680,7 @@ function renderWebsiteWorkspaceHeader() {
             ${isOnline || isMaintenance
               ? `<button class="btn btn-secondary btn-sm ws-btn-stop" onclick="stopProject(${p.id})" title="Stop the process">${I.stop}<span>Stop</span></button>`
               : `<button class="btn btn-secondary btn-sm ws-btn-start" onclick="startProject(${p.id})" ${neverDeployed ? 'disabled title="Deploy this website once before starting it"' : 'title="Start the process"'}>${I.start}<span>Start</span></button>`}
-            ${isOnline ? `<button class="btn btn-secondary btn-sm ws-btn-restart" onclick="restartProject(${p.id})" title="Restart the process">${I.restart}<span>Restart</span></button>` : ''}
+            ${isOnline ? `<button class="btn btn-sm btn-icon ws-btn-restart" onclick="restartProject(${p.id})" title="Restart the process" aria-label="Restart the process">${I.restart}</button>` : ''}
           ` : ''}
         </div>
         <div class="ws-actions-group">
