@@ -9,6 +9,7 @@ mod db;
 mod deployer;
 mod git;
 mod logs;
+mod maintenance;
 mod monitor;
 mod monitor_net;
 mod pg_control;
@@ -302,6 +303,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 mem_auth.prune_in_memory();
                 crate::db::prune_old_logs(&mem_db, 20_000).await;
                 trim_process_heap();
+            }
+        });
+    }
+    {
+        // Hourly housekeeping: audit retention, daily database backup, low-port warnings.
+        let (db, data_dir) = (db.clone(), config.data_dir.clone());
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                let removed = crate::maintenance::prune_audit(&db).await;
+                if removed > 0 {
+                    tracing::info!("Removed {removed} audit entries past the retention period");
+                }
+                crate::maintenance::daily_backup_if_due(&db, &data_dir).await;
+                crate::maintenance::check_port_pools(&db).await;
             }
         });
     }

@@ -5,6 +5,7 @@
 
 // Core Services & Shared Reactive State
 import './js/icons.js';
+import './js/touch_labels.js';
 import { state, WEBSITE_WORKSPACE_TABS } from './js/state.js';
 import {
   animateModalClose,

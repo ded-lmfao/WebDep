@@ -378,6 +378,19 @@ pub(crate) async fn update_settings_handler(
         }
     }
     let touches_policy = payload.contains_key(crate::auth::policy::REQUIRE_2FA_SETTING);
+    for key in [
+        crate::maintenance::AUDIT_RETENTION_SETTING,
+        crate::maintenance::BACKUP_KEEP_SETTING,
+        crate::maintenance::WEBHOOK_SETTING,
+    ] {
+        if let Some(v) = payload.get(key) {
+            let text = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            crate::maintenance::validate_setting(key, &text).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        }
+    }
 
     for (k, v) in payload {
         if k == "github_tokens" {
@@ -498,3 +511,65 @@ mod tests {
     }
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Control database backups (Platform Settings › Maintenance)
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn list_db_backups_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(serde_json::json!({ "backups": crate::maintenance::list_backups(&state.cluster.data_dir().to_path_buf()) })))
+}
+
+pub(crate) async fn create_db_backup_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::maintenance::BackupFile>, (StatusCode, String)> {
+    let actor = verify_admin(&state, &headers).await?;
+    let file = crate::maintenance::backup_now(state.cluster.data_dir(), "manual")
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::maintenance::prune_backups(state.cluster.data_dir(), "manual-", 20);
+    log_audit(&state, &actor.username, "backup.create", Some(&file.name), Some("Backed up the control database")).await;
+    Ok(Json(file))
+}
+
+pub(crate) async fn download_db_backup_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+    let actor = verify_admin(&state, &headers).await?;
+    if !crate::maintenance::is_backup_name(&name) {
+        return Err((StatusCode::BAD_REQUEST, "Unknown backup".into()));
+    }
+    let path = crate::maintenance::backup_dir(state.cluster.data_dir()).join(&name);
+    let bytes = tokio::fs::read(&path).await.map_err(|_| (StatusCode::NOT_FOUND, "Backup not found".to_string()))?;
+    log_audit(&state, &actor.username, "backup.download", Some(&name), Some("Downloaded a control database backup")).await;
+    let mut res = bytes.into_response();
+    let headers = res.headers_mut();
+    headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/octet-stream"));
+    if let Ok(v) = axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+        headers.insert(axum::http::header::CONTENT_DISPOSITION, v);
+    }
+    Ok(res)
+}
+
+pub(crate) async fn test_webhook_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(p): Json<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_admin(&state, &headers).await?;
+    let url = p.get("url").map(|s| s.trim().to_string()).unwrap_or_default();
+    if !crate::maintenance::is_valid_webhook(&url) {
+        return Err((StatusCode::BAD_REQUEST, "Enter an http(s) webhook URL.".into()));
+    }
+    crate::maintenance::send_webhook(url, "test".into(), format!("WebDep: test notification sent by {}.", actor.username));
+    Ok(Json(serde_json::json!({ "ok": true })))
+}

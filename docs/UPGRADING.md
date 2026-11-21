@@ -57,3 +57,11 @@ doesn't read.
   the real client address comes from `X-Forwarded-For`; from anywhere else the header is ignored.
 - **Port ranges**: nodes can be given a port range in **Admin Panel › IP Addresses**. Nodes
   without one keep the old automatic ports.
+- **Daily backups** (Platform Settings › Maintenance): the control database is backed up once a
+  day to `data/backups/control-db/daily-<time>.dump` (seven kept by default; 0 turns this off).
+  **Back up now** takes a manual backup, and any backup can be downloaded from the same card.
+- **Audit history** is kept for 365 days by default (0 keeps everything). The Audit page loads
+  200 entries at a time, filters by user or text on the server, and exports to CSV.
+- **Notifications**: set a webhook URL (Discord, Slack, or anything that accepts JSON) to hear
+  about new account requests, a VPS going offline or coming back, a node running low on free
+  ports, and failed backups. **Send test** checks the URL.

@@ -231,3 +231,20 @@
 
 /* Account rules (Platform Settings) */
 .acct-policy { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
+
+/* Maintenance card */
+.maint-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.maint-backups { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.maint-backups-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.maint-backup-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.maint-backup { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.maint-backup-name { display: flex; flex-direction: column; min-width: 0; font-size: 13px; }
+.maint-more { display: flex; justify-content: center; padding: 12px 0; }
+
+/* Long-press label for icon buttons on touch screens */
+.touch-label {
+  position: fixed; z-index: 10000; pointer-events: none;
+  padding: 4px 8px; border-radius: 6px; font-size: 12px;
+  background: var(--text, #111); color: var(--bg, #fff);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .25);
+}

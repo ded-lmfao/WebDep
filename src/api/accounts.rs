@@ -216,6 +216,12 @@ pub(crate) async fn register_handler(
     match inserted {
         Ok(_) => {
             log_audit(&state, &username, "account.request", Some(&username), Some(&format!("Requested an account ({email})"))).await;
+            crate::maintenance::notify(
+                &state.db,
+                "account.request",
+                format!("WebDep: {username} ({email}) asked for an account. Review it in Admin Panel > Requests."),
+            )
+            .await;
         }
         // A concurrent identical request: same neutral answer.
         Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {}

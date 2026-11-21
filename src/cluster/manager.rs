@@ -649,6 +649,17 @@ impl ClusterManager {
     ) -> Result<(), String> {
         let now = now_secs();
         let caps_json = serde_json::to_string(capabilities).unwrap_or_else(|_| "{}".to_string());
+        let was_offline: Option<String> = sqlx::query_scalar(
+            "SELECT COALESCE(NULLIF(display_name, ''), name) FROM nodes WHERE id = $1 AND status = 'offline' AND is_local = FALSE",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten();
+        if let Some(label) = was_offline {
+            crate::maintenance::notify(&self.db, "node.online", format!("WebDep: node {label} is back online.")).await;
+        }
         sqlx::query(
             "UPDATE nodes
              SET status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'online' END,
@@ -747,6 +758,17 @@ impl ClusterManager {
 
     pub async fn mark_node_offline(&self, node_id: i64) -> Result<(), String> {
         let now = now_secs();
+        let was_online: Option<String> = sqlx::query_scalar(
+            "SELECT COALESCE(NULLIF(display_name, ''), name) FROM nodes WHERE id = $1 AND status = 'online' AND is_local = FALSE",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten();
+        if let Some(label) = was_online {
+            crate::maintenance::notify(&self.db, "node.offline", format!("WebDep: node {label} went offline.")).await;
+        }
         sqlx::query(
             "UPDATE nodes
              SET status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'offline' END,
@@ -948,18 +970,23 @@ impl ClusterManager {
             loop {
                 interval.tick().await;
                 let cutoff = now_secs() - 45;
-                let _ = sqlx::query(
+                let gone: Vec<String> = sqlx::query_scalar(
                     "UPDATE nodes
                      SET status = 'offline', updated_at = $2
                      WHERE status = 'online'
                        AND is_local = FALSE
                        AND last_seen_at IS NOT NULL
-                       AND last_seen_at < $1",
+                       AND last_seen_at < $1
+                     RETURNING COALESCE(NULLIF(display_name, ''), name)",
                 )
                 .bind(cutoff)
                 .bind(now_secs())
-                .execute(&mgr.db)
-                .await;
+                .fetch_all(&mgr.db)
+                .await
+                .unwrap_or_default();
+                for label in gone {
+                    crate::maintenance::notify(&mgr.db, "node.offline", format!("WebDep: node {label} stopped responding.")).await;
+                }
             }
         });
     }

@@ -1156,15 +1156,24 @@ window.deleteAccountRequest = async (id) => {
 // ============================================================================
 // Admin: audit
 // ============================================================================
+const AUDIT_PAGE = 200;
 let auditCache = [];
+let auditSeq = 0;
+
+function auditFilterQuery() {
+  const params = new URLSearchParams();
+  const actor = (byId('admin-audit-actor')?.value || '').trim();
+  const q = (byId('admin-audit-search')?.value || '').trim();
+  if (actor) params.set('actor', actor);
+  if (q) params.set('q', q);
+  return params;
+}
 
 function renderAdminAudit() {
   const tbody = byId('admin-audit-body');
   if (!tbody) return;
-  const q = (byId('admin-audit-search')?.value || '').trim().toLowerCase();
-  const list = auditCache.filter((r) => !q
-    || [r.actor, r.action, r.target, r.detail, r.projectName].some((v) => String(v || '').toLowerCase().includes(q)));
-  tbody.innerHTML = list.length ? list.slice(0, 500).map((r) => `<tr>
+  const list = auditCache;
+  tbody.innerHTML = list.length ? list.map((r) => `<tr>
       <td title="${escapeHtml(formatDate(r.ts))}">${escapeHtml(formatRelativeTime(r.ts))}</td>
       <td>${escapeHtml(r.actor || '')}</td>
       <td><code>${escapeHtml(r.action || '')}</code></td>
@@ -1173,17 +1182,54 @@ function renderAdminAudit() {
     </tr>`).join('') : '<tr><td colspan="5" class="acct-empty">No activity yet.</td></tr>';
 }
 
-async function loadAdminAuditView() {
+/** Loads the first page (or, with `more`, the next page) of the panel-wide audit log. */
+async function loadAdminAuditView(more = false) {
+  const seq = ++auditSeq;
+  const params = auditFilterQuery();
+  params.set('limit', String(AUDIT_PAGE));
+  if (more && auditCache.length) params.set('before', String(auditCache[auditCache.length - 1].id));
   try {
-    const rows = await api('/api/audit?limit=1000', { noCache: true });
-    auditCache = Array.isArray(rows) ? rows : [];
+    const rows = await api(`/api/audit?${params}`, { noCache: true });
+    if (seq !== auditSeq) return;
+    const page = Array.isArray(rows) ? rows : [];
+    auditCache = more ? auditCache.concat(page) : page;
     renderAdminAudit();
+    const btn = byId('admin-audit-more');
+    if (btn) btn.hidden = page.length < AUDIT_PAGE;
   } catch (err) {
     const tbody = byId('admin-audit-body');
     if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="acct-empty">${escapeHtml(err.message)}</td></tr>`;
   }
 }
-byId('admin-audit-search')?.addEventListener('input', renderAdminAudit);
+
+let auditFilterTimer = null;
+for (const id of ['admin-audit-search', 'admin-audit-actor']) {
+  byId(id)?.addEventListener('input', () => {
+    clearTimeout(auditFilterTimer);
+    auditFilterTimer = setTimeout(() => void loadAdminAuditView(), 300);
+  });
+}
+byId('admin-audit-more')?.addEventListener('click', () => void loadAdminAuditView(true));
+byId('admin-audit-export')?.addEventListener('click', () => {
+  void downloadFile(`/api/audit/export?${auditFilterQuery()}`, 'webdep-audit.csv');
+});
+
+/** Downloads an authenticated GET response as a file. */
+async function downloadFile(url, fallbackName) {
+  try {
+    const res = await fetch(url, { credentials: 'same-origin' });
+    if (!res.ok) throw new Error((await res.text()) || `Download failed (${res.status})`);
+    const blob = await res.blob();
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = fallbackName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 1000);
+  } catch (err) { toast(err.message, 'error'); }
+}
 
 // ============================================================================
 // App Permissions tab (websites, services, databases)
@@ -1378,7 +1424,86 @@ export async function loadRegistrationSetting() {
     const tfa = byId('setting-require-2fa');
     if (tfa) tfa.value = s.require_2fa || 'off';
   } catch (_) { /* leave as is */ }
+  void loadMaintenanceSettings();
 }
+
+// ============================================================================
+// Platform settings: maintenance (backups, audit retention, notifications)
+// ============================================================================
+async function loadMaintenanceSettings() {
+  const card = byId('settings-maintenance-card');
+  if (!card) return;
+  card.hidden = !isAdmin();
+  if (!isAdmin()) return;
+  try {
+    const s = await api('/api/settings', { noCache: true });
+    byId('setting-backup-keep').value = s.db_backup_keep ?? '7';
+    byId('setting-audit-retention').value = s.audit_retention_days ?? '365';
+    byId('setting-notify-webhook').value = s.notify_webhook_url || '';
+  } catch (_) { /* leave as is */ }
+  await loadBackupList();
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const BACKUP_KIND_TEXT = { daily: 'Daily', manual: 'Manual', 'pre-upgrade': 'Before upgrade' };
+
+async function loadBackupList() {
+  const box = byId('setting-backup-list');
+  if (!box) return;
+  try {
+    const { backups } = await api('/api/system/backups', { noCache: true });
+    box.innerHTML = backups.length ? backups.map((b) => `<div class="maint-backup">
+        <span class="maint-backup-name" title="${escapeHtml(b.name)}">${escapeHtml(BACKUP_KIND_TEXT[b.kind] || b.kind)}
+          <small class="acct-muted">${escapeHtml(formatDate(b.createdAt))} &middot; ${formatBytes(b.size)}</small></span>
+        <button type="button" class="btn btn-secondary btn-sm" data-backup-download="${escapeHtml(b.name)}">Download</button>
+      </div>`).join('') : '<p class="acct-muted" style="margin:0">No backups yet.</p>';
+  } catch (err) {
+    box.innerHTML = `<p class="acct-muted" style="margin:0">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+byId('setting-backup-list')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-backup-download]');
+  if (!btn) return;
+  const name = btn.getAttribute('data-backup-download');
+  void downloadFile(`/api/system/backups/${encodeURIComponent(name)}`, name);
+});
+
+byId('setting-backup-now')?.addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try {
+    await api('/api/system/backups', { method: 'POST', body: {} });
+    toast('Backup created.', 'success');
+    await loadBackupList();
+  } catch (err) { toast(err.message, 'error'); } finally { btn.disabled = false; }
+});
+
+byId('setting-maintenance-save')?.addEventListener('click', async () => {
+  const body = {
+    db_backup_keep: byId('setting-backup-keep').value.trim() || '7',
+    audit_retention_days: byId('setting-audit-retention').value.trim() || '365',
+    notify_webhook_url: byId('setting-notify-webhook').value.trim(),
+  };
+  try {
+    await api('/api/settings', { method: 'PUT', body });
+    toast('Maintenance settings saved.', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+});
+
+byId('setting-notify-test')?.addEventListener('click', async () => {
+  const url = byId('setting-notify-webhook').value.trim();
+  if (!url) { toast('Enter a webhook URL first.', 'info'); return; }
+  try {
+    await api('/api/system/notify-test', { method: 'POST', body: { url } });
+    toast('Test sent. Check the channel the webhook posts to.', 'success');
+  } catch (err) { toast(err.message, 'error'); }
+});
 
 byId('setting-accounts-save')?.addEventListener('click', async () => {
   const body = {

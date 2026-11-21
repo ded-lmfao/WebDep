@@ -2001,6 +2001,41 @@
               </div>
             </div>
 
+            <div class="project-card settings-card" id="settings-maintenance-card" hidden>
+              <div class="project-card-header" style="min-height: 40px;">
+                <div style="min-width: 0;">
+                  <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Maintenance</span></div>
+                  <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">Backups, audit history, and notifications</div>
+                </div>
+              </div>
+              <div class="acct-policy">
+                <div class="form-group">
+                  <label class="form-label" for="setting-backup-keep">Daily database backups to keep</label>
+                  <input type="number" id="setting-backup-keep" class="form-control" min="0" max="365" placeholder="Number of days (0 turns daily backups off)">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="setting-audit-retention">Keep audit history for</label>
+                  <input type="number" id="setting-audit-retention" class="form-control" min="0" max="3650" placeholder="Number of days (0 keeps everything)">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="setting-notify-webhook">Notification webhook</label>
+                  <input type="url" id="setting-notify-webhook" class="form-control" placeholder="Webhook URL (empty: no notifications)" autocomplete="off">
+                  <small class="acct-muted">Sends new account requests, VPS offline and back online, ports running low, and failed backups. Works with Discord, Slack, or any URL that accepts JSON.</small>
+                </div>
+                <div class="maint-actions">
+                  <button type="button" class="btn btn-primary btn-sm" id="setting-maintenance-save">Save</button>
+                  <button type="button" class="btn btn-secondary btn-sm" id="setting-notify-test">Send test</button>
+                </div>
+                <div class="maint-backups">
+                  <div class="maint-backups-head">
+                    <strong>Control database backups</strong>
+                    <button type="button" class="btn btn-secondary btn-sm" id="setting-backup-now">Back up now</button>
+                  </div>
+                  <div id="setting-backup-list" class="maint-backup-list"></div>
+                </div>
+              </div>
+            </div>
+
             <div class="project-card settings-card settings-card-wide" id="settings-theme-card">
               <div class="project-card-header"
                 style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
@@ -2210,7 +2245,9 @@
               <p>Every action taken across the panel, newest first</p>
             </div>
             <div class="view-actions">
-              <input type="text" id="admin-audit-search" class="form-control" placeholder="Filter by user, action, or target" style="width: 260px;" autocomplete="off">
+              <input type="text" id="admin-audit-actor" class="form-control" placeholder="User name" style="width: 150px;" autocomplete="off" aria-label="Filter by user">
+              <input type="text" id="admin-audit-search" class="form-control" placeholder="Search action, target, or details" style="width: 240px;" autocomplete="off" aria-label="Search the audit log">
+              <button type="button" class="btn btn-secondary btn-sm" id="admin-audit-export">Export CSV</button>
             </div>
           </div>
           <div class="table-responsive acct-table-wrap">
@@ -2221,6 +2258,7 @@
               <tbody id="admin-audit-body"></tbody>
             </table>
           </div>
+          <div class="maint-more"><button type="button" class="btn btn-secondary btn-sm" id="admin-audit-more" hidden>Load more</button></div>
         </section>
 
         <!-- ==================== ADMIN: IP ADDRESSES VIEW ==================== -->

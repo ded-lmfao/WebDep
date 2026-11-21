@@ -381,6 +381,17 @@ pub async fn remove_ports(db: &DbPool, node_id: i64, ports: &[u16]) -> Result<Ve
     Ok(removed.into_iter().filter_map(|p| u16::try_from(p).ok()).collect())
 }
 
+/// (free, open) counts for a node's pool: open ports, and those nothing uses yet.
+pub async fn free_and_open_counts(db: &DbPool, node_id: i64) -> Result<(usize, usize), sqlx::Error> {
+    let used = used_anywhere(db).await?;
+    let open: Vec<i32> = sqlx::query_scalar("SELECT port FROM node_ports WHERE node_id = $1 AND is_open")
+        .bind(node_id)
+        .fetch_all(db)
+        .await?;
+    let free = open.iter().filter_map(|p| u16::try_from(*p).ok()).filter(|p| !used.contains(p)).count();
+    Ok((free, open.len()))
+}
+
 /// Lowest open pool port that nothing uses, skipping `exclude`.
 pub async fn next_free_port(db: &DbPool, node_id: i64, exclude: &[u16]) -> Result<Option<u16>, sqlx::Error> {
     let used = used_anywhere(db).await?;
