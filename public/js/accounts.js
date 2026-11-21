@@ -88,7 +88,7 @@ export function syncSidebarMode() {
   if (main) main.hidden = inAdmin;
   if (admin) admin.hidden = !inAdmin;
   const entry = document.querySelector('[data-admin-enter]');
-  if (entry) entry.hidden = !firstAdminView();
+  if (entry) entry.hidden = inAdmin || !firstAdminView();
   ADMIN_VIEWS.forEach((v) => {
     const el = document.querySelector(`#nav-group-admin .nav-item[data-view="${v}"]`);
     if (el) el.hidden = !adminViewAllowed(v);

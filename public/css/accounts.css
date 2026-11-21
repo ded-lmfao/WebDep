@@ -4,7 +4,8 @@
 
 /* Sidebar groups: normal panel vs admin panel */
 .nav-group { display: flex; flex-direction: column; gap: 2px; }
-.nav-item-admin-entry { margin-top: 6px; border: 1px solid var(--border-subtle); }
+.nav-group-account { padding-bottom: 8px; border-bottom: 1px solid var(--border-subtle); }
+.nav-item-admin-entry { border: 1px solid var(--border-subtle); }
 .nav-item-back { color: var(--text-muted); }
 .nav-badge.nav-badge-alert { background: var(--danger-bg); color: var(--danger-light); }
 
