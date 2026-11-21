@@ -8,6 +8,7 @@ use axum::{
 };
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 
 use crate::api::common::*;
 use crate::cluster::archive::{pack_dir_to_tar_gz, unpack_tar_gz_safe};
@@ -29,6 +30,20 @@ pub(crate) struct BackupItem {
     pub core_backup_path: String,
     #[serde(rename = "sourceNodeId")]
     pub source_node_id: Option<i64>,
+    /// `running`, `complete`, or `failed`.
+    pub status: String,
+    pub error: String,
+    #[serde(rename = "checksumSha256")]
+    pub checksum: String,
+    #[serde(rename = "fileCount")]
+    pub file_count: u64,
+    pub locked: bool,
+    #[serde(rename = "createdBy")]
+    pub created_by: String,
+    #[serde(rename = "completedAt")]
+    pub completed_at: i64,
+    /// `archive` (single .tar.gz) or `legacy` (folder copy from earlier versions).
+    pub format: String,
 }
 
 pub(crate) fn copy_backup_files(src: &std::path::Path, dst: &std::path::Path) -> u64 {
@@ -75,8 +90,8 @@ pub(crate) async fn list_backups_handler(
         return Ok(res);
     }
 
-    let rows = sqlx::query_as::<_, (i64, i64, i64, String, String, String, Option<i64>, String, String, Option<i64>)>(
-        "SELECT id, COALESCE(created_at, 0), COALESCE(size_bytes, 0), COALESCE(note, ''), COALESCE(kind, 'full-snapshot'), COALESCE(path, ''), release_id, COALESCE(storage_mode, 'local'), COALESCE(core_backup_path, ''), source_node_id \
+    let rows = sqlx::query(
+        "SELECT id, COALESCE(created_at, 0), COALESCE(size_bytes, 0), COALESCE(note, ''), COALESCE(kind, 'full-snapshot'), COALESCE(path, ''), release_id, COALESCE(storage_mode, 'local'), COALESCE(core_backup_path, ''), source_node_id, status, error, checksum_sha256, file_count, locked, created_by, completed_at, archive_path \
          FROM backups WHERE project_id = $1 ORDER BY id DESC",
     )
     .bind(id)
@@ -85,21 +100,30 @@ pub(crate) async fn list_backups_handler(
     .unwrap_or_default();
 
     let mut backups: Vec<BackupItem> = rows
-        .into_iter()
-        .map(
-            |(bid, ts, size, note, kind, path, release_id, storage_mode, core_backup_path, source_node_id)| BackupItem {
-                id: bid,
-                ts,
-                size: size.max(0) as u64,
-                note,
-                kind,
-                path,
-                release_id,
-                storage_mode,
-                core_backup_path,
-                source_node_id,
-            },
-        )
+        .iter()
+        .map(|r| {
+            let archive_path: String = r.get(17);
+            BackupItem {
+                id: r.get(0),
+                ts: r.get(1),
+                size: r.get::<i64, _>(2).max(0) as u64,
+                note: r.get(3),
+                kind: r.get(4),
+                path: r.get(5),
+                release_id: r.get(6),
+                storage_mode: r.get(7),
+                core_backup_path: r.get(8),
+                source_node_id: r.get(9),
+                status: r.get(10),
+                error: r.get(11),
+                checksum: r.get(12),
+                file_count: r.get::<i64, _>(13).max(0) as u64,
+                locked: r.get(14),
+                created_by: r.get(15),
+                completed_at: r.get(16),
+                format: if archive_path.is_empty() { "legacy" } else { "archive" }.to_string(),
+            }
+        })
         .collect();
 
     if backups.is_empty() {
@@ -117,6 +141,14 @@ pub(crate) async fn list_backups_handler(
                 storage_mode: "local".to_string(),
                 core_backup_path: String::new(),
                 source_node_id: None,
+                status: "complete".to_string(),
+                error: String::new(),
+                checksum: String::new(),
+                file_count: 0,
+                locked: false,
+                created_by: String::new(),
+                completed_at: r.created_at,
+                format: "legacy".to_string(),
             })
             .collect();
     }
@@ -131,6 +163,9 @@ pub(crate) struct CreateBackupPayload {
     pub kind: Option<String>,
     #[serde(default, rename = "offNode")]
     pub off_node: bool,
+    /// File or folder names left out of the backup (`cache`, `*.log`).
+    #[serde(default)]
+    pub ignore: Vec<String>,
 }
 
 pub(crate) async fn create_backup_handler(
@@ -146,11 +181,7 @@ pub(crate) async fn create_backup_handler(
         .flatten()
         .map_or(0, |l| l.backups);
     if backup_limit > 0 {
-        let held: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM backups WHERE project_id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+        let held = crate::backups::count_held(&state.db, id).await;
         if held >= i64::from(backup_limit) {
             return Err((
                 StatusCode::CONFLICT,
@@ -183,6 +214,12 @@ pub(crate) async fn create_backup_handler(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
     let source_node_id = p.node_id.or(state.cluster.default_local_node_id().await);
+
+    // Apps on this server are backed up as one archive, built in the background. (A request for
+    // an off-node copy keeps the earlier synchronous flow, which returns the finished copy.)
+    if remote_nid.is_none() && !payload.off_node {
+        return create_archive_backup(&state, &actor, &p, note, kind, &payload.ignore).await;
+    }
 
     let (mut total_size, backup_path_str, release_files_dir) = if let Some(nid) = remote_nid {
         let raw_env = state.projects.export_raw_env(id).await.unwrap_or_default();
@@ -420,6 +457,29 @@ pub(crate) async fn restore_backup_handler(
     .ok()
     .flatten();
 
+    let backup_meta: Option<(String, String)> =
+        sqlx::query_as("SELECT status, archive_path FROM backups WHERE id = $1 AND project_id = $2")
+            .bind(payload.backup_id)
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let mut archive_for_cross_node = String::new();
+    if let Some((status, archive)) = backup_meta {
+        if status != "complete" {
+            return Err((StatusCode::CONFLICT, "This backup isn't complete, so it can't be restored.".into()));
+        }
+        if !archive.is_empty() {
+            // Moving the app to another node can already use the archive; restoring in place
+            // (replacing the current files) comes with the new restore engine.
+            if payload.target_node_id.is_none() {
+                return Err((StatusCode::CONFLICT, "Restoring backups in the new format is not available yet.".into()));
+            }
+            archive_for_cross_node = archive;
+        }
+    }
+
     // Cross-node restore onto any healthy Web-Node from an off-node tarball
     if let Some(target_nid) = payload.target_node_id {
         if Some(target_nid) != p.node_id {
@@ -427,6 +487,7 @@ pub(crate) async fn restore_backup_handler(
         }
         let (_, _, note, _mode, core_tgz) = backup_row
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Backup #{} not found", payload.backup_id)))?;
+        let core_tgz = if core_tgz.trim().is_empty() { archive_for_cross_node } else { core_tgz };
         if core_tgz.trim().is_empty() || !tokio::fs::try_exists(&core_tgz).await.unwrap_or(false) {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -714,6 +775,30 @@ pub(crate) async fn delete_backup_handler(
     AxPath((id, backup_id)): AxPath<(i64, i64)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let actor = verify_power(&state, &headers, "backups", Some(id)).await?;
+    let meta: Option<(bool, String, String)> =
+        sqlx::query_as("SELECT locked, status, archive_path FROM backups WHERE id = $1 AND project_id = $2")
+            .bind(backup_id)
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    if let Some((locked, status, archive)) = &meta {
+        if *locked {
+            return Err((StatusCode::CONFLICT, "This backup is locked. Unlock it before deleting.".into()));
+        }
+        if status == "running" {
+            return Err((StatusCode::CONFLICT, "This backup is still being created.".into()));
+        }
+        if !archive.is_empty() {
+            let root = crate::backups::archives_root(state.cluster.data_dir());
+            if let (Ok(file), Ok(root)) = (tokio::fs::canonicalize(archive).await, tokio::fs::canonicalize(&root).await) {
+                if file.starts_with(&root) {
+                    let _ = tokio::fs::remove_file(&file).await;
+                }
+            }
+        }
+    }
     let paths_row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT path, core_backup_path FROM backups WHERE id = $1 AND project_id = $2",
     )
@@ -802,3 +887,130 @@ pub(crate) async fn delete_backup_handler(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+
+/// Starts a backup of an app on this server and returns at once; the archive is built in the
+/// background and the backup row moves from `running` to `complete` (or `failed`).
+async fn create_archive_backup(
+    state: &AppState,
+    actor: &crate::auth::User,
+    p: &Project,
+    note: String,
+    kind: String,
+    ignore: &[String],
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    const MB: u64 = 1024 * 1024;
+    let ignore = if kind == "env-only" {
+        vec!["*".to_string()]
+    } else {
+        crate::backups::clean_ignore(ignore).map_err(|e| (StatusCode::BAD_REQUEST, e))?
+    };
+    let running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM backups WHERE project_id = $1 AND status = 'running'")
+        .bind(p.id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+    if running > 0 {
+        return Err((StatusCode::CONFLICT, "A backup of this app is already being created. Wait for it to finish.".into()));
+    }
+
+    let root = crate::api::files::service_root(p)?;
+    let data_dir = state.cluster.data_dir().to_path_buf();
+    let probe = root.clone();
+    let estimate = tokio::task::spawn_blocking(move || crate::monitor::get_path_disk_size(&probe))
+        .await
+        .unwrap_or(0);
+    if let Some(free) = crate::backups::free_space_bytes(&data_dir) {
+        if estimate > free {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("Not enough free disk space for this backup ({} MB needed, {} MB free).", estimate / MB, free / MB),
+            ));
+        }
+    }
+
+    let source_node_id = p.node_id.or(state.cluster.default_local_node_id().await);
+    let backup_id: i64 = sqlx::query_scalar(
+        "INSERT INTO backups(project_id, kind, note, status, created_by, created_at, storage_mode, source_node_id) \
+         VALUES($1, $2, $3, 'running', $4, $5, 'local', $6) RETURNING id",
+    )
+    .bind(p.id)
+    .bind(&kind)
+    .bind(&note)
+    .bind(&actor.username)
+    .bind(now())
+    .bind(source_node_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Record where the archive will be right away, so the backup shows as the new format while it builds.
+    let _ = sqlx::query("UPDATE backups SET archive_path = $2 WHERE id = $1")
+        .bind(backup_id)
+        .bind(crate::backups::archive_path(&data_dir, p.id, backup_id).to_string_lossy().to_string())
+        .execute(&state.db)
+        .await;
+
+    state.cache.invalidate_project(p.id);
+    log_audit_project(state, Some(p.id), &actor.username, "backup.create", Some(&p.name), Some(&format!("Started backup #{backup_id}: {note}"))).await;
+
+    let (state, p, actor_name) = (state.clone(), p.clone(), actor.username.clone());
+    tokio::spawn(async move {
+        run_archive_backup(state, backup_id, p, root, ignore, actor_name).await;
+    });
+
+    Ok(Json(serde_json::json!({ "ok": true, "backupId": backup_id, "status": "running", "storageMode": "local" })))
+}
+
+async fn run_archive_backup(
+    state: AppState,
+    backup_id: i64,
+    p: Project,
+    root: PathBuf,
+    ignore: Vec<String>,
+    actor: String,
+) {
+    let env = state.projects.export_raw_env(p.id).await.ok();
+    let dest = crate::backups::archive_path(state.cluster.data_dir(), p.id, backup_id);
+    let part = crate::backups::part_path(&dest);
+
+    let (part_c, ignore_c) = (part.clone(), ignore);
+    let packed = tokio::task::spawn_blocking(move || {
+        crate::cluster::archive::pack_backup_archive(&root, env.as_deref(), &part_c, &ignore_c)
+    })
+    .await;
+    let built = match packed {
+        Ok(Ok(stats)) => tokio::fs::rename(&part, &dest)
+            .await
+            .map(|()| stats)
+            .map_err(|e| format!("Couldn't finish the archive: {e}")),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("The backup task stopped unexpectedly: {e}")),
+    };
+
+    let outcome = match built {
+        Ok(stats) => crate::backups::finish_ok(&state.db, backup_id, &dest, stats.compressed_bytes, stats.files, &stats.sha256)
+            .await
+            .map(|()| stats)
+            .map_err(|e| format!("Couldn't save the backup record: {e}")),
+        Err(e) => Err(e),
+    };
+
+    match outcome {
+        Ok(stats) => {
+            state.logs.add(
+                Some(p.id),
+                None,
+                "backup",
+                "info",
+                &format!("Backup #{backup_id} complete: {} files, {} KB", stats.files, stats.compressed_bytes / 1024),
+            );
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            let _ = tokio::fs::remove_file(&dest).await;
+            crate::backups::finish_failed(&state.db, backup_id, &error).await;
+            state.logs.add(Some(p.id), None, "backup", "error", &format!("Backup #{backup_id} failed: {error}"));
+            log_audit_project(&state, Some(p.id), &actor, "backup.failed", Some(&p.name), Some(&error)).await;
+        }
+    }
+    state.cache.invalidate_project(p.id);
+}

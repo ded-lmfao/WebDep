@@ -6,6 +6,7 @@ use std::process::Command;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::write::{DeflateEncoder, GzEncoder};
 use flate2::{Compression, Crc};
+use sha2::{Digest, Sha256};
 
 const BLOCK_SIZE: usize = 512;
 const DEFAULT_SKIP_DIRS: &[&str] = &["node_modules", ".git"];
@@ -272,7 +273,8 @@ fn append_dir_recursive<W: Write>(
     writer: &mut W,
     disk_dir: &Path,
     archive_prefix: &str,
-    skip_names: &[&str],
+    skip: &dyn Fn(&str) -> bool,
+    files: &mut u64,
 ) -> Result<u64, String> {
     let mut raw_bytes = 0u64;
     let Ok(entries) = fs::read_dir(disk_dir) else {
@@ -284,7 +286,7 @@ fn append_dir_recursive<W: Write>(
     for entry in items {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if skip_names.contains(&name_str.as_ref()) {
+        if skip(name_str.as_ref()) {
             continue;
         }
         let path = entry.path();
@@ -309,8 +311,9 @@ fn append_dir_recursive<W: Write>(
         if meta.is_dir() {
             let dir_entry = format!("{rel}/");
             write_tar_entry_header(writer, &dir_entry, 0o755, 0, mtime, b'5')?;
-            raw_bytes += append_dir_recursive(writer, &path, &rel, skip_names)?;
+            raw_bytes += append_dir_recursive(writer, &path, &rel, skip, files)?;
         } else if meta.is_file() {
+            *files += 1;
             let size = meta.len();
             #[cfg(unix)]
             let mode = {
@@ -383,19 +386,21 @@ pub fn pack_subdirs_to_tar_gz(
     skips.extend_from_slice(extra_skip);
 
     let mut raw_bytes = 0u64;
+    let mut files = 0u64;
+    let skip = |name: &str| skips.contains(&name);
     let existing_subs: Vec<&&str> = subdirs
         .iter()
         .filter(|&&sub| root.join(sub).exists())
         .collect();
 
     if existing_subs.is_empty() {
-        raw_bytes += append_dir_recursive(&mut encoder, root, "", &skips)?;
+        raw_bytes += append_dir_recursive(&mut encoder, root, "", &skip, &mut files)?;
     } else {
         for sub in existing_subs {
             let sub_path = root.join(sub);
             if sub_path.is_dir() {
                 write_tar_entry_header(&mut encoder, &format!("{sub}/"), 0o755, 0, 0, b'5')?;
-                raw_bytes += append_dir_recursive(&mut encoder, &sub_path, sub, &skips)?;
+                raw_bytes += append_dir_recursive(&mut encoder, &sub_path, sub, &skip, &mut files)?;
             }
         }
     }
@@ -413,6 +418,99 @@ pub fn pack_subdirs_to_tar_gz(
 
     let compressed_bytes = fs::metadata(dest_tar_gz).map(|m| m.len()).unwrap_or(0);
     Ok((compressed_bytes, raw_bytes))
+}
+
+/// What `pack_backup_archive` wrote.
+pub struct PackStats {
+    pub compressed_bytes: u64,
+    /// Files from the app's folder (the env file is not counted).
+    pub files: u64,
+    pub sha256: String,
+}
+
+/// Counts and hashes everything written through it.
+struct HashingWriter<W: Write> {
+    inner: W,
+    hasher: Sha256,
+    bytes: u64,
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.bytes += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Backup ignore pattern: an exact name, `*suffix`, or `prefix*`.
+fn ignore_name_matches(pattern: &str, name: &str) -> bool {
+    if let Some(suffix) = pattern.strip_prefix('*').filter(|s| !s.contains('*')) {
+        name.ends_with(suffix)
+    } else if let Some(prefix) = pattern.strip_suffix('*').filter(|s| !s.contains('*')) {
+        name.starts_with(prefix)
+    } else {
+        pattern == name
+    }
+}
+
+fn write_tar_bytes_entry<W: Write>(writer: &mut W, name: &str, bytes: &[u8]) -> Result<(), String> {
+    let mtime = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    write_tar_entry_header(writer, name, 0o600, bytes.len() as u64, mtime, b'0')?;
+    writer.write_all(bytes).map_err(|e| format!("Failed writing {name} to archive: {e}"))?;
+    let pad = (BLOCK_SIZE - (bytes.len() % BLOCK_SIZE)) % BLOCK_SIZE;
+    if pad > 0 {
+        writer
+            .write_all(&[0u8; BLOCK_SIZE][..pad])
+            .map_err(|e| format!("Failed writing tar block padding: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Packs a whole app folder into a backup archive: `backup.env` (when given) and the folder's
+/// contents under `files/`. Everything is included (even `node_modules` and `.git`) except
+/// symlinks and names matching `ignore`. The archive is flushed to disk and its SHA-256 is
+/// computed while writing. The caller passes a `.part` path and renames it once this succeeds.
+pub fn pack_backup_archive(
+    source_root: &Path,
+    env: Option<&str>,
+    dest_tar_gz: &Path,
+    ignore: &[String],
+) -> Result<PackStats, String> {
+    if let Some(parent) = dest_tar_gz.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed creating archive folder {}: {e}", parent.display()))?;
+    }
+    let out_file = File::create(dest_tar_gz)
+        .map_err(|e| format!("Failed creating archive {}: {e}", dest_tar_gz.display()))?;
+    let hashing = HashingWriter { inner: BufWriter::new(out_file), hasher: Sha256::new(), bytes: 0 };
+    // Fast compression: backups run next to live apps, so favor low CPU use over size.
+    let mut encoder = GzEncoder::new(hashing, Compression::fast());
+
+    if let Some(env) = env {
+        write_tar_bytes_entry(&mut encoder, "backup.env", env.as_bytes())?;
+    }
+    write_tar_entry_header(&mut encoder, "files/", 0o755, 0, 0, b'5')?;
+    let skip = |name: &str| ignore.iter().any(|p| ignore_name_matches(p, name));
+    let mut files = 0u64;
+    append_dir_recursive(&mut encoder, source_root, "files", &skip, &mut files)?;
+    encoder
+        .write_all(&[0u8; BLOCK_SIZE * 2])
+        .map_err(|e| format!("Failed writing tar EOF trailer: {e}"))?;
+
+    let HashingWriter { inner, hasher, bytes } = encoder
+        .finish()
+        .map_err(|e| format!("Failed finalizing gzip stream: {e}"))?;
+    let file = inner.into_inner().map_err(|e| format!("Failed flushing archive: {e}"))?;
+    file.sync_all().map_err(|e| format!("Failed syncing archive to disk: {e}"))?;
+    Ok(PackStats { compressed_bytes: bytes, files, sha256: format!("{:x}", hasher.finalize()) })
 }
 
 /// Packs a single directory's contents at archive root into `.tar.gz`.

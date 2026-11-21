@@ -946,4 +946,71 @@ mod tests {
         let row = list["limits"].as_array().unwrap().iter().find(|r| r["name"] == "Limited DB").expect("db listed");
         assert_eq!((row["kind"].as_str(), row["diskMb"].as_i64()), (Some("database"), Some(4096)));
     }
+
+    #[tokio::test]
+    async fn archive_backups_build_in_the_background_and_report_status() {
+        let state = crate::api::common::tests_state_helper().await;
+        let router = crate::api::create_router(state.clone());
+        let admin = state.auth.create_session(1).await.unwrap();
+        let admin_s = Some((admin.id.as_str(), admin.csrf_token.as_str()));
+
+        let (st, site) = call(&router, Method::POST, "/api/projects", admin_s,
+            json!({"name": "Bk", "slug": "bk-archive", "repo_url": ""})).await;
+        assert_eq!(st, StatusCode::OK, "{site}");
+        let id = site["id"].as_i64().unwrap();
+        let deploy = std::path::PathBuf::from(site["deploy_dir"].as_str().unwrap());
+        std::fs::create_dir_all(deploy.join("app/sub")).unwrap();
+        std::fs::write(deploy.join("app/hello.txt"), "hi").unwrap();
+
+        let (st, bad) = call(&router, Method::POST, &format!("/api/projects/{id}/backup"), admin_s,
+            json!({"ignore": ["../x"]})).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+
+        let (st, started) = call(&router, Method::POST, &format!("/api/projects/{id}/backup"), admin_s, json!({"note": "first"})).await;
+        assert_eq!(st, StatusCode::OK, "{started}");
+        assert_eq!(started["status"], "running");
+        let bid = started["backupId"].as_i64().unwrap();
+
+        // It finishes in the background.
+        let mut item = serde_json::Value::Null;
+        for _ in 0..50 {
+            let (_, list) = call(&router, Method::GET, &format!("/api/projects/{id}/backups"), admin_s, json!({})).await;
+            item = list.as_array().unwrap().iter().find(|b| b["id"] == bid).cloned().unwrap_or_default();
+            if item["status"] == "complete" || item["status"] == "failed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(item["status"], "complete", "{item}");
+        assert_eq!(item["format"], "archive");
+        assert_eq!(item["fileCount"], 1);
+        assert_eq!(item["createdBy"], "admin");
+        assert_eq!(item["checksumSha256"].as_str().unwrap().len(), 64);
+        assert!(item["size"].as_u64().unwrap() > 0);
+
+        // The archive lives outside the app's own folder.
+        let archive = crate::backups::archive_path(state.cluster.data_dir(), id, bid);
+        assert!(archive.is_file());
+        assert!(!archive.starts_with(&deploy));
+
+        // New-format backups can't be restored yet.
+        let (st, _) = call(&router, Method::POST, &format!("/api/projects/{id}/backups/restore"), admin_s, json!({"backupId": bid})).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        // A locked backup can't be deleted; once unlocked, deleting removes the archive too.
+        sqlx::query("UPDATE backups SET locked = TRUE WHERE id = $1").bind(bid).execute(&state.db).await.unwrap();
+        let (st, _) = call(&router, Method::DELETE, &format!("/api/projects/{id}/backups/{bid}"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        assert!(archive.is_file());
+        sqlx::query("UPDATE backups SET locked = FALSE WHERE id = $1").bind(bid).execute(&state.db).await.unwrap();
+        let (st, _) = call(&router, Method::DELETE, &format!("/api/projects/{id}/backups/{bid}"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!archive.exists());
+
+        // Only one backup runs at a time.
+        sqlx::query("INSERT INTO backups(project_id, status, created_at) VALUES($1, 'running', 1)").bind(id).execute(&state.db).await.unwrap();
+        let (st, _) = call(&router, Method::POST, &format!("/api/projects/{id}/backup"), admin_s, json!({})).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        let _ = std::fs::remove_dir_all(&deploy);
+    }
 }

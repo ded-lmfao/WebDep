@@ -79,5 +79,13 @@ doesn't read.
   it is stopped and can't be started until it is under the limit or an admin raises it (apps on
   other nodes are not measured yet). The backup limit refuses a new backup once the app holds
   that many; databases have no backups.
+- **Backups of websites and services** (**Releases › Snapshots & Off-Node Backups**): a backup
+  is now one `.tar.gz` under `data/backups/apps/project-<id>/`, outside the app's own folder, with
+  its size, file count, creator, status (Creating, Complete, Failed) and SHA-256. It is built in
+  the background and includes everything under the app's Files folder (including `node_modules`
+  and `.git`) plus its environment variables. A backup cut off by a restart is marked Failed and
+  its unfinished file is removed. Backups made before this release still work and still restore.
+  Restoring the new archives in place arrives in the next update; moving an app to another node
+  from one already works.
 - **Audit history per app** keeps the newest 50 entries for each website or service; older ones
   are deleted as new ones arrive. Panel-wide entries keep the days-based retention.

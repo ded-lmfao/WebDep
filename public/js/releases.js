@@ -76,15 +76,49 @@ function formatBackupSize(bytes) {
   return `${(b / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+let backupPollTimer = null;
+
+function appIsOnCoreServer(p) {
+  const local = (state.nodes || []).find((n) => n.isLocal);
+  return !p.node_id || (local && Number(p.node_id) === Number(local.id));
+}
+const lastBackupStatus = new Map();
+
+function backupStatusBadge(b) {
+  if (b.status === 'running') return '<span class="badge badge-warning"><span class="btn-spinner"></span> Creating</span>';
+  if (b.status === 'failed') return `<span class="badge badge-danger" title="${escapeHtml(b.error || 'The backup failed')}">Failed</span>`;
+  return '<span class="badge badge-success">Complete</span>';
+}
+
+/** Toasts when a backup this page was waiting on finishes, and keeps refreshing while any is running. */
+function trackBackupProgress(p, backups) {
+  clearTimeout(backupPollTimer);
+  for (const b of backups) {
+    const was = lastBackupStatus.get(b.id);
+    if (was === 'running' && b.status === 'complete') toast(`Backup #${b.id} is complete.`, 'success');
+    if (was === 'running' && b.status === 'failed') toast(`Backup #${b.id} failed: ${b.error || 'unknown error'}`, 'error');
+    lastBackupStatus.set(b.id, b.status);
+  }
+  if (backups.some((b) => b.status === 'running')) {
+    backupPollTimer = setTimeout(() => {
+      if (state.currentView === 'releases' && getSelectedProject()?.id === p.id) void loadProjectBackupsTable(p);
+    }, 2000);
+  }
+}
+
 async function loadProjectBackupsTable(p) {
   const tbody = document.getElementById('backups-table-body');
   if (!tbody || !p) return;
+  // The off-node copy only matters for apps on other VPSes; apps on this server are already on Web-Core.
+  const offNodeLabel = document.getElementById('backup-offnode-checkbox')?.closest('label');
+  if (offNodeLabel) offNodeLabel.style.display = appIsOnCoreServer(p) ? 'none' : '';
   try {
     const backups = await api(`/api/projects/${p.id}/backups`, { noCache: true });
     if (!Array.isArray(backups) || !backups.length) {
-      setHtmlIfChanged(tbody, '<tr><td colspan="6" style="text-align: center; padding: 20px;">No backups or snapshots recorded yet.</td></tr>');
+      setHtmlIfChanged(tbody, '<tr><td colspan="7" style="text-align: center; padding: 20px;">No backups or snapshots recorded yet.</td></tr>');
       return;
     }
+    trackBackupProgress(p, backups);
     const onlineNodes = (state.nodes || []).filter((n) => n.status === 'online');
     const html = backups.map((b) => {
       const isOffNode = b.storageMode === 'off-node';
@@ -98,16 +132,17 @@ async function loadProjectBackupsTable(p) {
         : '<option value="">Current Node</option>';
       return `
         <tr>
-          <td><strong>#${b.id}</strong> <span style="font-size:11.5px; color:var(--text-dim);">${escapeHtml(b.kind || '')}</span></td>
+          <td><strong>#${b.id}</strong> <span style="font-size:11.5px; color:var(--text-dim);">${escapeHtml(b.kind || '')}${b.createdBy ? ` &middot; ${escapeHtml(b.createdBy)}` : ''}</span></td>
+          <td>${backupStatusBadge(b)}</td>
           <td>${storageBadge}</td>
-          <td>${formatBackupSize(b.size)}</td>
+          <td>${b.status === 'running' ? '-' : `${formatBackupSize(b.size)}${b.fileCount ? ` <span style="font-size:11.5px; color:var(--text-dim);">${b.fileCount} files</span>` : ''}`}</td>
           <td style="max-width:220px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(b.note || '')}</td>
           <td>${formatDate(b.ts)}</td>
           <td>
             <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
               ${isOffNode && onlineNodes.length && state.user?.isAdmin ? `<select id="backup-restore-node-${b.id}" class="form-control" style="width:130px; height:28px; font-size:11.5px; padding:2px 6px;">${nodeOptions}</select>` : ''}
-              ${hasPower('backups') ? `<button class="btn btn-primary btn-sm" onclick="restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})">Restore</button>` : ''}
-              ${hasPower('backups') ? `<button class="btn btn-danger btn-sm" onclick="deleteProjectBackup(${p.id}, ${b.id})">Delete</button>` : ''}
+              ${hasPower('backups') && b.status === 'complete' ? `<button class="btn btn-primary btn-sm" onclick="restoreProjectBackup(${p.id}, ${b.id}, ${isOffNode})" ${b.format === 'archive' ? 'disabled title="Restoring these backups is not available yet"' : ''}>Restore</button>` : ''}
+              ${hasPower('backups') ? `<button class="btn btn-danger btn-sm" onclick="deleteProjectBackup(${p.id}, ${b.id})" ${b.status === 'running' ? 'disabled' : ''} ${b.locked ? 'title="Locked: unlock it before deleting"' : ''}>Delete</button>` : ''}
             </div>
           </td>
         </tr>
@@ -115,7 +150,7 @@ async function loadProjectBackupsTable(p) {
     }).join('');
     setHtmlIfChanged(tbody, html);
   } catch (err) {
-    setHtmlIfChanged(tbody, `<tr><td colspan="6" style="text-align: center; color: var(--danger); padding: 20px;">${escapeHtml(err.message)}</td></tr>`);
+    setHtmlIfChanged(tbody, `<tr><td colspan="7" style="text-align: center; color: var(--danger); padding: 20px;">${escapeHtml(err.message)}</td></tr>`);
   }
 }
 
@@ -125,7 +160,7 @@ async function createProjectBackupSnapshot() {
     toast('Select a website first.', 'warning');
     return;
   }
-  const offNode = Boolean(document.getElementById('backup-offnode-checkbox')?.checked);
+  const offNode = !appIsOnCoreServer(p) && Boolean(document.getElementById('backup-offnode-checkbox')?.checked);
   const btn = document.getElementById('create-backup-snapshot-btn');
   if (btn) btn.disabled = true;
   try {
@@ -137,8 +172,9 @@ async function createProjectBackupSnapshot() {
         offNode,
       },
     });
-    toast(`Created ${res.storageMode || 'local'} backup #${res.backupId}`, 'success');
-    await loadReleasesView();
+    toast(res.status === 'running' ? `Backup #${res.backupId} started. It keeps running in the background.` : `Created ${res.storageMode || 'local'} backup #${res.backupId}`, 'success');
+    lastBackupStatus.set(res.backupId, res.status || 'complete');
+    await loadProjectBackupsTable(p);
   } catch (err) {
     toast(`Backup failed: ${err.message}`, 'error');
   } finally {
