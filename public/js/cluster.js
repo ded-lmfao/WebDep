@@ -1088,10 +1088,6 @@ async function refreshInfraData() {
   ]);
 }
 
-function appPortText(p) {
-  return p.port || p.assigned_port || '';
-}
-
 const ipsPools = new Map();
 /** nodeId -> [{ id, ip, label, apps: [{ id, name }] }] */
 const ipsAddrs = new Map();

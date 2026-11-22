@@ -234,6 +234,24 @@ pub(crate) async fn cache_clear_handler(
     })))
 }
 
+/// Spawning `gh auth token` on every settings load is wasteful when no token exists, so the
+/// auto-detection runs at most once every few minutes.
+fn gh_detection_due() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_ATTEMPT_S: AtomicU64 = AtomicU64::new(0);
+    const RETRY_AFTER_S: u64 = 300;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_ATTEMPT_S.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < RETRY_AFTER_S {
+        return false;
+    }
+    LAST_ATTEMPT_S.store(now, Ordering::Relaxed);
+    true
+}
+
 pub(crate) async fn get_settings_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -248,7 +266,7 @@ pub(crate) async fn get_settings_handler(
     let current_tok = map.get("github_token").cloned().unwrap_or_default();
 
     // If github_token is not yet saved in DB, try auto-detecting from gh CLI once and persisting it
-    if current_tok.trim().is_empty() {
+    if current_tok.trim().is_empty() && gh_detection_due() {
         if let Ok(out) = tokio::process::Command::new("gh").args(["auth", "token"]).output().await {
             if out.status.success() {
                 let detected = String::from_utf8_lossy(&out.stdout).trim().to_string();

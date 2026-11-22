@@ -91,18 +91,7 @@
     color: var(--accent-light);
     font-weight: 500;
   }
-  .mobile-nav-home svg {
-    width: 19px;
-    height: 19px;
-  }
-  .mobile-nav-logout {
-    color: var(--danger-light);
-    opacity: 0.85;
-  }
-  .mobile-nav-logout:hover,
-  .mobile-nav-logout:active {
-    opacity: 1;
-  }
+
 }
 
 @media (max-width: 680px) {
@@ -242,5 +231,4 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
-
 
