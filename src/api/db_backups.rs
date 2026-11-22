@@ -43,24 +43,6 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
 
 type ApiResult<T> = Result<T, (StatusCode, String)>;
 
-/// Backups are made and restored on the server where the database runs; databases on other
-/// VPSes are not supported yet.
-async fn ensure_local(state: &AppState, db: &crate::databases::ManagedDatabase) -> ApiResult<()> {
-    if state
-        .cluster
-        .should_proxy_to_node(db.node_id)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
-        .is_some()
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            "Backups of databases that run on another VPS aren't available yet.".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn ensure_running(db: &crate::databases::ManagedDatabase) -> ApiResult<()> {
     if db.status != "running" {
         return Err((
@@ -139,7 +121,6 @@ pub(crate) async fn create_db_backup_handler(
     payload: Option<Json<CreateDbBackupPayload>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (actor, db) = get_authorized_database(&state, &headers, POWERS, id).await?;
-    ensure_local(&state, &db).await?;
     ensure_running(&db)?;
     let conn = conn_for(&state, &db).await?;
 
@@ -224,7 +205,6 @@ pub(crate) async fn restore_db_backup_handler(
     Json(payload): Json<RestoreDbPayload>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (actor, db) = get_authorized_database(&state, &headers, POWERS, id).await?;
-    ensure_local(&state, &db).await?;
     ensure_running(&db)?;
     let conn = conn_for(&state, &db).await?;
     let row = sqlx::query("SELECT status, archive_path, checksum_sha256 FROM database_backups WHERE id = $1 AND database_id = $2")
