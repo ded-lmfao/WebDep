@@ -34,6 +34,11 @@
 #view-account .project-card.settings-card { padding: 18px 20px; }
 #view-account .project-card-header { min-height: 0 !important; margin-bottom: 2px; }
 #view-account .acct-myaccess .acct-muted { margin: 0; }
+/* Sessions and access share a row, so the sessions table is compact. */
+#account-sessions-body .acct-table th, #account-sessions-body .acct-table td { padding: 9px 8px; }
+#account-sessions-body .acct-table th:first-child, #account-sessions-body .acct-table td:first-child { padding-left: 2px; }
+#account-sessions-body .table-responsive { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-alt); padding: 2px 10px; }
+#account-access-body.acct-myaccess { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-alt); padding: 12px 14px; }
 @media (max-width: 900px) {
   #view-account .settings-cards-grid { grid-template-columns: minmax(0, 1fr); }
   .acct-form-grid { grid-template-columns: minmax(0, 1fr); }
