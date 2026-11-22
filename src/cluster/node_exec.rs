@@ -1017,6 +1017,11 @@ async fn run_remote_rollback_task(
     }
 }
 
+/// Where a database's engine lives on a worker node.
+fn node_db_dir(data_dir: &Path, id: i64) -> PathBuf {
+    data_dir.join("databases").join(format!("db-{id}"))
+}
+
 pub async fn execute_rpc(
     exec: Arc<NodeExecState>,
     req_id: String,
@@ -2138,6 +2143,83 @@ pub async fn execute_rpc(
                     "targetDeployDir": deploy_dir.to_string_lossy().to_string(),
                 }),
             )
+        }
+        "db.check" => {
+            match crate::databases::PgBinaries::detect() {
+                Ok(_) => ok_resp(req_id, json!({ "ok": true })),
+                Err(_) => err_resp(req_id, 412, "PostgreSQL is not installed on this node. Install the PostgreSQL module in Admin Panel > VPS Modules."),
+            }
+        }
+        "db.start" => {
+            let Ok(mut spec) = serde_json::from_value::<crate::databases::EngineSpec>(params["spec"].clone()) else {
+                return err_resp(req_id, 400, "Invalid database payload");
+            };
+            spec.db_dir = node_db_dir(&exec.data_dir, spec.id);
+            if let Err(e) = tokio::fs::create_dir_all(&spec.db_dir).await {
+                return err_resp(req_id, 500, format!("Could not create the database folder: {e}"));
+            }
+            crate::databases::Databases::sync_firewall_rules(spec.port, &spec.access_mode, &spec.allowed_ips).await;
+            if let Some(pid) = crate::databases::engine_pid(&spec.db_dir, spec.port).await {
+                return ok_resp(req_id, json!({ "ok": true, "containerId": format!("pid-{pid}") }));
+            }
+            let logs = spec.db_dir.join("webdep-node.log");
+            let log_fn = move |level: &str, msg: &str| {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&logs) {
+                    let _ = writeln!(f, "[{level}] {msg}");
+                }
+            };
+            match crate::databases::start_engine(&spec, &log_fn).await {
+                Ok(cid) => ok_resp(req_id, json!({ "ok": true, "containerId": cid })),
+                Err(e) => err_resp(req_id, 500, e),
+            }
+        }
+        "db.stop" => {
+            let (Some(id), Some(port)) = (params["id"].as_i64(), params["port"].as_u64().and_then(|p| u16::try_from(p).ok())) else {
+                return err_resp(req_id, 400, "Missing database id or port");
+            };
+            crate::databases::stop_engine(&node_db_dir(&exec.data_dir, id), port).await;
+            if params["removeFirewall"].as_bool().unwrap_or(false) {
+                crate::databases::Databases::remove_firewall_rules(port, params["allowedIps"].as_str().unwrap_or("")).await;
+            }
+            ok_resp(req_id, json!({ "ok": true }))
+        }
+        "db.delete" => {
+            let (Some(id), Some(port)) = (params["id"].as_i64(), params["port"].as_u64().and_then(|p| u16::try_from(p).ok())) else {
+                return err_resp(req_id, 400, "Missing database id or port");
+            };
+            let dir = node_db_dir(&exec.data_dir, id);
+            crate::databases::stop_engine(&dir, port).await;
+            crate::databases::Databases::remove_firewall_rules(port, params["allowedIps"].as_str().unwrap_or("")).await;
+            if dir.exists() {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            }
+            ok_resp(req_id, json!({ "ok": true }))
+        }
+        "db.status" => {
+            let (Some(id), Some(port)) = (params["id"].as_i64(), params["port"].as_u64().and_then(|p| u16::try_from(p).ok())) else {
+                return err_resp(req_id, 400, "Missing database id or port");
+            };
+            let pid = crate::databases::engine_pid(&node_db_dir(&exec.data_dir, id), port).await;
+            ok_resp(req_id, json!({ "ok": true, "running": pid.is_some(), "pid": pid }))
+        }
+        "db.logs" => {
+            let Some(id) = params["id"].as_i64() else {
+                return err_resp(req_id, 400, "Missing database id");
+            };
+            let dir = node_db_dir(&exec.data_dir, id);
+            let read_tail = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+            let mut text = read_tail("postgresql.log");
+            let extra = read_tail("webdep-node.log");
+            if !extra.is_empty() {
+                text.push_str("
+");
+                text.push_str(&extra);
+            }
+            let lines: Vec<&str> = text.lines().collect();
+            let tail = lines[lines.len().saturating_sub(500)..].join("
+");
+            ok_resp(req_id, json!({ "ok": true, "logs": tail }))
         }
         "firewall.ports" => {
             let parse = |key: &str| -> Vec<u16> {

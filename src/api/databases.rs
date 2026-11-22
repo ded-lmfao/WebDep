@@ -360,6 +360,21 @@ fn strip_linked_db_env_lines(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Host an app uses to reach its database: loopback on the same node, the database node's mesh
+/// address from another node.
+pub(crate) async fn link_host(state: &AppState, p: &crate::projects::Project, db: &crate::databases::ManagedDatabase) -> String {
+    let local = state.cluster.default_local_node_id().await;
+    let (db_node, app_node) = (db.node_id.or(local), p.node_id.or(local));
+    if db_node == app_node {
+        return "127.0.0.1".to_string();
+    }
+    let Some(nid) = db_node else { return "127.0.0.1".to_string() };
+    match state.cluster.get_node(nid).await {
+        Ok(Some(n)) if !n.mesh_ip.trim().is_empty() => n.mesh_ip.trim().to_string(),
+        _ => "127.0.0.1".to_string(),
+    }
+}
+
 /// Writes the database's connection settings into the linked app's environment (and a service's
 /// `.env`). Used when linking and when the database's port changes.
 pub(crate) async fn write_link_env(
@@ -369,10 +384,11 @@ pub(crate) async fn write_link_env(
 ) -> Result<(), (StatusCode, String)> {
     let raw_pass = db.db_password.clone().unwrap_or_default();
     let port_str = db.port.to_string();
-    let internal_url = crate::databases::build_postgres_url(&db.db_user, &raw_pass, "127.0.0.1", db.port, &db.db_name, false);
+    let host = link_host(state, p, db).await;
+    let internal_url = crate::databases::build_postgres_url(&db.db_user, &raw_pass, &host, db.port, &db.db_name, false);
     let entries: [(&str, &str, bool); 6] = [
         (LINKED_DB_ENV_KEYS[0], &internal_url, true),
-        (LINKED_DB_ENV_KEYS[1], "127.0.0.1", false),
+        (LINKED_DB_ENV_KEYS[1], &host, false),
         (LINKED_DB_ENV_KEYS[2], &port_str, false),
         (LINKED_DB_ENV_KEYS[3], &db.db_user, false),
         (LINKED_DB_ENV_KEYS[4], &raw_pass, true),

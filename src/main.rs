@@ -245,6 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
     let updater = Arc::new(Updater::with_db(db.clone()));
     let cluster = Arc::new(ClusterManager::new(db.clone(), config.data_dir.clone()));
+    databases.attach_cluster(cluster.clone());
     {
         // Apply this host's port pool to its firewall if it isn't known to be in sync.
         let (db, cl) = (db.clone(), cluster.clone());

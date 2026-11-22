@@ -139,6 +139,14 @@ pub fn module_catalog() -> Vec<ModuleCatalogEntry> {
             &["Ruby", "Rails"],
         ),
         (
+            "postgres",
+            "PostgreSQL database engine",
+            "database",
+            false,
+            "PostgreSQL server tools (initdb, pg_ctl, psql, pg_dump). Needed to run managed databases on this VPS and to move databases onto it.",
+            &["PostgreSQL", "Managed databases"],
+        ),
+        (
             "dotnet",
             ".NET SDK / Runtime",
             "language",
@@ -497,6 +505,13 @@ fn check_single_module(id: &str) -> NodeModuleStatus {
             ),
             None => NodeModuleStatus::missing(id, "ruby runtime not found".to_string()),
         },
+        "postgres" => match crate::databases::PgBinaries::detect() {
+            Ok(bins) => {
+                let ver = run_version_line(&bins.psql, &["--version"]).unwrap_or_default();
+                NodeModuleStatus::at(id, true, &bins.pg_ctl, first_nonempty_line(&ver), "initdb, pg_ctl and psql ready".to_string())
+            }
+            Err(_) => NodeModuleStatus::missing(id, "PostgreSQL server tools not found".to_string()),
+        },
         "dotnet" => match find_command_path("dotnet") {
             Some(p) => NodeModuleStatus::at(
                 id,
@@ -593,6 +608,7 @@ fn package_candidates(pm: &str, module_id: &str) -> Vec<Vec<&'static str>> {
         ("apt-get", "php") => vec![vec!["php-cli", "php-fpm", "composer"], vec!["php-cli"]],
         ("apt-get", "ruby") => vec![vec!["ruby-full"], vec!["ruby"]],
         ("apt-get", "dotnet") => vec![vec!["dotnet-sdk-8.0"], vec!["dotnet8"]],
+        ("apt-get", "postgres") => vec![vec!["postgresql", "postgresql-contrib"], vec!["postgresql"]],
 
         ("dnf" | "yum", "unrar") => vec![vec!["unrar"], vec!["unar"]],
         ("dnf" | "yum", "git") => vec![vec!["git"]],
@@ -609,6 +625,7 @@ fn package_candidates(pm: &str, module_id: &str) -> Vec<Vec<&'static str>> {
         ("dnf" | "yum", "php") => vec![vec!["php-cli", "php-fpm"], vec!["php-cli"]],
         ("dnf" | "yum", "ruby") => vec![vec!["ruby", "rubygems"]],
         ("dnf" | "yum", "dotnet") => vec![vec!["dotnet-sdk-8.0"]],
+        ("dnf" | "yum", "postgres") => vec![vec!["postgresql-server", "postgresql-contrib"], vec!["postgresql-server"]],
 
         ("apk", "unrar") => vec![vec!["unrar"], vec!["unar"]],
         ("apk", "git") => vec![vec!["git"]],
@@ -625,6 +642,7 @@ fn package_candidates(pm: &str, module_id: &str) -> Vec<Vec<&'static str>> {
         ("apk", "php") => vec![vec!["php", "composer"], vec!["php"]],
         ("apk", "ruby") => vec![vec!["ruby", "ruby-bundler"]],
         ("apk", "dotnet") => vec![vec!["dotnet8-sdk"]],
+        ("apk", "postgres") => vec![vec!["postgresql", "postgresql-client"], vec!["postgresql"]],
 
         ("pacman", "unrar") => vec![vec!["unrar"], vec!["unarchiver"]],
         ("pacman", "git") => vec![vec!["git"]],
@@ -636,6 +654,7 @@ fn package_candidates(pm: &str, module_id: &str) -> Vec<Vec<&'static str>> {
         ("pacman", "php") => vec![vec!["php", "composer"], vec!["php"]],
         ("pacman", "ruby") => vec![vec!["ruby"]],
         ("pacman", "dotnet") => vec![vec!["dotnet-sdk"]],
+        ("pacman", "postgres") => vec![vec!["postgresql"]],
         _ => Vec::new(),
     }
 }

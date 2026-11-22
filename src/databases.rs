@@ -126,6 +126,8 @@ pub struct Databases {
     logs: Logs,
     base_dir: PathBuf,
     public_ip: String,
+    /// Set once the cluster exists: databases on other nodes are run through it.
+    cluster: std::sync::OnceLock<Arc<crate::cluster::ClusterManager>>,
 }
 
 struct RawDatabaseRow {
@@ -169,7 +171,95 @@ impl Databases {
             logs,
             base_dir: clean_base,
             public_ip,
+            cluster: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Where a database's data lives when it runs on this server.
+    pub fn local_dir(&self, id: i64) -> PathBuf {
+        self.base_dir.join(format!("db-{id}"))
+    }
+
+    pub fn attach_cluster(&self, cluster: Arc<crate::cluster::ClusterManager>) {
+        let _ = self.cluster.set(cluster);
+    }
+
+    /// The worker node a database runs on, or `None` when it runs on this server.
+    pub async fn remote_node(&self, node_id: Option<i64>) -> Option<(Arc<crate::cluster::ClusterManager>, i64)> {
+        let cluster = self.cluster.get()?.clone();
+        let nid = cluster.should_proxy_to_node(node_id).await.ok().flatten()?;
+        Some((cluster, nid))
+    }
+
+    /// Runs one database action on a worker node.
+    pub async fn call_remote(
+        &self,
+        cluster: &crate::cluster::ClusterManager,
+        node_id: i64,
+        op: &str,
+        params: serde_json::Value,
+        secs: u64,
+    ) -> Result<serde_json::Value, String> {
+        cluster
+            .call_node(node_id, op, params, std::time::Duration::from_secs(secs))
+            .await
+            .map_err(|(_, msg)| msg)
+    }
+
+    /// What a worker node needs to start this database (it picks the folder itself).
+    pub async fn engine_spec(&self, rec: &ManagedDatabase) -> EngineSpec {
+        let limits = crate::app_limits::get(&self.db, crate::app_limits::Kind::Database, rec.id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        EngineSpec {
+            id: rec.id,
+            port: rec.port,
+            db_name: rec.db_name.clone(),
+            db_user: rec.db_user.clone(),
+            db_password: rec.db_password.clone().unwrap_or_default(),
+            is_superuser: rec.is_superuser,
+            access_mode: rec.access_mode.clone(),
+            allowed_ips: rec.allowed_ips.clone(),
+            db_dir: PathBuf::new(),
+            cpu: limits.cpu,
+            memory_mb: limits.memory_mb,
+        }
+    }
+
+    /// Where tools on this server reach a database: loopback, or the node's mesh address.
+    pub async fn connect_host(&self, rec: &ManagedDatabase) -> Result<String, String> {
+        let Some((cluster, nid)) = self.remote_node(rec.node_id).await else {
+            return Ok("127.0.0.1".to_string());
+        };
+        let node = cluster.get_node(nid).await?.ok_or_else(|| format!("Node #{nid} not found"))?;
+        if node.mesh_ip.trim().is_empty() {
+            return Err(format!("Node '{}' has no mesh address yet, so its databases can't be reached from here.", node.name));
+        }
+        Ok(node.mesh_ip.trim().to_string())
+    }
+
+    async fn mark_running(&self, id: i64, container_id: &str) -> Result<(), String> {
+        sqlx::query("UPDATE databases SET status = 'running', container_id = $1, started_at = $2, updated_at = $3 WHERE id = $4")
+            .bind(container_id)
+            .bind(now())
+            .bind(now())
+            .bind(id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn mark_stopped(&self, id: i64) -> Result<(), String> {
+        sqlx::query("UPDATE databases SET status = 'stopped', started_at = NULL, updated_at = $1 WHERE id = $2")
+            .bind(now())
+            .bind(id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     fn read_raw_row(r: &sqlx::postgres::PgRow) -> Result<RawDatabaseRow, sqlx::Error> {
@@ -320,6 +410,11 @@ impl Databases {
 
     pub async fn get_logs(&self, id: i64) -> Result<String, String> {
         let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
+        if let Some((cluster, nid)) = self.remote_node(db_rec.node_id).await {
+            let res = self.call_remote(&cluster, nid, "db.logs", serde_json::json!({ "id": id }), 20).await?;
+            let text = res["logs"].as_str().unwrap_or("").trim().to_string();
+            return Ok(if text.is_empty() { format!("PostgreSQL engine for '{}' is running on port {}. No errors or warnings recorded.", db_rec.name, db_rec.port) } else { text });
+        }
         let db_dir = PathBuf::from(&db_rec.data_dir);
         let log_file = db_dir.join("postgresql.log");
         if log_file.is_file() {
@@ -480,6 +575,12 @@ impl Databases {
 
     pub async fn start(&self, id: i64) -> Result<(), String> {
         let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
+        if let Some((cluster, nid)) = self.remote_node(db_rec.node_id).await {
+            let spec = self.engine_spec(&db_rec).await;
+            let res = self.call_remote(&cluster, nid, "db.start", serde_json::json!({ "spec": spec }), 180).await?;
+            let cid = res["containerId"].as_str().unwrap_or("remote").to_string();
+            return self.mark_running(id, &cid).await;
+        }
         let password = db_rec.db_password.unwrap_or_default();
         let db_dir = PathBuf::from(&db_rec.data_dir);
 
@@ -536,37 +637,11 @@ impl Databases {
 
     pub async fn stop(&self, id: i64) -> Result<(), String> {
         let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
-        let db_dir = PathBuf::from(&db_rec.data_dir);
-        let data_dir = db_dir.join("data");
-
-        if let Ok(pg_bins) = PgBinaries::detect() {
-            let data_str = to_clean_path_str(&data_dir);
-            let mut stop_cmd = make_pg_server_command(&pg_bins.pg_ctl, &["-D", &data_str, "-m", "fast", "stop"]);
-            stop_cmd.stdin(std::process::Stdio::null());
-            stop_cmd.stdout(std::process::Stdio::null());
-            stop_cmd.stderr(std::process::Stdio::null());
-            let _ = tokio::time::timeout(tokio::time::Duration::from_secs(3), stop_cmd.status()).await;
+        if let Some((cluster, nid)) = self.remote_node(db_rec.node_id).await {
+            self.call_remote(&cluster, nid, "db.stop", serde_json::json!({ "id": id, "port": db_rec.port }), 60).await?;
+            return self.mark_stopped(id).await;
         }
-
-        let mut pids_to_kill = Vec::new();
-        if let Some(pid) = read_pg_pid(&data_dir) {
-            pids_to_kill.push(pid);
-        }
-        for port_pid in crate::runtime::Runtime::find_pids_on_port(db_rec.port) {
-            pids_to_kill.push(port_pid);
-        }
-
-        for pid in pids_to_kill {
-            // A stale postmaster.pid or another service on the port must never be killed.
-            if crate::runtime::tree::pid_command_contains(pid, "postgres") {
-                crate::runtime::Runtime::kill_pid_tree(pid).await;
-            }
-        }
-
-        let pid_file = data_dir.join("postmaster.pid");
-        if pid_file.exists() {
-            let _ = tokio::fs::remove_file(&pid_file).await;
-        }
+        stop_engine(&PathBuf::from(&db_rec.data_dir), db_rec.port).await;
 
         sqlx::query("UPDATE databases SET status = 'stopped', started_at = NULL, updated_at = $1 WHERE id = $2")
             .bind(now())
@@ -594,7 +669,13 @@ impl Databases {
         if was_running {
             self.stop(id).await?;
         }
-        Self::remove_firewall_rules(rec.port, &rec.allowed_ips).await;
+        let remote = self.remote_node(rec.node_id).await;
+        if let Some((cluster, nid)) = &remote {
+            let params = serde_json::json!({ "id": id, "port": rec.port, "allowedIps": rec.allowed_ips, "removeFirewall": true });
+            let _ = self.call_remote(cluster, *nid, "db.stop", params, 60).await;
+        } else {
+            Self::remove_firewall_rules(rec.port, &rec.allowed_ips).await;
+        }
         sqlx::query("UPDATE databases SET port = $1, updated_at = $2 WHERE id = $3")
             .bind(i32::from(port))
             .bind(now())
@@ -602,7 +683,9 @@ impl Databases {
             .execute(&self.db)
             .await
             .map_err(|e| e.to_string())?;
-        Self::sync_firewall_rules(port, &rec.access_mode, &rec.allowed_ips).await;
+        if remote.is_none() {
+            Self::sync_firewall_rules(port, &rec.access_mode, &rec.allowed_ips).await;
+        }
         if was_running {
             self.start(id).await?;
         }
@@ -611,6 +694,12 @@ impl Databases {
 
     pub async fn delete(&self, id: i64) -> Result<(), String> {
         let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
+        if let Some((cluster, nid)) = self.remote_node(db_rec.node_id).await {
+            let params = serde_json::json!({ "id": id, "port": db_rec.port, "allowedIps": db_rec.allowed_ips });
+            self.call_remote(&cluster, nid, "db.delete", params, 120).await?;
+            sqlx::query("DELETE FROM databases WHERE id = $1").bind(id).execute(&self.db).await.map_err(|e| e.to_string())?;
+            return Ok(());
+        }
 
         // 1. Stop PostgreSQL instance
         let _ = self.stop(id).await;
@@ -659,240 +748,29 @@ impl Databases {
         allowed_ips: &str,
         db_dir: &Path,
     ) -> Result<String, String> {
-        let pg_bins = PgBinaries::detect()?;
-        let data_dir = db_dir.join("data");
-        let log_file = db_dir.join("postgresql.log");
-
-        self.logs.add(
-            None,
-            None,
-            "database",
-            "info",
-            &format!("[DB #{}] Preparing isolated sandbox for '{}' on port {}...", id, db_name, port),
-        );
-
-        // 1. Initialize cluster if not already initialized
-        let is_new = is_new_cluster(&data_dir);
-        if is_new {
-            // Ensure data directory is empty before running initdb
-            if data_dir.exists() {
-                let _ = tokio::fs::remove_dir_all(&data_dir).await;
-            }
-            let _ = tokio::fs::create_dir_all(&data_dir).await;
-
-            let pw_tmp = db_dir.join("pw.tmp");
-            tokio::fs::write(&pw_tmp, db_pass)
-                .await
-                .map_err(|e| format!("Failed to write temporary initdb credential: {}", e))?;
-
-            let pw_str = to_clean_path_str(&pw_tmp);
-            let data_str = to_clean_path_str(&data_dir);
-
-            self.logs.add(
-                None,
-                None,
-                "database",
-                "info",
-                &format!("[DB #{}] Initializing PostgreSQL data cluster via initdb (SCRAM-SHA-256)...", id),
-            );
-
-            ensure_pg_permissions(db_dir, Some(&data_dir));
-            let mut init_cmd = make_pg_server_command(
-                &pg_bins.initdb,
-                &[
-                    "-D",
-                    &data_str,
-                    "-U",
-                    db_user,
-                    "-A",
-                    "scram-sha-256",
-                    "--pwfile",
-                    &pw_str,
-                    "-E",
-                    "UTF8",
-                    "--no-locale",
-                ],
-            );
-
-            let out = init_cmd.output().await.map_err(|e| {
-                format!("Failed to execute initdb: {}", e)
-            })?;
-
-            let _ = tokio::fs::remove_file(&pw_tmp).await;
-
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                return Err(format!("initdb failed: {} {}", stdout.trim(), stderr.trim()));
-            }
-
-            // Append WebDep configuration to postgresql.conf
-            let conf_path = data_dir.join("postgresql.conf");
-            let extra_conf = format!(
-                "\n# --- WebDep Isolated Process Container Settings ---\nlisten_addresses = '*'\nport = {}\nmax_connections = 100\n",
-                port
-            );
-            if let Ok(mut f) = tokio::fs::OpenOptions::new().append(true).open(&conf_path).await {
-                use tokio::io::AsyncWriteExt;
-                let _ = f.write_all(extra_conf.as_bytes()).await;
-            }
-        }
-
-        // 2. Configure pg_hba.conf rules
-        self.logs.add(
-            None,
-            None,
-            "database",
-            "info",
-            &format!("[DB #{}] Applying network firewall & client authentication rules (mode: '{}')...", id, access_mode),
-        );
-        let hba_content = generate_pg_hba(access_mode, allowed_ips);
-        let hba_path = data_dir.join("pg_hba.conf");
-        let _ = tokio::fs::write(&hba_path, hba_content).await;
-
-        // 3. Start PostgreSQL using pg_ctl
-        self.logs.add(
-            None,
-            None,
-            "database",
-            "info",
-            &format!("[DB #{}] Spawning isolated PostgreSQL engine process on port {}...", id, port),
-        );
-        let data_str = to_clean_path_str(&data_dir);
-        let log_str = to_clean_path_str(&log_file);
-        // Pin the port in postgresql.conf (passing '-o "-p N"' is mangled by Windows argument quoting)
-        {
-            let conf_path = data_dir.join("postgresql.conf");
-            if let Ok(existing) = tokio::fs::read_to_string(&conf_path).await {
-                let mut cleaned: Vec<&str> = existing
-                    .lines()
-                    .filter(|l| !l.trim_start().starts_with("port =") && !l.trim_start().starts_with("port="))
-                    .collect();
-                let pin = format!("port = {}", port);
-                cleaned.push(&pin);
-                let _ = tokio::fs::write(&conf_path, cleaned.join("\n") + "\n").await;
-            }
-        }
-
-        // Check if there is a stale postmaster.pid from an unexpected termination
-        let pid_file = data_dir.join("postmaster.pid");
-        if pid_file.exists() {
-            if let Some(old_pid) = read_pg_pid(&data_dir) {
-                if is_process_alive(old_pid) {
-                    info!("PostgreSQL for db #{} is already running (PID: {})", id, old_pid);
-                    return Ok(format!("pid-{}", old_pid));
-                }
-            }
-            let _ = tokio::fs::remove_file(&pid_file).await;
-        }
-
-        crate::databases::security::ensure_tcp_only_pg_conf(&data_dir).await;
-        ensure_pg_permissions(db_dir, Some(&data_dir));
-        rotate_pg_log(&log_file).await;
-        let mut start_cmd = make_pg_server_command(
-            &pg_bins.pg_ctl,
-            &[
-                "-D",
-                &data_str,
-                "-l",
-                &log_str,
-                "-W",
-                "start",
-            ],
-        );
-        start_cmd.stdin(std::process::Stdio::null());
-        start_cmd.stdout(std::process::Stdio::null());
-        start_cmd.stderr(std::process::Stdio::null());
-
-        // CPU and memory limits: pg_ctl joins the database's cgroup, and the server it
-        // starts stays in it (Linux with cgroups v2; elsewhere the database runs unlimited).
         let limits = crate::app_limits::get(&self.db, crate::app_limits::Kind::Database, id)
             .await
             .ok()
             .flatten()
             .unwrap_or_default();
-        match crate::runtime::limits::prepare(&format!("db-{id}"), limits.cpu, limits.memory_mb) {
-            #[cfg(target_os = "linux")]
-            Ok(Some(procs)) => {
-                // SAFETY: join_in_child only uses async-signal-safe calls.
-                unsafe {
-                    start_cmd.pre_exec(move || crate::runtime::limits::join_in_child(&procs));
-                }
-            }
-            Err(e) => warn!("[DB #{}] Resource limits not applied: {}. The database runs without limits.", id, e),
-            _ => {}
-        }
-
-        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
-            // Windows: pg_ctl and the server it starts run in a job with the database's limits.
-            #[cfg(windows)]
-            {
-                if limits.cpu > 0 || limits.memory_mb > 0 {
-                    if let Ok(mut child) = start_cmd.spawn() {
-                        if let Some(handle) = child.raw_handle() {
-                            if let Err(e) = crate::runtime::limits::apply_to_process(handle, limits.cpu, limits.memory_mb) {
-                                warn!("[DB #{}] Resource limits not applied: {}. The database runs without limits.", id, e);
-                            }
-                        }
-                        return child.wait().await;
-                    }
-                }
-            }
-            start_cmd.status().await
-        })
-        .await;
-
-        let pid = match wait_for_pg_ready(port, &data_dir, 20000).await {
-            Some(p) => p,
-            None => {
-                let tail = tokio::fs::read_to_string(&log_file)
-                    .await
-                    .map(|s| {
-                        let lines: Vec<&str> = s.lines().collect();
-                        lines[lines.len().saturating_sub(8)..].join(" | ")
-                    })
-                    .unwrap_or_default();
-                let foreign = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await.is_ok();
-                let reason = if foreign {
-                    format!("Port {} is already used by another program (for example a system PostgreSQL service). Stop it or delete and recreate this database so it gets a free port.", port)
-                } else {
-                    format!("PostgreSQL failed to start on port {}.", port)
-                };
-                return Err(format!("{} Log: {}", reason, tail));
-            }
+        let spec = EngineSpec {
+            id,
+            port,
+            db_name: db_name.to_string(),
+            db_user: db_user.to_string(),
+            db_password: db_pass.to_string(),
+            is_superuser,
+            access_mode: access_mode.to_string(),
+            allowed_ips: allowed_ips.to_string(),
+            db_dir: db_dir.to_path_buf(),
+            cpu: limits.cpu,
+            memory_mb: limits.memory_mb,
         };
-        self.logs.add(
-            None,
-            None,
-            "database",
-            "info",
-            &format!("[DB #{}] PostgreSQL engine running (PID: {}) on port {}. Ready for connections.", id, pid, port),
-        );
-
-        // 4. Ensure custom database exists and is owned by db_user (only for newly initialized clusters)
-        if is_new && db_name != "postgres" && !pg_database_exists(&pg_bins.psql, port, db_user, db_pass, db_name).await {
-            let sql = format!(
-                r#"CREATE DATABASE "{}" OWNER "{}";"#,
-                escape_pg_ident(db_name),
-                escape_pg_ident(db_user)
-            );
-            let _ = run_psql_command(&pg_bins.psql, port, db_user, db_pass, &sql, 6).await;
-        }
-
-        // 5. Restrict superuser privileges if is_superuser is false and cluster is new
-        if is_new && !is_superuser {
-            let sql = format!(
-                r#"ALTER ROLE "{}" NOSUPERUSER NOCREATEDB NOCREATEROLE;"#,
-                escape_pg_ident(db_user)
-            );
-            let _ = run_psql_command(&pg_bins.psql, port, db_user, db_pass, &sql, 4).await;
-        }
-
-        info!(
-            "Started isolated PostgreSQL process container for db #{} on port {} (PID: {})",
-            id, port, pid
-        );
-        Ok(format!("pid-{}", pid))
+        let logs = self.logs.clone();
+        start_engine(&spec, &move |level, msg| {
+            logs.add(None, None, "database", level, msg);
+        })
+        .await
     }
 
     // --- Firewall Synchronization (UFW / iptables) ---
@@ -903,6 +781,271 @@ impl Databases {
     pub async fn remove_firewall_rules(port: u16, allowed_ips: &str) {
         security::remove_firewall_rules(port, allowed_ips).await;
     }
+}
+
+/// Everything needed to start a database engine, on this server or on a worker node.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineSpec {
+    pub id: i64,
+    pub port: u16,
+    pub db_name: String,
+    pub db_user: String,
+    pub db_password: String,
+    pub is_superuser: bool,
+    pub access_mode: String,
+    pub allowed_ips: String,
+    pub db_dir: PathBuf,
+    pub cpu: i32,
+    pub memory_mb: i32,
+}
+
+/// Initializes the data cluster when it is new, applies access rules and starts PostgreSQL.
+/// `log` receives (level, message). Returns the container id (`pid-N`).
+pub async fn start_engine(spec: &EngineSpec, log: &(dyn Fn(&str, &str) + Send + Sync)) -> Result<String, String> {
+    let EngineSpec { id, port, db_dir, .. } = spec;
+    let (id, port, db_dir) = (*id, *port, db_dir.as_path());
+    let (db_name, db_user, db_pass) = (spec.db_name.as_str(), spec.db_user.as_str(), spec.db_password.as_str());
+    let (is_superuser, access_mode, allowed_ips) = (spec.is_superuser, spec.access_mode.as_str(), spec.allowed_ips.as_str());
+
+    let pg_bins = PgBinaries::detect()?;
+    let data_dir = db_dir.join("data");
+    let log_file = db_dir.join("postgresql.log");
+
+    log("info", &format!("[DB #{}] Preparing isolated sandbox for '{}' on port {}...", id, db_name, port));
+
+    // 1. Initialize cluster if not already initialized
+    let is_new = is_new_cluster(&data_dir);
+    if is_new {
+        // Ensure data directory is empty before running initdb
+        if data_dir.exists() {
+            let _ = tokio::fs::remove_dir_all(&data_dir).await;
+        }
+        let _ = tokio::fs::create_dir_all(&data_dir).await;
+
+        let pw_tmp = db_dir.join("pw.tmp");
+        tokio::fs::write(&pw_tmp, db_pass)
+            .await
+            .map_err(|e| format!("Failed to write temporary initdb credential: {}", e))?;
+
+        let pw_str = to_clean_path_str(&pw_tmp);
+        let data_str = to_clean_path_str(&data_dir);
+
+        log("info", &format!("[DB #{}] Initializing PostgreSQL data cluster via initdb (SCRAM-SHA-256)...", id));
+
+        ensure_pg_permissions(db_dir, Some(&data_dir));
+        let mut init_cmd = make_pg_server_command(
+            &pg_bins.initdb,
+            &[
+                "-D",
+                &data_str,
+                "-U",
+                db_user,
+                "-A",
+                "scram-sha-256",
+                "--pwfile",
+                &pw_str,
+                "-E",
+                "UTF8",
+                "--no-locale",
+            ],
+        );
+
+        let out = init_cmd.output().await.map_err(|e| {
+            format!("Failed to execute initdb: {}", e)
+        })?;
+
+        let _ = tokio::fs::remove_file(&pw_tmp).await;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Err(format!("initdb failed: {} {}", stdout.trim(), stderr.trim()));
+        }
+
+        // Append WebDep configuration to postgresql.conf
+        let conf_path = data_dir.join("postgresql.conf");
+        let extra_conf = format!(
+            "\n# --- WebDep Isolated Process Container Settings ---\nlisten_addresses = '*'\nport = {}\nmax_connections = 100\n",
+            port
+        );
+        if let Ok(mut f) = tokio::fs::OpenOptions::new().append(true).open(&conf_path).await {
+            use tokio::io::AsyncWriteExt;
+            let _ = f.write_all(extra_conf.as_bytes()).await;
+        }
+    }
+
+    // 2. Configure pg_hba.conf rules
+    log("info", &format!("[DB #{}] Applying network firewall & client authentication rules (mode: '{}')...", id, access_mode));
+    let hba_content = generate_pg_hba(access_mode, allowed_ips);
+    let hba_path = data_dir.join("pg_hba.conf");
+    let _ = tokio::fs::write(&hba_path, hba_content).await;
+
+    // 3. Start PostgreSQL using pg_ctl
+    log("info", &format!("[DB #{}] Spawning isolated PostgreSQL engine process on port {}...", id, port));
+    let data_str = to_clean_path_str(&data_dir);
+    let log_str = to_clean_path_str(&log_file);
+    // Pin the port in postgresql.conf (passing '-o "-p N"' is mangled by Windows argument quoting)
+    {
+        let conf_path = data_dir.join("postgresql.conf");
+        if let Ok(existing) = tokio::fs::read_to_string(&conf_path).await {
+            let mut cleaned: Vec<&str> = existing
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("port =") && !l.trim_start().starts_with("port="))
+                .collect();
+            let pin = format!("port = {}", port);
+            cleaned.push(&pin);
+            let _ = tokio::fs::write(&conf_path, cleaned.join("\n") + "\n").await;
+        }
+    }
+
+    // Check if there is a stale postmaster.pid from an unexpected termination
+    let pid_file = data_dir.join("postmaster.pid");
+    if pid_file.exists() {
+        if let Some(old_pid) = read_pg_pid(&data_dir) {
+            if is_process_alive(old_pid) {
+                info!("PostgreSQL for db #{} is already running (PID: {})", id, old_pid);
+                return Ok(format!("pid-{}", old_pid));
+            }
+        }
+        let _ = tokio::fs::remove_file(&pid_file).await;
+    }
+
+    crate::databases::security::ensure_tcp_only_pg_conf(&data_dir).await;
+    ensure_pg_permissions(db_dir, Some(&data_dir));
+    rotate_pg_log(&log_file).await;
+    let mut start_cmd = make_pg_server_command(
+        &pg_bins.pg_ctl,
+        &[
+            "-D",
+            &data_str,
+            "-l",
+            &log_str,
+            "-W",
+            "start",
+        ],
+    );
+    start_cmd.stdin(std::process::Stdio::null());
+    start_cmd.stdout(std::process::Stdio::null());
+    start_cmd.stderr(std::process::Stdio::null());
+
+    // CPU and memory limits: pg_ctl joins the database's cgroup, and the server it
+    // starts stays in it (Linux with cgroups v2; elsewhere the database runs unlimited).
+    let limits = crate::app_limits::AppLimits { cpu: spec.cpu, memory_mb: spec.memory_mb, ..Default::default() };
+    match crate::runtime::limits::prepare(&format!("db-{id}"), limits.cpu, limits.memory_mb) {
+        #[cfg(target_os = "linux")]
+        Ok(Some(procs)) => {
+            // SAFETY: join_in_child only uses async-signal-safe calls.
+            unsafe {
+                start_cmd.pre_exec(move || crate::runtime::limits::join_in_child(&procs));
+            }
+        }
+        Err(e) => warn!("[DB #{}] Resource limits not applied: {}. The database runs without limits.", id, e),
+        _ => {}
+    }
+
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        // Windows: pg_ctl and the server it starts run in a job with the database's limits.
+        #[cfg(windows)]
+        {
+            if limits.cpu > 0 || limits.memory_mb > 0 {
+                if let Ok(mut child) = start_cmd.spawn() {
+                    if let Some(handle) = child.raw_handle() {
+                        if let Err(e) = crate::runtime::limits::apply_to_process(handle, limits.cpu, limits.memory_mb) {
+                            warn!("[DB #{}] Resource limits not applied: {}. The database runs without limits.", id, e);
+                        }
+                    }
+                    return child.wait().await;
+                }
+            }
+        }
+        start_cmd.status().await
+    })
+    .await;
+
+    let pid = match wait_for_pg_ready(port, &data_dir, 20000).await {
+        Some(p) => p,
+        None => {
+            let tail = tokio::fs::read_to_string(&log_file)
+                .await
+                .map(|s| {
+                    let lines: Vec<&str> = s.lines().collect();
+                    lines[lines.len().saturating_sub(8)..].join(" | ")
+                })
+                .unwrap_or_default();
+            let foreign = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await.is_ok();
+            let reason = if foreign {
+                format!("Port {} is already used by another program (for example a system PostgreSQL service). Stop it or delete and recreate this database so it gets a free port.", port)
+            } else {
+                format!("PostgreSQL failed to start on port {}.", port)
+            };
+            return Err(format!("{} Log: {}", reason, tail));
+        }
+    };
+    log("info", &format!("[DB #{}] PostgreSQL engine running (PID: {}) on port {}. Ready for connections.", id, pid, port));
+
+    // 4. Ensure custom database exists and is owned by db_user (only for newly initialized clusters)
+    if is_new && db_name != "postgres" && !pg_database_exists(&pg_bins.psql, port, db_user, db_pass, db_name).await {
+        let sql = format!(
+            r#"CREATE DATABASE "{}" OWNER "{}";"#,
+            escape_pg_ident(db_name),
+            escape_pg_ident(db_user)
+        );
+        let _ = run_psql_command(&pg_bins.psql, port, db_user, db_pass, &sql, 6).await;
+    }
+
+    // 5. Restrict superuser privileges if is_superuser is false and cluster is new
+    if is_new && !is_superuser {
+        let sql = format!(
+            r#"ALTER ROLE "{}" NOSUPERUSER NOCREATEDB NOCREATEROLE;"#,
+            escape_pg_ident(db_user)
+        );
+        let _ = run_psql_command(&pg_bins.psql, port, db_user, db_pass, &sql, 4).await;
+    }
+
+    info!(
+        "Started isolated PostgreSQL process container for db #{} on port {} (PID: {})",
+        id, port, pid
+    );
+    Ok(format!("pid-{}", pid))
+}
+
+/// Stops the PostgreSQL server of a database folder, killing leftovers on its port.
+pub async fn stop_engine(db_dir: &Path, port: u16) {
+    let data_dir = db_dir.join("data");
+    if let Ok(pg_bins) = PgBinaries::detect() {
+        let data_str = to_clean_path_str(&data_dir);
+        let mut stop_cmd = make_pg_server_command(&pg_bins.pg_ctl, &["-D", &data_str, "-m", "fast", "stop"]);
+        stop_cmd.stdin(std::process::Stdio::null());
+        stop_cmd.stdout(std::process::Stdio::null());
+        stop_cmd.stderr(std::process::Stdio::null());
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(3), stop_cmd.status()).await;
+    }
+
+    let mut pids_to_kill = Vec::new();
+    if let Some(pid) = read_pg_pid(&data_dir) {
+        pids_to_kill.push(pid);
+    }
+    for port_pid in crate::runtime::Runtime::find_pids_on_port(port) {
+        pids_to_kill.push(port_pid);
+    }
+    for pid in pids_to_kill {
+        // A stale postmaster.pid or another service on the port must never be killed.
+        if crate::runtime::tree::pid_command_contains(pid, "postgres") {
+            crate::runtime::Runtime::kill_pid_tree(pid).await;
+        }
+    }
+    let pid_file = data_dir.join("postmaster.pid");
+    if pid_file.exists() {
+        let _ = tokio::fs::remove_file(&pid_file).await;
+    }
+}
+
+/// The PID of a running engine in `db_dir`, when it answers on `port`.
+pub async fn engine_pid(db_dir: &Path, port: u16) -> Option<u32> {
+    let pid = read_pg_pid(&db_dir.join("data")).filter(|p| is_process_alive(*p))?;
+    tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.ok()?;
+    Some(pid)
 }
 
 fn escape_pg_ident(ident: &str) -> String {

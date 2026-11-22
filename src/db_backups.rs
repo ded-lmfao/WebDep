@@ -17,6 +17,8 @@ use tokio::io::AsyncWriteExt;
 
 /// How a dump or restore connects to a managed database.
 pub struct DbConn {
+    /// `127.0.0.1` for a database on this server, the node's mesh address otherwise.
+    pub host: String,
     pub port: u16,
     pub user: String,
     pub password: String,
@@ -54,7 +56,7 @@ fn tail(text: &[u8]) -> String {
 
 fn base_command(program: &Path, conn: &DbConn) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
-    cmd.args(["-h", "127.0.0.1", "-p", &conn.port.to_string(), "-U", &conn.user])
+    cmd.args(["-h", &conn.host, "-p", &conn.port.to_string(), "-U", &conn.user])
         .env("PGPASSWORD", &conn.password)
         .stdin(Stdio::null())
         .kill_on_drop(true);
@@ -339,6 +341,7 @@ mod tests {
             |_| String::new(),
         );
         let conn = DbConn {
+            host: "127.0.0.1".to_string(),
             port: opts.get_port(),
             user: opts.get_username().to_string(),
             password,

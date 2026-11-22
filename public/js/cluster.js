@@ -1605,7 +1605,11 @@ export async function loadMovesView() {
     || (p.slug || '').toLowerCase().includes(q)
     || nodeIpLabel(nodesById.get(appNodeId(p)) || {}).toLowerCase().includes(q));
   const otherOnline = (p) => (state.nodes || []).some((n) => n.status === 'online' && Number(n.id) !== appNodeId(p));
-  tbody.innerHTML = list.length ? list.map((p) => {
+  const dbs = (state.databases || []).filter((d) => !q
+    || (d.name || '').toLowerCase().includes(q)
+    || (d.dbName || '').toLowerCase().includes(q)
+    || nodeIpLabel(nodesById.get(appNodeId(d)) || {}).toLowerCase().includes(q));
+  const appRows = list.map((p) => {
     const node = nodesById.get(appNodeId(p));
     const running = p.app_status === 'running';
     return `<tr>
@@ -1618,8 +1622,75 @@ export async function loadMovesView() {
         ? `<button class="btn btn-secondary btn-sm" onclick="openMoveToNodeModal(${p.id})">Move</button>`
         : '<span class="acct-muted" title="Add or bring another node online to move apps">No other node</span>'}</div></td>
     </tr>`;
-  }).join('') : `<tr><td colspan="6" class="acct-empty">${q ? 'Nothing matches your search.' : 'No websites or services yet.'}</td></tr>`;
+  });
+  const dbRows = dbs.map((d) => {
+    const node = nodesById.get(appNodeId(d));
+    const targets = (state.nodes || []).filter((n) => n.status === 'online' && Number(n.id) !== appNodeId(d));
+    const busy = dbMoves.has(Number(d.id));
+    return `<tr>
+      <td><div class="acct-person-name">${escapeHtml(d.name)}</div><div class="acct-person-sub">${escapeHtml(d.dbName || '')}</div></td>
+      <td><span class="badge badge-neutral">Database</span></td>
+      <td>${node ? escapeHtml(nodeLabel(node)) : '<span class="acct-muted">Unknown</span>'}</td>
+      <td><code>${escapeHtml(String(d.port || '-'))}</code></td>
+      <td>${d.status === 'running' ? '<span class="badge badge-success">Running</span>' : '<span class="badge badge-neutral">Stopped</span>'}</td>
+      <td><div class="acct-actions">${busy
+        ? `<span class="acct-muted">${escapeHtml(dbMoves.get(Number(d.id)))}</span>`
+        : targets.length
+          ? `<select class="form-control ipx-move" data-db-move="${d.id}" aria-label="Move ${escapeHtml(d.name)} to another node"><option value="">Move to node</option>${targets.map((t) => `<option value="${t.id}">${escapeHtml(nodeLabel(t))}</option>`).join('')}</select>`
+          : '<span class="acct-muted" title="Add or bring another node online to move databases">No other node</span>'}</div></td>
+    </tr>`;
+  });
+  const rows = appRows.concat(dbRows);
+  tbody.innerHTML = rows.length ? rows.join('') : `<tr><td colspan="6" class="acct-empty">${q ? 'Nothing matches your search.' : 'No websites, services or databases yet.'}</td></tr>`;
 }
+
+/** databaseId -> what the move is doing right now. */
+const dbMoves = new Map();
+
+async function moveDatabase(dbId, nodeId) {
+  const db = (state.databases || []).find((d) => Number(d.id) === Number(dbId));
+  const target = (state.nodes || []).find((n) => Number(n.id) === Number(nodeId));
+  if (!db || !target) return;
+  const ok = await showConfirmDialog({
+    title: `Move ${db.name}`,
+    message: `Move "${db.name}" to ${nodeLabel(target)}? The data is copied while the database keeps running. The app linked to it (if any) is stopped during the copy, then started again with the new connection settings. If anything fails, the database stays where it is. The node needs the PostgreSQL module installed (Admin Panel > VPS Modules).`,
+    confirmText: 'Move database',
+  });
+  if (!ok) return void loadMovesView();
+  try {
+    await api(`/api/databases/${dbId}/move`, { method: 'POST', body: { nodeId: Number(nodeId) } });
+  } catch (err) {
+    toast(err.message, 'error');
+    return void loadMovesView();
+  }
+  dbMoves.set(Number(dbId), 'Starting...');
+  void loadMovesView();
+  const poll = async () => {
+    try {
+      const res = await api(`/api/databases/${dbId}/move-status`, { noCache: true });
+      const st = res.status;
+      if (st && st.state === 'running') {
+        dbMoves.set(Number(dbId), `${st.step}...`);
+        void loadMovesView();
+        return void setTimeout(poll, 2000);
+      }
+      dbMoves.delete(Number(dbId));
+      if (st && st.state === 'failed') toast(`Move failed: ${st.message}`, 'error');
+      else toast(`${db.name} moved to ${nodeLabel(target)}.`, 'success');
+    } catch (err) {
+      dbMoves.delete(Number(dbId));
+      toast(err.message, 'error');
+    }
+    void loadMovesView();
+  };
+  setTimeout(poll, 1500);
+}
+
+document.getElementById('moves-list-body')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-db-move]');
+  if (sel && sel.value) void moveDatabase(sel.dataset.dbMove, sel.value);
+});
+
 // loadMovesView refetches infra data, so wait for typing to pause instead of fetching per keystroke.
 document.getElementById('moves-search')?.addEventListener('input', debounce(() => void loadMovesView(), 250));
 

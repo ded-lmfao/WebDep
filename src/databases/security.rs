@@ -23,6 +23,10 @@ pub fn parse_valid_ip_or_cidr(raw: &str) -> Option<String> {
     }
 }
 
+/// Subnet of the WireGuard mesh between nodes.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub const MESH_SUBNET: &str = "10.200.0.0/16";
+
 pub fn generate_pg_hba(access_mode: &str, allowed_ips: &str) -> String {
     let mut hba = String::new();
     hba.push_str("# PostgreSQL Client Authentication Configuration File (WebDep Managed)\n");
@@ -134,6 +138,12 @@ pub async fn sync_firewall_rules(port: u16, access_mode: &str, allowed_ips: &str
     }
     #[cfg(unix)]
     {
+        // The WireGuard mesh is private and encrypted: other nodes (and the core) may always reach
+        // the database over it, whatever the public access mode is.
+        let _ = Command::new("sudo")
+            .args(["ufw", "allow", "proto", "tcp", "from", MESH_SUBNET, "to", "any", "port", &port.to_string()])
+            .output()
+            .await;
         if access_mode == "local" {
             let _ = Command::new("sudo").args(["ufw", "delete", "allow", &format!("{}/tcp", port)]).output().await;
         } else if access_mode == "public" {
@@ -163,6 +173,10 @@ pub async fn remove_firewall_rules(port: u16, allowed_ips: &str) {
     #[cfg(unix)]
     {
         let _ = Command::new("sudo").args(["ufw", "delete", "allow", &format!("{}/tcp", port)]).output().await;
+        let _ = Command::new("sudo")
+            .args(["ufw", "delete", "allow", "proto", "tcp", "from", MESH_SUBNET, "to", "any", "port", &port.to_string()])
+            .output()
+            .await;
         for raw in allowed_ips.split(|c| c == ',' || c == '\n' || c == ';') {
             if let Some(cidr) = parse_valid_ip_or_cidr(raw) {
                 let _ = Command::new("sudo")

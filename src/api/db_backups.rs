@@ -71,13 +71,15 @@ fn ensure_running(db: &crate::databases::ManagedDatabase) -> ApiResult<()> {
     Ok(())
 }
 
-fn conn_for(db: &crate::databases::ManagedDatabase) -> ApiResult<crate::db_backups::DbConn> {
+async fn conn_for(state: &AppState, db: &crate::databases::ManagedDatabase) -> ApiResult<crate::db_backups::DbConn> {
     let password = db
         .db_password
         .clone()
         .filter(|p| !p.is_empty())
         .ok_or((StatusCode::CONFLICT, "This database's password isn't available, so it can't be backed up.".to_string()))?;
+    let host = state.databases.connect_host(db).await.map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(crate::db_backups::DbConn {
+        host,
         port: db.port,
         user: db.db_user.clone(),
         password,
@@ -139,7 +141,7 @@ pub(crate) async fn create_db_backup_handler(
     let (actor, db) = get_authorized_database(&state, &headers, POWERS, id).await?;
     ensure_local(&state, &db).await?;
     ensure_running(&db)?;
-    let conn = conn_for(&db)?;
+    let conn = conn_for(&state, &db).await?;
 
     let limit = crate::app_limits::get(&state.db, crate::app_limits::Kind::Database, id)
         .await
@@ -224,7 +226,7 @@ pub(crate) async fn restore_db_backup_handler(
     let (actor, db) = get_authorized_database(&state, &headers, POWERS, id).await?;
     ensure_local(&state, &db).await?;
     ensure_running(&db)?;
-    let conn = conn_for(&db)?;
+    let conn = conn_for(&state, &db).await?;
     let row = sqlx::query("SELECT status, archive_path, checksum_sha256 FROM database_backups WHERE id = $1 AND database_id = $2")
         .bind(payload.backup_id)
         .bind(id)
