@@ -66,8 +66,8 @@ export async function loadLimitsView() {
     if (iso) {
       const i = res.isolation;
       iso.hidden = !i || i.active;
-      if (i && !i.requested) iso.textContent = 'App isolation is off: apps run as the same server user as the panel. On a Linux server running as root, set WEBDEP_ISOLATE_APPS=1 to give each app its own namespaces, a private view of the file system and an unprivileged user.';
-      else if (i && !i.active) iso.textContent = `App isolation is turned on but cannot be used: ${i.reason}. Apps run without it.`;
+      if (i && !i.requested) iso.textContent = 'App isolation is turned off (WEBDEP_ISOLATE_APPS=0): apps run as the same server user as the panel. Remove that setting to give each app its own namespaces, a private view of the file system and an unprivileged user.';
+      else if (i && !i.active) iso.textContent = `App isolation cannot be used on this server: ${i.reason}. Apps run without it.`;
     }
   } catch (err) {
     toast(err.message, 'error');

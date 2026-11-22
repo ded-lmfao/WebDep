@@ -282,7 +282,7 @@ Opening any website or service exposes its workspace toolbar (**Start / Stop / R
 - **Permissions** — Who can use this app and what they can do (admins, and users with *Manage access* on it).
 
 ### Isolating apps (Linux)
-By default an app runs as the same server user as the panel, so code a user deploys could read the panel's data folder and other apps' files. On a Linux server where the panel runs as root, set `WEBDEP_ISOLATE_APPS=1` (needs util-linux: `unshare`, `setpriv`, `mount`) and every app and build is started:
+Without isolation an app would run as the same server user as the panel, so code a user deploys could read the panel's data folder and other apps' files. It is **on by default** on a Linux server where the panel runs as root with util-linux installed (`unshare`, `setpriv`, `mount`); set `WEBDEP_ISOLATE_APPS=0` to turn it off. Every app and build is then started:
 - in its own **PID, mount, IPC and UTS namespaces** (`unshare`): it cannot see or signal other processes;
 - with the panel's data folder and working folder **covered by an empty tmpfs**, only the app's own folder bound back in, and a private `/tmp`: other apps and the panel's secrets do not exist for it;
 - as an **unprivileged user** (`setpriv --no-new-privs`, uid/gid `WEBDEP_APP_UID`/`WEBDEP_APP_GID`, default 65534) that cannot undo any of this.
@@ -371,7 +371,7 @@ WebDep loads configuration from `.env` in the process's current working director
 | `WEBDEP_NODE_P2P_PORT` | `0` *(ephemeral)* | TCP port for Web-Node's direct P2P HTTP receiver (`0` picks a free port). |
 | `WEBDEP_SKIP_DB_BACKUP` | `false` | Set to `1` to skip the automatic control-database backup taken before an upgrade applies new migrations. Only if you back up yourself. |
 | `WEBDEP_MANAGE_FIREWALL` | `true` | Set to `false` to stop WebDep from editing UFW/iptables (panel, app, database and WireGuard mesh rules). Use it when the host firewall is managed elsewhere. |
-| `WEBDEP_ISOLATE_APPS` | `false` | Linux, panel running as root: set to `1` to run every app and build isolated (see *Isolating apps*). |
+| `WEBDEP_ISOLATE_APPS` | on | Linux, panel running as root: apps and builds run isolated unless set to `0` (see *Isolating apps*). |
 | `WEBDEP_APP_UID` / `WEBDEP_APP_GID` | `65534` | The unprivileged user and group isolated apps run as. |
 | `RUST_LOG` | `webdep=info` | Tracing log filter (`debug`, `info`, `warn`, `error`). |
 
