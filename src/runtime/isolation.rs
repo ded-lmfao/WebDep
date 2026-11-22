@@ -203,32 +203,63 @@ pub fn unavailable_reason() -> Option<String> {
     Some("it is only available on Linux".to_string())
 }
 
-/// Gives the unprivileged user ownership of the app's folder (only when the folder is not already
-/// theirs), so it can read and write its own files once it no longer runs as root.
+/// Gives the unprivileged user ownership of everything in the app's folder, so it can read and write
+/// its own files once it no longer runs as root. Every entry is checked on every start: files that
+/// root created since the last start (a deploy, `git pull`, `pip install`) are fixed too, and one
+/// file that cannot be changed does not stop the rest. Returns the first error, if any.
 #[cfg(target_os = "linux")]
 pub fn hand_over(own_root: &Path, identity: Identity) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
-    let top = std::fs::symlink_metadata(own_root)?;
-    if top.uid() == identity.uid && top.gid() == identity.gid {
-        return Ok(());
-    }
-    fn walk(p: &Path, id: Identity) -> std::io::Result<()> {
-        let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        // SAFETY: c is a valid NUL-terminated path; lchown does not follow symlinks.
-        unsafe { libc::lchown(c.as_ptr(), id.uid, id.gid) };
-        let meta = std::fs::symlink_metadata(p)?;
-        if meta.is_dir() {
-            for entry in std::fs::read_dir(p)? {
-                walk(&entry?.path(), id)?;
+
+    fn walk(p: &Path, id: Identity, first_error: &mut Option<std::io::Error>) {
+        let Ok(meta) = std::fs::symlink_metadata(p) else { return };
+        if meta.uid() != id.uid || meta.gid() != id.gid {
+            match std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) {
+                Ok(c) => {
+                    // SAFETY: c is a valid NUL-terminated path; lchown does not follow symlinks.
+                    if unsafe { libc::lchown(c.as_ptr(), id.uid, id.gid) } != 0 && first_error.is_none() {
+                        *first_error = Some(std::io::Error::last_os_error());
+                    }
+                }
+                Err(e) => {
+                    if first_error.is_none() {
+                        *first_error = Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, e));
+                    }
+                }
             }
         }
-        Ok(())
+        if meta.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(p) {
+                for entry in entries.flatten() {
+                    walk(&entry.path(), id, first_error);
+                }
+            }
+        }
     }
-    walk(own_root, identity)
+
+    let mut first_error = None;
+    walk(own_root, identity, &mut first_error);
+    first_error.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
 mod tests {
+    /// Needs no root: handing a folder to the user who already owns it must succeed, walk
+    /// everything, and not trip over a dangling symlink.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hand_over_walks_everything_and_survives_odd_entries() {
+        let dir = std::env::temp_dir().join(format!("webdep-handover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/b/file.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink("/nonexistent/target", dir.join("dangling")).unwrap();
+        // SAFETY: getuid/getgid have no preconditions.
+        let me = Identity { uid: unsafe { libc::getuid() }, gid: unsafe { libc::getgid() } };
+        assert!(hand_over(&dir, me).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn p(s: &str) -> PathBuf {
