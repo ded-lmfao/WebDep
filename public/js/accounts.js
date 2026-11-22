@@ -572,6 +572,10 @@ function loadAccountView() {
     badge.textContent = roleLabel(u);
     badge.className = `badge ${u.isAdmin || u.isMainAdmin ? 'badge-pro' : 'badge-neutral'}`;
   }
+  const text = (id, v) => { const el = byId(id); if (el) el.textContent = v; };
+  text('account-meta-role', roleLabel(u));
+  text('account-meta-last', u.lastLoginAt ? formatRelativeTime(u.lastLoginAt) : 'Never');
+  text('account-meta-since', u.created_at ? formatDate(u.created_at) : '-');
   window.renderSecurityStatusSummary?.();
   window.loadPasskeysList?.().catch(() => {});
   renderMyAccess();

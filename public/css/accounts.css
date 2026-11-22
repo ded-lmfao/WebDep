@@ -20,6 +20,25 @@
 
 /* Shared form bits */
 .acct-form { display: flex; flex-direction: column; gap: 2px; }
+/* My Account: compact profile form and one row per security item. */
+.acct-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 14px; margin-bottom: 4px; }
+.acct-form-grid .form-group { margin: 0; min-width: 0; }
+.acct-form-grid .acct-span-2 { grid-column: 1 / -1; }
+.acct-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 10px 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-alt); }
+.acct-meta > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.acct-sec-list { display: flex; flex-direction: column; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-alt); }
+.acct-sec-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; min-height: 52px; border-bottom: 1px solid var(--border-subtle); }
+.acct-sec-row:last-child { border-bottom: 0; }
+.acct-sec-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+#view-account .settings-cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#view-account .project-card.settings-card { padding: 18px 20px; }
+#view-account .project-card-header { min-height: 0 !important; margin-bottom: 2px; }
+#view-account .acct-myaccess .acct-muted { margin: 0; }
+@media (max-width: 900px) {
+  #view-account .settings-cards-grid { grid-template-columns: minmax(0, 1fr); }
+  .acct-form-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 .acct-form-error { margin: 6px 0 10px; font-size: 12.5px; color: var(--danger-light); }
 .acct-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 2px; cursor: pointer; }
 .acct-switch-row strong { display: block; font-weight: 500; font-size: 13.5px; color: var(--text-main); }

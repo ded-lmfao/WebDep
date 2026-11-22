@@ -2085,19 +2085,36 @@
                 <span class="badge badge-neutral" id="account-role-badge">User</span>
               </div>
               <form id="account-profile-form" class="acct-form" autocomplete="off">
-                <div class="form-group">
-                  <label class="form-label" for="account-username">Username</label>
-                  <input type="text" id="account-username" class="form-control" disabled>
+                <div class="acct-form-grid">
+                  <div class="form-group">
+                    <label class="form-label" for="account-username">Username</label>
+                    <input type="text" id="account-username" class="form-control" disabled>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="account-display-name">Full name</label>
+                    <input type="text" id="account-display-name" class="form-control" maxlength="80">
+                  </div>
+                  <div class="form-group acct-span-2">
+                    <label class="form-label" for="account-email">Email</label>
+                    <input type="email" id="account-email" class="form-control" placeholder="Email address">
+                    <span class="form-hint">Used for password reset links and notifications.</span>
+                  </div>
+                  <div class="acct-meta acct-span-2">
+                    <div>
+                      <div class="settings-sec-label">Role</div>
+                      <div class="settings-sec-val" id="account-meta-role">-</div>
+                    </div>
+                    <div>
+                      <div class="settings-sec-label">Last sign-in</div>
+                      <div class="settings-sec-val" id="account-meta-last">-</div>
+                    </div>
+                    <div>
+                      <div class="settings-sec-label">Member since</div>
+                      <div class="settings-sec-val" id="account-meta-since">-</div>
+                    </div>
+                  </div>
                 </div>
-                <div class="form-group">
-                  <label class="form-label" for="account-display-name">Full name</label>
-                  <input type="text" id="account-display-name" class="form-control" maxlength="80">
-                </div>
-                <div class="form-group">
-                  <label class="form-label" for="account-email">Email</label>
-                  <input type="email" id="account-email" class="form-control" placeholder="Email address">
-                </div>
-                <div class="project-card-actions" style="justify-content: flex-start;">
+                <div class="project-card-actions" style="justify-content: flex-end;">
                   <button type="submit" class="btn btn-primary btn-sm" id="account-profile-save">Save profile</button>
                 </div>
               </form>
@@ -2127,33 +2144,44 @@
                   style="flex-shrink: 0;">Checking</span>
               </div>
 
-              <div class="settings-sec-summary-row">
-                <div class="settings-sec-item">
-                  <div class="settings-sec-label">User</div>
-                  <div class="settings-sec-val" id="settings-sec-username">admin</div>
+              <div class="acct-sec-list">
+                <div class="acct-sec-row">
+                  <div class="acct-sec-text">
+                    <div class="settings-sec-label">Signed in as</div>
+                    <div class="settings-sec-val" id="settings-sec-username">admin</div>
+                  </div>
                 </div>
-                <div class="settings-sec-item">
-                  <div class="settings-sec-label">Passkeys</div>
-                  <div class="settings-sec-val" id="settings-sec-passkeys-text">None</div>
+                <div class="acct-sec-row">
+                  <div class="acct-sec-text">
+                    <div class="settings-sec-label">Passkeys</div>
+                    <div class="settings-sec-val" id="settings-sec-passkeys-text">None</div>
+                  </div>
+                  <button type="button" class="btn btn-secondary btn-sm" id="settings-open-passkeys-btn"
+                    onclick="openSecurityModal('passkeys')">Manage</button>
                 </div>
-                <div class="settings-sec-item">
-                  <div class="settings-sec-label">2FA (TOTP)</div>
-                  <div class="settings-sec-val" id="settings-sec-2fa-text">Disabled</div>
+                <div class="acct-sec-row">
+                  <div class="acct-sec-text">
+                    <div class="settings-sec-label">Two-factor (authenticator app)</div>
+                    <div class="settings-sec-val" id="settings-sec-2fa-text">Disabled</div>
+                  </div>
+                  <button type="button" class="btn btn-secondary btn-sm" id="settings-open-2fa-btn"
+                    onclick="openSecurityModal('2fa')">2FA</button>
                 </div>
-                <div class="settings-sec-item">
-                  <div class="settings-sec-label">Sessions</div>
-                  <div class="settings-sec-val" id="settings-sec-sessions">1 active</div>
+                <div class="acct-sec-row">
+                  <div class="acct-sec-text">
+                    <div class="settings-sec-label">Password</div>
+                    <div class="settings-sec-val">Change it any time</div>
+                  </div>
+                  <button type="button" class="btn btn-secondary btn-sm"
+                    onclick="openSecurityModal('password')">Change</button>
                 </div>
-              </div>
-
-              <div class="project-card-actions" style="justify-content: flex-start;">
-                <button type="button" class="btn btn-primary btn-sm" id="settings-open-passkeys-btn"
-                  onclick="openSecurityModal('passkeys')">Passkeys</button>
-                <button type="button" class="btn btn-secondary btn-sm"
-                  onclick="openSecurityModal('password')">Password</button>
-                <button type="button" class="btn btn-secondary btn-sm" id="settings-open-2fa-btn"
-                  onclick="openSecurityModal('2fa')">2FA</button>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="revokeOtherSessions()">Revoke</button>
+                <div class="acct-sec-row">
+                  <div class="acct-sec-text">
+                    <div class="settings-sec-label">Sessions</div>
+                    <div class="settings-sec-val" id="settings-sec-sessions">1 active</div>
+                  </div>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="revokeOtherSessions()">Sign out others</button>
+                </div>
               </div>
             </div>
 
