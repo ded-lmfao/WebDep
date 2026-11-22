@@ -226,7 +226,7 @@ pub(crate) async fn create_database_handler(
     }
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
-    log_audit(&state, &user.username, "database.create", Some(&db.name), Some(&format!("Created PostgreSQL database '{}' on port {}", db.db_name, db.port))).await;
+    log_audit(&state, &user.username, "database.create", Some(&database_tag(db.id)), Some(&format!("Created PostgreSQL database '{}' on port {}", db.db_name, db.port))).await;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     Ok(Json(to_database_response(db, true, &cwd)))
 }
@@ -413,7 +413,7 @@ pub(crate) async fn link_database_handler(
         }
     }
 
-    log_audit(&state, &user.username, "database.link", Some(&db.name), Some(&format!("Linked database '{}' to {} '{}'", db.name, target_noun, p.name))).await;
+    log_audit(&state, &user.username, "database.link", Some(&database_tag(db.id)), Some(&format!("Linked database '{}' to {} '{}'", db.name, target_noun, p.name))).await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "message": format!("Database linked to {} '{}' and credentials injected!", target_noun, p.name)
@@ -462,7 +462,7 @@ pub(crate) async fn unlink_database_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
-    log_audit(&state, &actor.username, "database.unlink", Some(&db.name), Some(&desc)).await;
+    log_audit(&state, &actor.username, "database.unlink", Some(&database_tag(db.id)), Some(&desc)).await;
 
     Ok(Json(serde_json::json!({ "ok": true, "message": desc })))
 }

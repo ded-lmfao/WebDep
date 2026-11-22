@@ -108,5 +108,5 @@ doesn't read.
   VPSes (the VPS does the file work; a VPS running an older WebDep shows the usual "update this
   node" message). A backup that holds only environment variables restores just those and never
   touches the files.
-- **Audit history per app** keeps the newest 50 entries for each website or service; older ones
+- **Audit history per app** keeps the newest 100 entries for each website, service and database (each has its own 100); older ones
   are deleted as new ones arrive. Panel-wide entries keep the days-based retention.

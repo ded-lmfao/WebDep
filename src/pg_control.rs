@@ -131,6 +131,13 @@ fn build_migrator() -> sqlx::migrate::Migrator {
                 Cow::Borrowed(include_str!("../migrations/0016_limit_events.sql")),
                 false,
             ),
+            Migration::new(
+                17,
+                Cow::Borrowed("audit_cap_100"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../migrations/0017_audit_cap_100.sql")),
+                false,
+            ),
         ]),
         // A database already migrated by a newer WebDep keeps working when an older build is
         // started on it (rollback): unknown newer migrations are tolerated, not fatal.

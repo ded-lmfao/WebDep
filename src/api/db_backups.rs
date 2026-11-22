@@ -173,7 +173,7 @@ pub(crate) async fn create_db_backup_handler(
 
     let data_dir = state.cluster.data_dir().to_path_buf();
     let dest = crate::db_backups::dump_path(&data_dir, id, backup_id);
-    let (state2, actor_name, db_name) = (state.clone(), actor.username.clone(), db.name.clone());
+    let (state2, actor_name, db_name) = (state.clone(), actor.username.clone(), database_tag(db.id));
     tokio::spawn(async move {
         let outcome = match crate::databases::PgBinaries::detect() {
             Ok(bins) => crate::db_backups::create_dump(&bins, &conn, &dest).await,
@@ -244,7 +244,7 @@ pub(crate) async fn restore_db_backup_handler(
     if !crate::db_backups::begin_restore(&data_dir, id, payload.backup_id) {
         return Err((StatusCode::CONFLICT, "This database is already being restored.".to_string()));
     }
-    let (state2, actor_name, db_name, backup_id) = (state.clone(), actor.username.clone(), db.name.clone(), payload.backup_id);
+    let (state2, actor_name, db_name, backup_id) = (state.clone(), actor.username.clone(), database_tag(db.id), payload.backup_id);
     tokio::spawn(async move {
         let result = match crate::databases::PgBinaries::detect() {
             Ok(bins) => crate::db_backups::restore_dump(&bins, &conn, &file, &checksum).await,
@@ -299,7 +299,7 @@ pub(crate) async fn lock_db_backup_handler(
     if done.rows_affected() == 0 {
         return Err((StatusCode::NOT_FOUND, format!("Backup #{backup_id} not found")));
     }
-    log_audit(&state, &actor.username, if payload.locked { "db.backup.lock" } else { "db.backup.unlock" }, Some(&db.name), Some(&format!("Backup #{backup_id}"))).await;
+    log_audit(&state, &actor.username, if payload.locked { "db.backup.lock" } else { "db.backup.unlock" }, Some(&database_tag(db.id)), Some(&format!("Backup #{backup_id}"))).await;
     Ok(Json(serde_json::json!({ "ok": true, "locked": payload.locked })))
 }
 
@@ -335,7 +335,7 @@ pub(crate) async fn delete_db_backup_handler(
         .execute(&state.db)
         .await
         .map_err(internal)?;
-    log_audit(&state, &actor.username, "db.backup.delete", Some(&db.name), Some(&format!("Deleted backup #{backup_id}"))).await;
+    log_audit(&state, &actor.username, "db.backup.delete", Some(&database_tag(db.id)), Some(&format!("Deleted backup #{backup_id}"))).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -381,7 +381,7 @@ pub(crate) async fn download_db_backup_handler(
             Err(e) => Some((Err(e), f)),
         }
     });
-    log_audit(&state, &actor.username, "db.backup.download", Some(&db.name), Some(&format!("Downloaded backup #{backup_id}"))).await;
+    log_audit(&state, &actor.username, "db.backup.download", Some(&database_tag(db.id)), Some(&format!("Downloaded backup #{backup_id}"))).await;
     Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")

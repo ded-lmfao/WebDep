@@ -430,6 +430,49 @@
   grid-column: 1 / -1;
 }
 
+/* Group headings that split the settings into Platform / Deploy / Access / Appearance. */
+.settings-section-label {
+  grid-column: 1 / -1;
+  margin: 10px 2px -4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.settings-cards-grid > .settings-section-label:first-child { margin-top: 0; }
+
+/* Accounts card sits in the top row beside Platform Update and Server Controls, so its fields stack.
+   When the page has two columns the card takes the full row and splits into two. */
+.settings-accounts-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+.settings-accounts-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.settings-accounts-actions {
+  margin-top: auto;
+  display: flex;
+  justify-content: flex-end;
+}
+@media (min-width: 901px) and (max-width: 1280px) {
+  .settings-card-accounts { grid-column: 1 / -1; }
+  .settings-accounts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .settings-accounts-col + .settings-accounts-col {
+    padding-left: 24px;
+    border-left: 1px solid var(--border-subtle);
+  }
+}
+@media (min-width: 681px) and (max-width: 900px) {
+  .settings-card-accounts { grid-column: 1 / -1; }
+}
+}
+
 .settings-card-inset {
   background: var(--bg-alt);
   border: 1px solid var(--border-subtle);

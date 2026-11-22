@@ -5,7 +5,7 @@ _meta settings projects project_env deployments releases logs users sessions bac
 0008 port_exposure: node_ports.public; nodes.firewall_state/firewall_error/firewall_synced_at
 0009 account_security: password_resets (token_hash); sessions.created_at/ip/user_agent
 0010 app_placement: node_ips (node_id, ip, label); projects.bind_ip, cpu_limit (% of core), memory_limit_mb
-0011 audit_cap: per-app audit trimmed to newest 50 (also enforced on insert: api/common.rs trim_app_audit)
+0011 audit_cap + 0017 audit_cap_100: per-app audit kept to newest 100 each (websites/services by project_id, databases by target 'DB #<id>'); enforced on insert: api/common.rs trim_app_audit / trim_database_audit
 0012 app_limits: projects + databases cpu_limit, memory_limit_mb, disk_limit_mb, backup_limit (0 = no limit)
 0013 backup_archives: backups.status (running|complete|failed), error, checksum_sha256, file_count, locked, created_by, completed_at, archive_path ('' = older folder backup, 'pending' = being built on a node)
 0014 database_backups: id, database_id (FK cascade), created_at, completed_at, status running|complete|failed, error, size_bytes, checksum_sha256, note, locked, created_by, archive_path (pg_dump -F c file)

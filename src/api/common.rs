@@ -711,14 +711,40 @@ pub(crate) async fn log_audit_project(
     .bind(detail)
     .execute(&state.db)
     .await;
-    if let Some(pid) = project_id {
-        trim_app_audit(&state.db, pid).await;
+    match project_id {
+        Some(pid) => trim_app_audit(&state.db, pid).await,
+        None => {
+            if let Some(db_id) = target.and_then(database_tag_id) {
+                trim_database_audit(&state.db, db_id).await;
+            }
+        }
     }
 }
 
-/// Keeps only the newest `APP_AUDIT_CAP` audit entries for one website or service; older ones
-/// are deleted as new ones arrive. Panel-wide entries are not touched.
-pub(crate) const APP_AUDIT_CAP: i64 = 50;
+/// Keeps only the newest `APP_AUDIT_CAP` audit entries for each website, service and database,
+/// counted separately per app; older ones are deleted as new ones arrive. Panel-wide entries are
+/// not touched.
+pub(crate) const APP_AUDIT_CAP: i64 = 100;
+
+/// A database's activity entries use the target `DB #<id>`.
+pub(crate) fn database_tag(id: i64) -> String {
+    format!("DB #{id}")
+}
+
+fn database_tag_id(target: &str) -> Option<i64> {
+    target.trim().strip_prefix("DB #")?.parse().ok()
+}
+
+pub(crate) async fn trim_database_audit(db: &crate::db::DbPool, database_id: i64) {
+    let _ = sqlx::query(
+        "DELETE FROM audit WHERE project_id IS NULL AND LOWER(target) = LOWER($1) AND id NOT IN (
+            SELECT id FROM audit WHERE project_id IS NULL AND LOWER(target) = LOWER($1) ORDER BY id DESC LIMIT $2)",
+    )
+    .bind(database_tag(database_id))
+    .bind(APP_AUDIT_CAP)
+    .execute(db)
+    .await;
+}
 
 pub(crate) async fn trim_app_audit(db: &crate::db::DbPool, project_id: i64) {
     let _ = sqlx::query(
@@ -733,10 +759,35 @@ pub(crate) async fn trim_app_audit(db: &crate::db::DbPool, project_id: i64) {
 
 #[cfg(test)]
 mod audit_cap_tests {
+    #[tokio::test]
+    async fn each_database_keeps_its_own_newest_hundred() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        for i in 0..105 {
+            for tag in ["DB #7", "DB #8"] {
+                sqlx::query("INSERT INTO audit(ts, actor, action, target) VALUES($1, 'a', 'database.stop', $2)")
+                    .bind(i as i64)
+                    .bind(tag)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+        }
+        sqlx::query("INSERT INTO audit(ts, actor, action, target) VALUES(0, 'a', 'x', 'DB #8')").execute(&db).await.unwrap();
+        trim_database_audit(&db, 7).await;
+        let count = |tag: &'static str| {
+            let db = db.clone();
+            async move { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit WHERE target = $1").bind(tag).fetch_one(&db).await.unwrap() }
+        };
+        assert_eq!(count("DB #7").await, 100);
+        assert_eq!(count("DB #8").await, 106, "another database is not trimmed by this one");
+        trim_database_audit(&db, 8).await;
+        assert_eq!(count("DB #8").await, 100);
+    }
+
     use super::*;
 
     #[tokio::test]
-    async fn app_audit_keeps_newest_fifty() {
+    async fn app_audit_keeps_newest_hundred() {
         let db = crate::pg_control::test_db::isolated_pool().await;
         let pid: i64 = sqlx::query_scalar(
             "INSERT INTO projects(name, slug, repo_url, deploy_dir, created_at, updated_at)
@@ -745,7 +796,7 @@ mod audit_cap_tests {
         .fetch_one(&db)
         .await
         .unwrap();
-        for i in 0..55 {
+        for i in 0..105 {
             sqlx::query("INSERT INTO audit(project_id, ts, actor, action) VALUES($2, $1, 'a', 'x')")
                 .bind(i as i64)
                 .bind(pid)
@@ -759,7 +810,7 @@ mod audit_cap_tests {
             .unwrap();
         trim_app_audit(&db, pid).await;
         let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit WHERE project_id = $1").bind(pid).fetch_one(&db).await.unwrap();
-        assert_eq!(kept, 50);
+        assert_eq!(kept, 100);
         let panel: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit WHERE project_id IS NULL").fetch_one(&db).await.unwrap();
         assert_eq!(panel, 1, "panel-wide entries are not capped");
     }

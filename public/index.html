@@ -1802,11 +1802,12 @@
         <section id="view-settings" class="view-section">
           <div class="view-header">
             <div class="view-title-group">
-              <h1>Settings</h1>
+              <h1>Platform Settings</h1>
             </div>
           </div>
 
           <div class="settings-cards-grid">
+            <div class="settings-section-label">Platform</div>
             <!-- 3. Platform Version & 1-Click Self-Update Card -->
             <div class="project-card settings-card" id="settings-update-card">
               <div class="project-card-header"
@@ -1913,6 +1914,53 @@
               </div>
             </div>
 
+            <div class="project-card settings-card settings-card-accounts" id="settings-accounts-card">
+              <div class="project-card-header" style="min-height: 40px; display: flex; align-items: center;">
+                <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
+                  <div class="project-card-icon" style="color: var(--text-main);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                  </div>
+                  <div style="min-width: 0;">
+                    <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Accounts &amp; sign-in</span></div>
+                    <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">Who can ask for an account &bull; Two-factor rules</div>
+                  </div>
+                </div>
+              </div>
+              <div class="settings-accounts-grid">
+                <div class="settings-accounts-col">
+                  <label class="acct-switch-row">
+                    <span>
+                      <strong>Allow self-registration</strong>
+                      <small>Shows "Create account" on the sign-in page. Requests wait in Admin Panel &rsaquo; Requests.</small>
+                    </span>
+                    <input type="checkbox" id="setting-allow-registration" class="acct-switch">
+                  </label>
+                  <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label" for="setting-registration-domains">Allowed email domains for requests</label>
+                    <input type="text" id="setting-registration-domains" class="form-control" placeholder="Email domains, comma separated (empty: any)">
+                    <span class="form-hint">Only these domains can request an account. Leave empty to allow any.</span>
+                  </div>
+                </div>
+                <div class="settings-accounts-col">
+                  <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label" for="setting-require-2fa">Require two-factor authentication</label>
+                    <select id="setting-require-2fa" class="form-control">
+                      <option value="off">Off</option>
+                      <option value="admins">For admins</option>
+                      <option value="everyone">For everyone</option>
+                    </select>
+                    <span class="form-hint">People without it are asked to set it up before they can use the panel.</span>
+                  </div>
+                  <div class="settings-accounts-actions">
+                    <button type="button" class="btn btn-primary btn-sm" id="setting-accounts-save">Save account rules</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section-label">Deploy &amp; integrations</div>
             <!-- 2. GitHub Tokens & Deploy Defaults Card -->
             <div class="project-card settings-card settings-card-wide" id="settings-global-config-card">
               <div class="project-card-header"
@@ -1981,37 +2029,7 @@
               </form>
             </div>
 
-            <!-- 5. Platform Appearance & Predefined Themes Card -->
-            <div class="project-card settings-card" id="settings-accounts-card">
-              <div class="project-card-header" style="min-height: 40px;">
-                <div style="min-width: 0;">
-                  <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Accounts</span></div>
-                  <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">Who can ask for an account</div>
-                </div>
-              </div>
-              <label class="acct-switch-row">
-                <span>
-                  <strong>Allow self-registration</strong>
-                  <small>Shows "Create account" on the sign-in page. Requests wait in Admin Panel &rsaquo; Requests.</small>
-                </span>
-                <input type="checkbox" id="setting-allow-registration" class="acct-switch">
-              </label>
-              <div class="acct-policy">
-                <div class="form-group">
-                  <label class="form-label" for="setting-registration-domains">Allowed email domains for requests</label>
-                  <input type="text" id="setting-registration-domains" class="form-control" placeholder="Email domains, comma separated (empty: any)">
-                </div>
-                <div class="form-group">
-                  <label class="form-label" for="setting-require-2fa">Require two-factor authentication</label>
-                  <select id="setting-require-2fa" class="form-control">
-                    <option value="off">Off</option>
-                    <option value="admins">For admins</option>
-                    <option value="everyone">For everyone</option>
-                  </select>
-                </div>
-                <button type="button" class="btn btn-primary btn-sm" id="setting-accounts-save">Save account rules</button>
-              </div>
-            </div>
+            <div class="settings-section-label">Appearance</div>
 
             <div class="project-card settings-card settings-card-wide" id="settings-theme-card">
               <div class="project-card-header"

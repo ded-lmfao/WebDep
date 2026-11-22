@@ -107,7 +107,7 @@ async fn record_event(state: &AppState, t: &Target, limit_kind: &'static str, me
     crate::app_limits::record_event(&state.db, t.is_db, t.id, &t.name, limit_kind, message, stopped).await;
     let action = if stopped { "app.limit_stop" } else { "app.limit_reached" };
     if t.is_db {
-        log_audit(state, "system", action, Some(&t.name), Some(message)).await;
+        log_audit(state, "system", action, Some(&database_tag(t.id)), Some(message)).await;
     } else {
         log_audit_project(state, Some(t.id), "system", action, Some(&t.name), Some(message)).await;
     }

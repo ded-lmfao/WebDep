@@ -104,7 +104,7 @@ pub(crate) async fn set_database_limits_handler(
         .map_err(internal)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
     app_limits::set(&state.db, Kind::Database, id, &l).await.map_err(internal)?;
-    log_audit(&state, &actor.username, "database.limits", Some(&db.name), Some(&format!("Limits: {}", describe(&l)))).await;
+    log_audit(&state, &actor.username, "database.limits", Some(&database_tag(db.id)), Some(&format!("Limits: {}", describe(&l)))).await;
     state.cache.invalidate_all();
     Ok(Json(serde_json::json!({ "limits": l, "appliesOnRestart": l.cpu > 0 || l.memory_mb > 0 })))
 }
