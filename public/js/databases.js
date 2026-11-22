@@ -23,7 +23,7 @@ export * from './databases_modal.js';
 export { DB_PIPELINE_STAGES };
 
 export async function loadDatabases(force = false) {
-  if (typeof window.hasAnyPower === 'function' && !window.hasAnyPower(['databases', 'databases_manage'])) {
+  if (typeof window.hasAnyPower === 'function' && !window.hasAnyPower(['databases', 'databases_manage']) && !window.canCreate?.('database')) {
     state.databases = [];
     const badge = document.getElementById('badge-databases-count');
     if (badge) badge.textContent = 0;
@@ -169,7 +169,7 @@ export function renderDatabasesList() {
         <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 20px;">
           ${q || filter !== 'all' ? 'No databases match your search or status filter.' : 'Deploy an isolated PostgreSQL database directly on your VM.'}
         </p>
-        ${hasPower('databases_manage') ? '<button class="btn btn-primary" onclick="openCreateDatabaseModal()">Add New Database</button>' : ''}
+        ${window.canCreate('database') ? '<button class="btn btn-primary" onclick="openCreateDatabaseModal()">Add New Database</button>' : ''}
       </div>
     `);
     return;
@@ -275,14 +275,14 @@ export function renderDatabasesList() {
         <!-- Actions Footer -->
         <div class="project-card-actions" onclick="event.stopPropagation()" style="display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; margin-top: 2px;">
           <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
-            ${hasAnyPower(['databases', 'databases_manage']) ? `
+            ${hasAnyPower(['databases', 'databases_manage'], { databaseId: d.id, linkedProjectId: d.linkedProjectId ?? d.linked_project_id ?? null }) ? `
               <button class="btn ${isRunning ? 'btn-danger' : 'btn-success'} btn-sm" id="btn-db-toggle-${d.id}" onclick="toggleDatabaseState(${d.id})" ${(isStarting || isStopping) ? 'disabled' : ''} style="padding: 4px 10px; font-size: 11.5px;" title="${isRunning ? 'Stop Database' : 'Start Database'}">
                 <span>${isRunning ? 'Stop' : isStarting ? 'Starting' : isStopping ? 'Stopping' : 'Start'}</span>
               </button>
               <button class="btn btn-secondary btn-sm" onclick="openDatabaseWorkspace(${d.id}, 'files')" style="padding: 4px 10px; font-size: 11.5px;" title="Cluster Files (Read-Only)">Files</button>
               <button class="btn btn-secondary btn-sm" onclick="openDatabaseWorkspace(${d.id}, 'logs')" style="padding: 4px 10px; font-size: 11.5px;" title="PostgreSQL Logs">Logs</button>
             ` : ''}
-            ${hasAnyPower(['databases_manage', 'env']) ? `<button class="btn btn-secondary btn-sm" onclick="showDatabaseDetails(${d.id})" style="padding: 4px 10px; font-size: 11.5px;" title="Connection Strings &amp; Credentials">Creds</button>` : ''}
+            ${hasAnyPower(['databases_manage', 'env'], { databaseId: d.id, linkedProjectId: d.linkedProjectId ?? d.linked_project_id ?? null }) ? `<button class="btn btn-secondary btn-sm" onclick="showDatabaseDetails(${d.id})" style="padding: 4px 10px; font-size: 11.5px;" title="Connection Strings &amp; Credentials">Creds</button>` : ''}
           </div>
           <button class="btn btn-primary btn-sm" onclick="openDatabaseWorkspace(${d.id}, 'deployments')" style="padding: 4px 12px; font-size: 11.5px; font-weight: 500; white-space: nowrap; flex-shrink: 0;">
             Manage &rarr;

@@ -306,6 +306,11 @@ pub struct CreateEnrollTokenInput {
     pub target_public_ip: Option<String>,
     #[serde(default)]
     pub repo_slug: Option<String>,
+    /// Port range the new node opens and hands out (both or neither).
+    #[serde(default)]
+    pub port_min: Option<u16>,
+    #[serde(default)]
+    pub port_max: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -5,6 +5,7 @@
 
 // Core Services & Shared Reactive State
 import './js/icons.js';
+import './js/touch_labels.js';
 import { state, WEBSITE_WORKSPACE_TABS } from './js/state.js';
 import {
   animateModalClose,
@@ -20,7 +21,7 @@ import { loadProjects, renderProjectsList, openAddWebsiteModal } from './js/webs
 import { renderServicesList } from './js/services.js';
 import { navigateTo, renderCurrentView, renderWebsiteWorkspaceHeader } from './js/workspace.js';
 import { loadDatabases, renderDatabasesList } from './js/databases.js';
-import { loadDeploymentsView, loadReleasesView, loadRollbacksView, waterPipelines } from './js/deployments.js';
+import { loadDeploymentsView, loadReleasesView, loadBackupsView, loadRollbacksView, waterPipelines } from './js/deployments.js';
 import { loadMonitorView } from './js/settings.js';
 
 // Explorer & Logs Subsystems (Initialize listeners & exports)
@@ -28,8 +29,11 @@ import './js/files.js';
 import './js/logs.js';
 import './js/cluster.js';
 import './js/modules.js';
+import './js/app_limits.js';
+import { startLimitAlerts } from './js/limit_alerts.js';
 import './js/sidebar.js';
 import './js/table_cards.js';
+import './js/accounts.js';
 
 // ============================================================================
 // Global Polling & Live Updates (Low Resource & Page Visibility Aware)
@@ -69,6 +73,9 @@ async function pollTick() {
     } else if (state.currentView === 'releases') {
       renderWebsiteWorkspaceHeader();
       await loadReleasesView();
+    } else if (state.currentView === 'backups') {
+      renderWebsiteWorkspaceHeader();
+      await loadBackupsView();
     } else if (state.currentView === 'rollbacks') {
       renderWebsiteWorkspaceHeader();
       await loadRollbacksView();
@@ -88,6 +95,7 @@ async function pollTick() {
 function startPolling() {
   if (state.overviewTimer) clearInterval(state.overviewTimer);
   state.overviewTimer = setInterval(pollTick, 4500);
+  startLimitAlerts();
 }
 window.startPolling = startPolling;
 

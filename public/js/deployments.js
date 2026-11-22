@@ -18,6 +18,8 @@ import {
   hasCachedApi,
   isPublicIp,
   renderPublicIpPill,
+  setButtonBusy,
+  restoreButtonIdle,
 } from './state.js';
 import { api, toast } from './api.js';
 import { formatLogLine } from './logs.js';
@@ -27,6 +29,7 @@ import { loadProjects, renderProjectsList } from './websites.js';
 // Re-export Modular Subsystems
 export * from './pipeline_engine.js';
 export * from './releases.js';
+export * from './backups.js';
 export * from './env_vars.js';
 
 import { waterPipelines, renderPipelineStages, resetWaterPipeline } from './pipeline_engine.js';
@@ -310,10 +313,7 @@ async function loadDeploymentsView() {
       // Re-enable any deploy buttons that were in "Deploying" spinner state
       const btns = document.querySelectorAll(`button[onclick*="deployProject"]`);
       btns.forEach((b) => {
-        if (b.disabled && b.innerHTML.includes('Deploying')) {
-          b.disabled = false;
-          b.innerHTML = 'Deploy';
-        }
+        if (b.disabled && b.getAttribute('aria-busy') === 'true') restoreButtonIdle(b, 'Deploy');
       });
 
       if (latest) {
@@ -439,8 +439,7 @@ async function deployProject(projectId, sha = null) {
 
   const btns = document.querySelectorAll(`button[onclick*="deployProject(${p.id})"]`);
   btns.forEach((b) => {
-    b.disabled = true;
-    b.innerHTML = '<span class="btn-spinner"></span> Deploying';
+    setButtonBusy(b, 'Deploying');
   });
 
   resetWaterPipeline('main-pipeline-track');
@@ -464,10 +463,7 @@ async function deployProject(projectId, sha = null) {
       window.renderSingleServicePipeline(p.id, 'source', 'failed', 'Deploy failed');
     }
     toast(`Deployment failed to start: ${err.message}`, 'error');
-    btns.forEach((b) => {
-      b.disabled = false;
-      b.innerHTML = 'Deploy';
-    });
+    btns.forEach((b) => restoreButtonIdle(b, 'Deploy'));
   }
 }
 

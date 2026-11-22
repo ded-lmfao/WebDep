@@ -79,6 +79,9 @@ pub struct CreateDatabaseInput {
     pub domain: Option<String>,
     #[serde(default, alias = "linkedProjectId", alias = "linked_project_id")]
     pub linked_project_id: Option<i64>,
+    /// Limits chosen at creation; 0 or empty = no limit.
+    #[serde(default)]
+    pub limits: crate::app_limits::AppLimits,
 }
 
 pub fn encode_uri_userinfo_component(input: &str) -> String {
@@ -359,13 +362,34 @@ impl Databases {
             return Err("Database password is required".to_string());
         }
 
+        input.limits.validate()?;
         let engine = input.engine.unwrap_or_else(|| "postgres".to_string());
         let access_mode = input.access_mode.unwrap_or_else(|| "local".to_string());
         let allowed_ips = input.allowed_ips.unwrap_or_default().trim().to_string();
         let domain = input.domain.unwrap_or_default().trim().to_string();
         let is_superuser = input.is_superuser.unwrap_or(false);
 
-        let port = crate::db::allocate_global_unique_port(&self.db, input.port, 5432, None, None).await?;
+        // Nodes with a port range hand out their lowest open free port; others use the
+        // cluster-wide unique allocation starting at 5432.
+        // New databases are created on the local Core node.
+        let local_node: Option<i64> = sqlx::query_scalar("SELECT id FROM nodes WHERE is_local ORDER BY id LIMIT 1")
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten();
+        let port = match local_node {
+            Some(nid) if crate::cluster::ports::has_pool(&self.db, nid).await => match input.port.filter(|p| *p > 0) {
+                Some(req) => {
+                    crate::cluster::ports::check_assignable(&self.db, nid, req, None).await?;
+                    req
+                }
+                None => crate::cluster::ports::next_free_port(&self.db, nid, &[])
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| crate::cluster::ports::no_free_port_message("this node"))?,
+            },
+            _ => crate::db::allocate_global_unique_port(&self.db, input.port, 5432, None, None).await?,
+        };
 
         let enc_password = self
             .vault
@@ -393,6 +417,8 @@ impl Databases {
         .fetch_one(&self.db)
         .await
         .map_err(|e| e.to_string())?;
+
+        let _ = crate::app_limits::set(&self.db, crate::app_limits::Kind::Database, id, &input.limits).await;
 
         let db_dir = self.base_dir.join(format!("db-{}", id));
         let data_dir_str = db_dir.to_string_lossy().to_string();
@@ -752,7 +778,43 @@ impl Databases {
         start_cmd.stdout(std::process::Stdio::null());
         start_cmd.stderr(std::process::Stdio::null());
 
-        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), start_cmd.status()).await;
+        // CPU and memory limits: pg_ctl joins the database's cgroup, and the server it
+        // starts stays in it (Linux with cgroups v2; elsewhere the database runs unlimited).
+        let limits = crate::app_limits::get(&self.db, crate::app_limits::Kind::Database, id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        match crate::runtime::limits::prepare(&format!("db-{id}"), limits.cpu, limits.memory_mb) {
+            #[cfg(target_os = "linux")]
+            Ok(Some(procs)) => {
+                // SAFETY: join_in_child only uses async-signal-safe calls.
+                unsafe {
+                    start_cmd.pre_exec(move || crate::runtime::limits::join_in_child(&procs));
+                }
+            }
+            Err(e) => warn!("[DB #{}] Resource limits not applied: {}. The database runs without limits.", id, e),
+            _ => {}
+        }
+
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            // Windows: pg_ctl and the server it starts run in a job with the database's limits.
+            #[cfg(windows)]
+            {
+                if limits.cpu > 0 || limits.memory_mb > 0 {
+                    if let Ok(mut child) = start_cmd.spawn() {
+                        if let Some(handle) = child.raw_handle() {
+                            if let Err(e) = crate::runtime::limits::apply_to_process(handle, limits.cpu, limits.memory_mb) {
+                                warn!("[DB #{}] Resource limits not applied: {}. The database runs without limits.", id, e);
+                            }
+                        }
+                        return child.wait().await;
+                    }
+                }
+            }
+            start_cmd.status().await
+        })
+        .await;
 
         let pid = match wait_for_pg_ready(port, &data_dir, 20000).await {
             Some(p) => p,

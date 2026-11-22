@@ -165,16 +165,36 @@ fn manage_power_for_kind(kind: &str) -> &'static str {
     }
 }
 
+async fn node_display_name(state: &AppState, node_id: i64) -> String {
+    match state.cluster.get_node(node_id).await {
+        Ok(Some(n)) if !n.display_name.trim().is_empty() => n.display_name,
+        Ok(Some(n)) => n.name,
+        _ => format!("node #{node_id}"),
+    }
+}
+
 pub(crate) async fn create_project_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(mut p): Json<Project>,
 ) -> Result<Json<Project>, (StatusCode, String)> {
-    let actor = verify_power(&state, &headers, manage_power_for_kind(&p.project_kind), None).await?;
     let is_service = p.project_kind == "service";
+    let actor = require_current_user(&state, &headers).await?;
+    let kind = if is_service { "service" } else { "website" };
+    if actor.disabled
+        || !actor.has_any_power(&[crate::auth::grants::create_power(kind), manage_power_for_kind(&p.project_kind)])
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("You don't have permission to create {kind}s. Ask an admin for \"Create {kind}s\"."),
+        ));
+    }
     if p.name.trim().is_empty() || p.slug.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Name and slug are required".into()));
     }
+    crate::app_limits::AppLimits { cpu: p.cpu_limit, memory_mb: p.memory_limit_mb, disk_mb: p.disk_limit_mb, backups: p.backup_limit }
+        .validate()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if p.repo_url.trim().is_empty() {
         p.repo_url = "local".to_string();
     }
@@ -198,8 +218,35 @@ pub(crate) async fn create_project_handler(
         let _ = tokio::fs::create_dir_all(&p.deploy_dir).await;
     }
 
-    // Always assign a guaranteed unique port across all workloads (websites, services, databases)
-    let allocated_port = {
+    if p.node_id.is_none() {
+        p.node_id = state.cluster.default_local_node_id().await;
+    }
+    // Nodes with a port range hand out their lowest open free port (or check the chosen one);
+    // other nodes keep the cluster-wide unique allocation.
+    let pool_node = match p.node_id {
+        Some(nid) if crate::cluster::ports::has_pool(&state.db, nid).await => Some(nid),
+        _ => None,
+    };
+    let allocated_port = if let Some(nid) = pool_node {
+        match p.port.filter(|&pt| pt > 0) {
+            Some(req) => {
+                crate::cluster::ports::check_assignable(&state.db, nid, req, None)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+                req
+            }
+            None => match crate::cluster::ports::next_free_port(&state.db, nid, &[])
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            {
+                Some(port) => port,
+                None => {
+                    let name = node_display_name(&state, nid).await;
+                    return Err((StatusCode::CONFLICT, crate::cluster::ports::no_free_port_message(&name)));
+                }
+            },
+        }
+    } else {
         let default_start = if is_service { 8000 } else { 3000 };
         crate::db::allocate_global_unique_port(&state.db, p.port, default_start, None, None)
             .await
@@ -220,6 +267,14 @@ pub(crate) async fn create_project_handler(
         .create(&p)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    if !actor.is_admin {
+        // The creator owns what they create.
+        crate::auth::grants::grant_owner(&state.db, actor.id, crate::auth::grants::SCOPE_PROJECT, id, kind)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        super::access::after_change(&state, actor.id, "Created an app").await;
+    }
 
     let audit_action = if is_service { "service.create" } else { "website.create" };
     let audit_desc = if is_service {
@@ -277,6 +332,32 @@ pub(crate) async fn create_project_handler(
     Ok(Json(created))
 }
 
+/// `true` for a host a site address can safely use: a hostname (optionally `*.` wildcard), an IPv4
+/// address or a bracketed IPv6 address, with an optional `:port`. Anything else (commas, slashes,
+/// `@`, a bare `:443`, ...) could change what Caddy serves, so it is refused.
+fn is_valid_site_host(raw: &str) -> bool {
+    let (host, port) = match raw.rsplit_once(':') {
+        Some((h, p)) if !raw.starts_with('[') || h.ends_with(']') => (h, Some(p)),
+        _ => (raw, None),
+    };
+    if let Some(p) = port {
+        if p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()) || p.parse::<u32>().map_or(true, |n| n == 0 || n > 65535) {
+            return false;
+        }
+    }
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return inner.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    let name = host.strip_prefix("*.").unwrap_or(host);
+    !name.is_empty()
+        && name.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
 pub(crate) fn normalize_domain(d: &str) -> String {
     let cleaned = d
         .trim()
@@ -285,17 +366,34 @@ pub(crate) fn normalize_domain(d: &str) -> String {
         .trim_end_matches('/')
         .trim()
         .to_lowercase();
-    if cleaned.is_empty()
-        || cleaned.len() > 253
-        || cleaned.chars().any(|c| {
-            c.is_whitespace()
-                || c.is_control()
-                || matches!(c, '{' | '}' | ';' | '#' | '"' | '\'' | '`' | '\\')
-        })
-    {
+    if cleaned.is_empty() || cleaned.len() > 253 || !is_valid_site_host(&cleaned) {
         return String::new();
     }
     cleaned
+}
+
+/// Two apps must never claim the same site address: the generated Caddyfile would be ambiguous and
+/// a reload would fail for every site. Returns a 409 naming the app that already uses it.
+pub(crate) async fn ensure_domains_free(
+    state: &AppState,
+    project_id: i64,
+    domains: &[String],
+) -> Result<(), (StatusCode, String)> {
+    if domains.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT name, domains FROM projects WHERE id <> $1")
+        .bind(project_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    for (name, raw) in rows {
+        let theirs: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        if let Some(clash) = domains.iter().find(|d| theirs.iter().any(|t| t.eq_ignore_ascii_case(d))) {
+            return Err((StatusCode::CONFLICT, format!("The domain '{clash}' is already used by '{name}'.")));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn sanitize_domains<I: IntoIterator<Item = String>>(domains: I) -> Vec<String> {
@@ -322,6 +420,7 @@ pub(crate) async fn update_project_handler(
         let _ = verify_power(&state, &headers, manage_power_for_kind(&p.project_kind), Some(id)).await?;
     }
     p.domains = sanitize_domains(p.domains);
+    ensure_domains_free(&state, id, &p.domains).await?;
 
     // Ensure non-conflicting, valid port allocation across all workloads
     if let Some(port) = p.port {
@@ -373,7 +472,20 @@ pub(crate) async fn update_project_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Project not found".into()))?;
 
-    if let Some(node_id) = resolve_remote_node(&state, updated.node_id).await? {
+    propagate_project_change(&state, prev.as_ref(), &updated).await?;
+    state.cache.invalidate_all();
+
+    Ok(Json(updated))
+}
+
+/// Pushes a saved project to wherever it runs: refreshes the process environment and port,
+/// Caddy routes, and firewall rules (remote nodes get `project.ensure` plus a Caddy sync).
+pub(crate) async fn propagate_project_change(
+    state: &AppState,
+    prev: Option<&crate::projects::Project>,
+    updated: &crate::projects::Project,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(node_id) = resolve_remote_node(state, updated.node_id).await? {
         if state.cluster.is_node_connected(node_id).await {
             let ctx = state.cluster.build_remote_context(&state.projects, updated.id).await;
             let _ = state
@@ -381,7 +493,7 @@ pub(crate) async fn update_project_handler(
                 .call_node(
                     node_id,
                     "project.ensure",
-                    serde_json::json!({ "project": &updated, "context": ctx }),
+                    serde_json::json!({ "project": updated, "context": ctx }),
                     std::time::Duration::from_secs(15),
                 )
                 .await;
@@ -390,17 +502,17 @@ pub(crate) async fn update_project_handler(
             }
         }
     } else {
-        let _ = state.runtime.ensure_container(&updated).await;
+        let _ = state.runtime.ensure_container(updated).await;
 
         if updated.project_kind != "service" || !updated.domains.is_empty() {
             if let Ok(all) = state.projects.list().await {
-                let _ = state.caddy.write_config(&updated, &all);
+                let _ = state.caddy.write_config(updated, &all);
                 let _ = state.caddy.reload();
             }
         }
 
         // Clean up old firewall rules if port, access mode, or allowed IPs changed
-        if let Some(ref old_p) = prev {
+        if let Some(old_p) = prev {
             if let Some(old_port) = old_p.port {
                 if Some(old_port) != updated.port
                     || old_p.access_mode != updated.access_mode
@@ -415,9 +527,7 @@ pub(crate) async fn update_project_handler(
             crate::databases::Databases::sync_firewall_rules(port, &updated.access_mode, &updated.allowed_ips).await;
         }
     }
-    state.cache.invalidate_all();
-
-    Ok(Json(updated))
+    Ok(())
 }
 
 pub(crate) async fn delete_project_handler(
@@ -430,7 +540,9 @@ pub(crate) async fn delete_project_handler(
         .as_ref()
         .map(|p| p.project_kind.as_str())
         .unwrap_or("website");
-    let actor = verify_power(&state, &headers, manage_power_for_kind(kind), Some(id)).await?;
+    // Deleting an app is for admins and the app's owner (the per-app `app_delete` power).
+    let _ = kind;
+    let actor = verify_power(&state, &headers, "app_delete", Some(id)).await?;
     if let Some(ref p) = deleted_proj {
         log_audit_project(
             &state,
@@ -461,6 +573,7 @@ pub(crate) async fn delete_project_handler(
         } else {
             let _ = state.runtime.stop_project(p).await;
             state.runtime.stop_maintenance_server(id);
+            crate::backups::remove_project_archives(state.cluster.data_dir(), id);
         }
     }
     state
@@ -468,6 +581,8 @@ pub(crate) async fn delete_project_handler(
         .delete(id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = crate::auth::grants::remove_for_app(&state.db, crate::auth::grants::SCOPE_PROJECT, id).await;
+    state.auth.invalidate_sessions();
 
     if let Some(ref p) = deleted_proj {
         if resolve_remote_node(&state, p.node_id).await?.is_some() {
@@ -522,6 +637,7 @@ pub(crate) async fn start_project_with_audit(
         .await;
         Ok(pid)
     } else {
+        super::limits::ensure_project_under_disk_limit(p).await?;
         let env = state.projects.get_env_map(p.id).await;
         state.runtime.start_project(p, env, None).await.map_err(|e| {
             if e == "NOT_DEPLOYED_YET" {
@@ -629,15 +745,24 @@ pub(crate) async fn restart_project_handler(
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "process", id).await?;
+    let pid = restart_project_internal(&state, &actor, &p).await?;
+    Ok(Json(serde_json::json!({ "started": true, "pid": pid })))
+}
 
-    if let Some(node_id) = resolve_remote_node(&state, p.node_id).await? {
+/// Restarts an app where it runs (remote node over RPC, or locally) and records it.
+pub(crate) async fn restart_project_internal(
+    state: &AppState,
+    actor: &crate::auth::User,
+    p: &crate::projects::Project,
+) -> Result<u32, (StatusCode, String)> {
+    if let Some(node_id) = resolve_remote_node(state, p.node_id).await? {
         let ctx = state.cluster.build_remote_context(&state.projects, p.id).await;
         let val = state
             .cluster
             .call_node(
                 node_id,
                 "project.restart",
-                serde_json::json!({ "project": &p, "context": ctx }),
+                serde_json::json!({ "project": p, "context": ctx }),
                 std::time::Duration::from_secs(30),
             )
             .await?;
@@ -652,7 +777,7 @@ pub(crate) async fn restart_project_handler(
         .await;
         state.cache.invalidate_all();
         log_audit_project(
-            &state,
+            state,
             Some(p.id),
             &actor.username,
             "container.restart",
@@ -660,12 +785,11 @@ pub(crate) async fn restart_project_handler(
             Some(&format!("Restarted remote workload (PID {pid})")),
         )
         .await;
-        return Ok(Json(serde_json::json!({ "started": true, "pid": pid })));
+        return Ok(pid);
     }
 
-    let _ = state.runtime.stop_project(&p).await;
-    let pid = start_project_with_audit(&state, &actor, &p, "container.restart", "Restarted").await?;
-    Ok(Json(serde_json::json!({ "started": true, "pid": pid })))
+    let _ = state.runtime.stop_project(p).await;
+    start_project_with_audit(state, actor, p, "container.restart", "Restarted").await
 }
 
 #[derive(Deserialize, Default)]
@@ -809,3 +933,28 @@ pub(crate) async fn toggle_maintenance_handler(
     }
 }
 
+#[cfg(test)]
+mod domain_tests {
+    use super::normalize_domain;
+
+    #[test]
+    fn accepts_normal_site_addresses() {
+        assert_eq!(normalize_domain("  https://Shop.Example.com/ "), "shop.example.com");
+        assert_eq!(normalize_domain("*.example.com"), "*.example.com");
+        assert_eq!(normalize_domain("localhost:8080"), "localhost:8080");
+        assert_eq!(normalize_domain("203.0.113.7"), "203.0.113.7");
+        assert_eq!(normalize_domain("[::1]:8443"), "[::1]:8443");
+        assert_eq!(normalize_domain("my_app-1.example.org"), "my_app-1.example.org");
+    }
+
+    #[test]
+    fn refuses_values_that_could_change_what_caddy_serves() {
+        for bad in [
+            ":443", ":80", "a.com, b.com", "a.com/path", "user@a.com", "a.com:0", "a.com:70000", "a.com:", "-a.com",
+            "a-.com", "a..com", ".com", "a.com
+import /etc/passwd", "a b.com", "*", "{env.X}", "a.com;b.com", "[zzz]",
+        ] {
+            assert_eq!(normalize_domain(bad), "", "{bad:?} must be refused");
+        }
+    }
+}

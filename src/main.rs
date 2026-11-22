@@ -9,6 +9,10 @@ mod db;
 mod deployer;
 mod git;
 mod logs;
+mod app_limits;
+mod backups;
+mod db_backups;
+mod maintenance;
 mod monitor;
 mod monitor_net;
 mod pg_control;
@@ -193,6 +197,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     auth_mgr.force_secure_cookies = config.force_secure_cookies;
     let auth = Arc::new(auth_mgr);
     auth.ensure_admin().await;
+    match crate::auth::grants::migrate_legacy_once(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Converted legacy permissions of {} user(s) into access grants", n),
+        // Fail closed but keep serving: non-admin users get no access until the next
+        // successful boot retries the conversion; the main admin is unaffected.
+        Err(e) => tracing::error!("Failed to convert legacy permissions into access grants (will retry next start): {e}"),
+    }
+    crate::auth::policy::reload(&db).await;
+    match crate::auth::grants::grant_legacy_delete_once(&db).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Carried the app delete right over to {n} access grant(s)"),
+        Err(e) => tracing::error!("Could not carry over the app delete right (will retry next start): {e}"),
+    }
     auth.start_revocation_listener();
     let projects = Arc::new(Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(Logs::new(db.clone()));
@@ -222,6 +239,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
     let updater = Arc::new(Updater::with_db(db.clone()));
     let cluster = Arc::new(ClusterManager::new(db.clone(), config.data_dir.clone()));
+    {
+        // Apply this host's port pool to its firewall if it isn't known to be in sync.
+        let (db, cl) = (db.clone(), cluster.clone());
+        tokio::spawn(async move {
+            if let Ok(nodes) = cl.list_nodes().await {
+                for node in nodes.into_iter().filter(|n| n.is_local) {
+                    crate::cluster::ports::resync_if_needed(&db, &cl, &node).await;
+                }
+            }
+        });
+    }
 
     let local_core_http = format!("http://127.0.0.1:{}", config.port);
     let local_core_ws = format!("ws://127.0.0.1:{}/api/cluster/node-ws", config.port);
@@ -278,6 +306,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 mem_auth.prune_in_memory();
                 crate::db::prune_old_logs(&mem_db, 20_000).await;
                 trim_process_heap();
+            }
+        });
+    }
+    {
+        // Hourly housekeeping: audit retention, daily database backup, low-port warnings.
+        let (db, data_dir) = (db.clone(), config.data_dir.clone());
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                let removed = crate::maintenance::prune_audit(&db).await;
+                if removed > 0 {
+                    tracing::info!("Removed {removed} audit entries past the retention period");
+                }
+                crate::maintenance::daily_backup_if_due(&db, &data_dir).await;
+                crate::maintenance::check_port_pools(&db).await;
             }
         });
     }
@@ -363,6 +407,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Enforce max-5 deployment retention cleanup across existing projects at startup.
     crate::deployer::retention::prune_all_projects(&db, crate::deployer::MAX_DEPLOYMENT_RECORDS).await;
 
+    let interrupted = crate::backups::recover_interrupted(&db, &config.data_dir).await
+        + crate::db_backups::recover_interrupted(&db, &config.data_dir).await;
+    if interrupted > 0 {
+        tracing::warn!("{interrupted} backup(s) were interrupted by the last shutdown and marked failed");
+    }
+
     let state = AppState {
         db,
         auth,
@@ -377,6 +427,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         updater,
         cluster,
     };
+
+    {
+        // Clean up after a restore that a restart cut off.
+        let startup_state = state.clone();
+        tokio::spawn(async move {
+            crate::api::projects::backups::undo_housekeeping(&startup_state, true).await;
+        });
+
+        // Apps are checked against their CPU, memory and disk limits shortly after they start and
+        // then every 2 minutes; going over disk stops the app (see api/limit_watch.rs).
+        tokio::spawn(crate::api::limit_watch::run(state.clone()));
+
+        // Expired restore undo copies are cleaned up every 5 minutes.
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                crate::api::projects::backups::undo_housekeeping(&state, false).await;
+            }
+        });
+    }
 
     let app = create_router(state);
 
@@ -442,7 +514,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
     };
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     if let Some(h) = control_pg_handle {
         h.stop().await;
     }

@@ -234,6 +234,24 @@ pub(crate) async fn cache_clear_handler(
     })))
 }
 
+/// Spawning `gh auth token` on every settings load is wasteful when no token exists, so the
+/// auto-detection runs at most once every few minutes.
+fn gh_detection_due() -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_ATTEMPT_S: AtomicU64 = AtomicU64::new(0);
+    const RETRY_AFTER_S: u64 = 300;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_ATTEMPT_S.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < RETRY_AFTER_S {
+        return false;
+    }
+    LAST_ATTEMPT_S.store(now, Ordering::Relaxed);
+    true
+}
+
 pub(crate) async fn get_settings_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -248,7 +266,7 @@ pub(crate) async fn get_settings_handler(
     let current_tok = map.get("github_token").cloned().unwrap_or_default();
 
     // If github_token is not yet saved in DB, try auto-detecting from gh CLI once and persisting it
-    if current_tok.trim().is_empty() {
+    if current_tok.trim().is_empty() && gh_detection_due() {
         if let Ok(out) = tokio::process::Command::new("gh").args(["auth", "token"]).output().await {
             if out.status.success() {
                 let detected = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -359,6 +377,39 @@ pub(crate) async fn update_settings_handler(
     let mut saved_theme: Option<&'static str> = None;
     let mut touched_tokens = false;
 
+    if let Some(v) = payload.get(crate::auth::policy::REQUIRE_2FA_SETTING) {
+        let raw = v.as_str().unwrap_or("");
+        if !crate::auth::policy::is_valid_require_2fa(raw) {
+            return Err((StatusCode::BAD_REQUEST, "Two-factor requirement must be off, admins, or everyone.".into()));
+        }
+        // Don't let an admin lock themselves out: a rule that covers them needs their own 2FA.
+        let covers_actor = match raw.trim().to_ascii_lowercase().as_str() {
+            "everyone" => true,
+            "admins" => actor.is_admin,
+            _ => false,
+        };
+        if covers_actor && !actor.totp_enabled {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Set up two-factor authentication for your own account (My Account) before requiring it.".into(),
+            ));
+        }
+    }
+    let touches_policy = payload.contains_key(crate::auth::policy::REQUIRE_2FA_SETTING);
+    for key in [
+        crate::maintenance::AUDIT_RETENTION_SETTING,
+        crate::maintenance::BACKUP_KEEP_SETTING,
+        crate::maintenance::WEBHOOK_SETTING,
+    ] {
+        if let Some(v) = payload.get(key) {
+            let text = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            crate::maintenance::validate_setting(key, &text).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        }
+    }
+
     for (k, v) in payload {
         if k == "github_tokens" {
             let tokens_vec: Vec<crate::git::StoredGithubToken> = if let Some(arr) = v.as_array() {
@@ -425,6 +476,10 @@ pub(crate) async fn update_settings_handler(
     if touched_tokens {
         let _ = crate::git::Git::read_github_tokens(&state.db).await;
     }
+    if touches_policy {
+        crate::auth::policy::reload(&state.db).await;
+        state.auth.invalidate_sessions();
+    }
     if only_theme {
         let theme_id = saved_theme.unwrap_or(DEFAULT_THEME_ID);
         log_audit(
@@ -441,9 +496,77 @@ pub(crate) async fn update_settings_handler(
     Ok(StatusCode::OK)
 }
 
+// ---------------------------------------------------------------------------
+// Control database backups (Platform Settings › Maintenance)
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn list_db_backups_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    verify_admin(&state, &headers).await?;
+    Ok(Json(serde_json::json!({ "backups": crate::maintenance::list_backups(state.cluster.data_dir()) })))
+}
+
+pub(crate) async fn create_db_backup_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::maintenance::BackupFile>, (StatusCode, String)> {
+    let actor = verify_admin(&state, &headers).await?;
+    let file = crate::maintenance::backup_now(state.cluster.data_dir(), "manual")
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::maintenance::prune_backups(state.cluster.data_dir(), "manual-", 20);
+    log_audit(&state, &actor.username, "backup.create", Some(&file.name), Some("Backed up the control database")).await;
+    Ok(Json(file))
+}
+
+pub(crate) async fn download_db_backup_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+    let actor = verify_admin(&state, &headers).await?;
+    if !crate::maintenance::is_backup_name(&name) {
+        return Err((StatusCode::BAD_REQUEST, "Unknown backup".into()));
+    }
+    let path = crate::maintenance::backup_dir(state.cluster.data_dir()).join(&name);
+    let bytes = tokio::fs::read(&path).await.map_err(|_| (StatusCode::NOT_FOUND, "Backup not found".to_string()))?;
+    log_audit(&state, &actor.username, "backup.download", Some(&name), Some("Downloaded a control database backup")).await;
+    let mut res = bytes.into_response();
+    let headers = res.headers_mut();
+    headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/octet-stream"));
+    if let Ok(v) = axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+        headers.insert(axum::http::header::CONTENT_DISPOSITION, v);
+    }
+    Ok(res)
+}
+
+pub(crate) async fn test_webhook_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(p): Json<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let actor = verify_admin(&state, &headers).await?;
+    let url = p.get("url").map(|s| s.trim().to_string()).unwrap_or_default();
+    if !crate::maintenance::is_valid_webhook(&url) {
+        return Err((StatusCode::BAD_REQUEST, "Enter an http(s) webhook URL.".into()));
+    }
+    crate::maintenance::send_webhook(url, "test".into(), format!("WebDep: test notification sent by {}.", actor.username));
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gh_token_detection_runs_once_then_waits() {
+        assert!(gh_detection_due(), "the first settings load may detect a token");
+        assert!(!gh_detection_due(), "loads right after it must not spawn gh again");
+        assert!(!gh_detection_due());
+    }
 
     #[test]
     fn test_normalize_theme_id_and_asset_parity() {
@@ -473,4 +596,3 @@ mod tests {
         }
     }
 }
-

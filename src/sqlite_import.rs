@@ -208,7 +208,7 @@ pub async fn import_sqlite_into_postgres(
                  VALUES($1,$2,$3,$4,$5)
                  ON CONFLICT(id) DO NOTHING",
             )
-            .bind(s.0)
+            .bind(crate::auth::manager::session_key(&s.0))
             .bind(s.1)
             .bind(s.2)
             .bind(s.3)
@@ -645,6 +645,12 @@ pub async fn import_sqlite_into_postgres(
     .bind(now_ms)
     .execute(&mut *tx)
     .await?;
+
+    // Imported users carry legacy permission columns only: let the next boot convert
+    // them into access grants.
+    sqlx::query("DELETE FROM _meta WHERE key = 'legacy_grants_migrated_at'")
+        .execute(&mut *tx)
+        .await?;
 
     tx.commit().await?;
 

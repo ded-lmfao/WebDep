@@ -12,6 +12,31 @@ impl Runtime {
     /// (crash, OOM kill, `kill -9`) are restarted with backoff: up to `CRASH_RESTART_LIMIT` times per
     /// `CRASH_RESTART_WINDOW`, then left stopped. User stops remove the process from the map first,
     /// so they never trigger a restart.
+    /// When an app that has a memory limit exits on its own (killed by the OS for using too much,
+    /// or crashed right after starting), tell the people who can see it why that may be.
+    async fn explain_memory_crash(&self, p: &crate::projects::Project, status: &std::process::ExitStatus) {
+        if p.memory_limit_mb <= 0 {
+            return;
+        }
+        #[cfg(unix)]
+        let killed = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal() == Some(9)
+        };
+        #[cfg(not(unix))]
+        let killed = false;
+        let started = p.app_started_at.unwrap_or(0);
+        let soon = started > 0 && crate::db::now().saturating_sub(started) < 60_000;
+        let Some(msg) = crate::app_limits::memory_crash_message(&p.name, p.memory_limit_mb, &status.to_string(), killed, soon) else {
+            return;
+        };
+        // The restart loop can crash it several times in a row: one pop-up per 10 minutes is enough.
+        if crate::app_limits::has_recent_event(&self.db, false, p.id, "ram_start", 600_000).await {
+            return;
+        }
+        crate::app_limits::record_event(&self.db, false, p.id, &p.name, "ram_start", &msg, false).await;
+    }
+
     pub fn start_background_monitor_with_restarts(self: &Arc<Self>, projects: Option<Arc<crate::projects::Projects>>) {
         const CRASH_RESTART_LIMIT: usize = 5;
         const CRASH_RESTART_WINDOW: Duration = Duration::from_secs(600);
@@ -42,7 +67,15 @@ impl Runtime {
                     }
                 }
                 for (proj_id, status) in exited {
+                    // Read the app first: stopping it clears its start time.
+                    let before = match &projects {
+                        Some(ps) => ps.get(proj_id).await.ok().flatten(),
+                        None => None,
+                    };
                     rt.mark_project_stopped(proj_id).await;
+                    if let (Some(p), Some(s)) = (&before, &status) {
+                        rt.explain_memory_crash(p, s).await;
+                    }
                     let msg = match status {
                         Some(s) => format!("Process exited ({})", s),
                         None => "Process terminated unexpectedly".to_string(),

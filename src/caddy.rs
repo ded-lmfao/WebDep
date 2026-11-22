@@ -25,6 +25,14 @@ impl Caddy {
             })
     }
 
+    /// `bind` line for an app served on one node IP (only a well-formed address is written).
+    fn bind_line(p: &Project) -> String {
+        match p.bind_ip.trim().parse::<std::net::IpAddr>() {
+            Ok(ip) if !ip.is_unspecified() => format!("    bind {ip}\n"),
+            _ => String::new(),
+        }
+    }
+
     /// Generates Caddyfile snippet for an individual project.
     /// In Caddy, automatic HTTPS via Let's Encrypt / ZeroSSL is 100% automatic for any domain!
     pub fn generate_config(&self, p: &Project) -> String {
@@ -59,11 +67,12 @@ impl Caddy {
 
         let safe_name = p.name.replace(['\r', '\n'], " ");
         let mut config = format!(
-            "# WebDep Auto-Generated Caddyfile\n# Project: {name} ({slug})\n# Automatic HTTPS, HTTP/3, and reverse proxy\n{status_note}\n\n{domains} {{\n    reverse_proxy 127.0.0.1:{port}\n",
+            "# WebDep Auto-Generated Caddyfile\n# Project: {name} ({slug})\n# Automatic HTTPS, HTTP/3, and reverse proxy\n{status_note}\n\n{domains} {{\n{bind}    reverse_proxy 127.0.0.1:{port}\n",
             name = safe_name,
             slug = safe_slug,
             status_note = status_note,
             domains = domain_str,
+            bind = Self::bind_line(p),
             port = port
         );
 
@@ -126,10 +135,11 @@ impl Caddy {
 
         let safe_name = p.name.replace(['\r', '\n'], " ");
         format!(
-            "# WebDep Stage-1 Pre-Warm HTTP Caddyfile (ACME deferred until DNS cutover)\n# Project: {name} ({slug})\n\n{domains} {{\n    reverse_proxy 127.0.0.1:{port}\n}}\n",
+            "# WebDep Stage-1 Pre-Warm HTTP Caddyfile (ACME deferred until DNS cutover)\n# Project: {name} ({slug})\n\n{domains} {{\n{bind}    reverse_proxy 127.0.0.1:{port}\n}}\n",
             name = safe_name,
             slug = safe_slug,
             domains = domain_str,
+            bind = Self::bind_line(p),
             port = port
         )
     }
@@ -267,6 +277,11 @@ mod tests {
             node_id: Some(2),
             placement_version: 1,
             assigned_port: Some(43012),
+            bind_ip: String::new(),
+            cpu_limit: 0,
+            memory_limit_mb: 0,
+            disk_limit_mb: 0,
+            backup_limit: 0,
         }
     }
 
@@ -284,6 +299,15 @@ mod tests {
         let stage2 = caddy.generate_config(&p);
         assert!(stage2.contains("app.example.com, www.example.com {"));
         assert!(stage2.contains("tls ops@example.com"));
+
+        assert!(!stage2.contains("bind "));
+
+        let mut bound = sample_project();
+        bound.bind_ip = "203.0.113.7".into();
+        assert!(caddy.generate_config(&bound).contains("    bind 203.0.113.7\n    reverse_proxy"));
+        assert!(caddy.generate_staging_http_config(&bound).contains("bind 203.0.113.7"));
+        bound.bind_ip = "203.0.113.7 } evil {".into();
+        assert!(!caddy.generate_config(&bound).contains("bind"));
 
         caddy.write_staging_http_config(&p, std::slice::from_ref(&p)).unwrap();
         let disk = fs::read_to_string(dir.join("caddy/shift-demo.caddy")).unwrap();

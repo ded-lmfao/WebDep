@@ -3,12 +3,14 @@
  * Creation wizard, connection details viewer, and network allowlist access dialogs.
  */
 
-import { state, showConfirmDialog, copyTextToClipboard, setBtnLoading } from './state.js';
+import { state, showPromptDialog, copyTextToClipboard, setBtnLoading } from './state.js';
+import { readLimitFields, resetLimitFields } from './limits_fields.js';
 import { api, toast } from './api.js';
 
 export function openCreateDatabaseModal() {
   const modal = document.getElementById('modal-create-database');
   if (!modal) return;
+  resetLimitFields('db-create');
 
   const getPort = window.getNextAvailablePort || ((p) => p);
   const portInput = document.getElementById('db-create-port');
@@ -167,6 +169,7 @@ export async function handleCreateDatabaseSubmit(e) {
         accessMode: access_mode,
         allowedIps: allowed_ips,
         domain: domain || undefined,
+        limits: readLimitFields('db-create'),
       },
     });
 
@@ -205,6 +208,7 @@ export async function handleCreateDatabaseSubmit(e) {
       progressStep.className = 'badge badge-danger';
     }
     if (progressDetail) progressDetail.textContent = `Error: ${err.message}`;
+    if (window.handleNoFreePort?.(err)) return;
     toast(`Database creation failed: ${err.message}`, 'error');
   } finally {
     setBtnLoading(btn, false, 'Create & Start Database');
@@ -257,13 +261,18 @@ export function showDatabaseDetails(id) {
 }
 
 export async function deleteDatabase(id, name) {
-  const ok = await showConfirmDialog({
-    title: 'Delete PostgreSQL Database',
-    message: `Are you sure you want to delete database '${name}' (#${id})?\n\nThis will stop and remove its container, delete all its physical data on disk, and revoke associated firewall rules. This action cannot be undone.`,
-    confirmText: 'Delete Database',
+  const typed = await showPromptDialog({
+    title: `Delete database "${name}"`,
+    message: `This stops the database and permanently deletes all of its data on disk. It can't be undone.\n\nType "${name}" to confirm:`,
+    placeholder: 'Type the name to confirm',
+    confirmText: 'Delete database',
     danger: true,
   });
-  if (!ok) return;
+  if (typed === null) return;
+  if (typed.trim() !== name) {
+    toast(`The name didn't match, so nothing was deleted.`, 'warning');
+    return;
+  }
 
   try {
     toast(`Deleting database '${name}'`, 'info');

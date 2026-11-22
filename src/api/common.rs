@@ -96,9 +96,18 @@ fn should_touch_session_activity(path: &str, method: &Method) -> bool {
 
 pub(crate) async fn security_middleware(
     State(state): State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    let ip = resolve_client_ip(peer, req.headers());
+    req.headers_mut().remove(CLIENT_IP_HEADER);
+    if let Ok(v) = HeaderValue::from_str(&ip) {
+        req.headers_mut().insert(CLIENT_IP_HEADER, v);
+    }
     let is_https = is_https_request(req.headers(), state.auth.force_secure_cookies);
     let is_mutating = matches!(
         *req.method(),
@@ -114,6 +123,10 @@ pub(crate) async fn security_middleware(
 
         if is_api {
             let is_public_auth = path == "/api/auth/login"
+                || path == "/api/auth/register"
+                || path == "/api/auth/reset"
+                || (path == "/api/auth/register/challenge" && *req.method() == Method::GET)
+                || (path == "/api/auth/registration" && *req.method() == Method::GET)
                 || path == "/api/auth/2fa/verify-login"
                 || path == "/api/auth/passkeys/login/start"
                 || path == "/api/auth/passkeys/login/finish"
@@ -130,7 +143,7 @@ pub(crate) async fn security_middleware(
                     None => None,
                 };
 
-                let Some((session, _user)) = session_pair else {
+                let Some((session, user)) = session_pair else {
                     let mut res = (
                         StatusCode::UNAUTHORIZED,
                         Json(serde_json::json!({ "error": "Unauthorized. Please sign in." })),
@@ -139,6 +152,49 @@ pub(crate) async fn security_middleware(
                     attach_security_headers(&mut res, true, is_https);
                     return res;
                 };
+
+                // Accounts created with a temporary password may only change it (or sign out).
+                if user.must_change_password
+                    && !matches!(
+                        path,
+                        "/api/auth/me" | "/api/auth/password" | "/api/auth/logout" | "/api/auth/presence"
+                    )
+                {
+                    let mut res = (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "Change your temporary password to continue.",
+                            "code": "password_change_required"
+                        })),
+                    )
+                        .into_response();
+                    attach_security_headers(&mut res, true, is_https);
+                    return res;
+                }
+
+                // When the admin requires two-factor authentication, users without it can only
+                // set it up (or sign out).
+                if crate::auth::policy::needs_two_factor_setup(&user)
+                    && !matches!(
+                        path,
+                        "/api/auth/me"
+                            | "/api/auth/logout"
+                            | "/api/auth/presence"
+                            | "/api/auth/2fa/setup"
+                            | "/api/auth/2fa/enable"
+                    )
+                {
+                    let mut res = (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "Set up two-factor authentication to continue.",
+                            "code": "two_factor_required"
+                        })),
+                    )
+                        .into_response();
+                    attach_security_headers(&mut res, true, is_https);
+                    return res;
+                }
 
                 if is_mutating && path != "/api/auth/logout" {
                     let csrf_hdr = req
@@ -214,7 +270,7 @@ pub(crate) fn attach_security_headers(res: &mut Response, is_api: bool, is_https
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+                "default-src 'self'; script-src 'self' 'unsafe-hashes' 'sha256-97l24HYIWEdSIQ8PoMHzpxiGCZuyBDXtN19RPKFsOgk='; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
             ),
         );
     }
@@ -272,15 +328,46 @@ pub(crate) async fn verify_project_access(
     Ok(u)
 }
 
-pub(crate) async fn verify_main_admin(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
+/// Admins (main admin or role `admin`).
+pub(crate) async fn verify_admin(state: &AppState, headers: &HeaderMap) -> Result<User, (StatusCode, String)> {
     let u = require_current_user(state, headers).await?;
-    if !u.is_main_admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Only the Main Admin can perform this action.".to_string(),
-        ));
+    if !u.is_admin {
+        return Err((StatusCode::FORBIDDEN, "Only an admin can perform this action.".to_string()));
     }
     Ok(u)
+}
+
+/// Best-effort client address (proxy headers first). Spoofable: use only for audit and
+/// soft rate limits.
+/// Header the middleware sets to the verified client address (incoming copies are dropped).
+pub(crate) const CLIENT_IP_HEADER: &str = "x-webdep-client-ip";
+
+/// Client address worked out by `security_middleware`: the TCP peer, or the first
+/// `X-Forwarded-For` / `X-Real-IP` hop only when the peer is a proxy on this machine (Caddy).
+pub(crate) fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get(CLIENT_IP_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(crate) fn resolve_client_ip(peer: Option<std::net::IpAddr>, headers: &HeaderMap) -> String {
+    let forwarded = || {
+        headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.parse::<std::net::IpAddr>().is_ok())
+    };
+    match peer {
+        Some(ip) if ip.is_loopback() => forwarded().unwrap_or_else(|| ip.to_string()),
+        Some(ip) => ip.to_string(),
+        None => "unknown".to_string(),
+    }
 }
 
 pub(crate) async fn verify_power(
@@ -372,12 +459,24 @@ pub(crate) async fn create_authenticated_response(
     headers: &HeaderMap,
     user: User,
 ) -> Result<Response, (StatusCode, String)> {
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let session = state
         .auth
-        .create_session(user.id)
+        .create_session_with_meta(user.id, &client_ip(headers), &user_agent)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create session".to_string()))?;
 
+    let _ = sqlx::query("UPDATE users SET last_login_at = $1 WHERE id = $2")
+        .bind(now())
+        .bind(user.id)
+        .execute(&state.db)
+        .await;
+    // Return the full user (profile + grants) so the UI can gate itself.
+    let user = state.auth.get_user_by_id(user.id).await.unwrap_or(user);
     let active_sessions = state.auth.count_active_sessions(user.id).await;
     let passkey_count = state.auth.count_user_passkeys(user.id).await;
     let secure_attr = if is_https_request(headers, state.auth.force_secure_cookies) {
@@ -391,6 +490,7 @@ pub(crate) async fn create_authenticated_response(
     );
 
     let body = Json(LoginResponse {
+        two_factor_required: crate::auth::policy::needs_two_factor_setup(&user),
         user,
         csrf: session.csrf_token,
         active_sessions,
@@ -611,6 +711,109 @@ pub(crate) async fn log_audit_project(
     .bind(detail)
     .execute(&state.db)
     .await;
+    match project_id {
+        Some(pid) => trim_app_audit(&state.db, pid).await,
+        None => {
+            if let Some(db_id) = target.and_then(database_tag_id) {
+                trim_database_audit(&state.db, db_id).await;
+            }
+        }
+    }
+}
+
+/// Keeps only the newest `APP_AUDIT_CAP` audit entries for each website, service and database,
+/// counted separately per app; older ones are deleted as new ones arrive. Panel-wide entries are
+/// not touched.
+pub(crate) const APP_AUDIT_CAP: i64 = 100;
+
+/// A database's activity entries use the target `DB #<id>`.
+pub(crate) fn database_tag(id: i64) -> String {
+    format!("DB #{id}")
+}
+
+fn database_tag_id(target: &str) -> Option<i64> {
+    target.trim().strip_prefix("DB #")?.parse().ok()
+}
+
+pub(crate) async fn trim_database_audit(db: &crate::db::DbPool, database_id: i64) {
+    let _ = sqlx::query(
+        "DELETE FROM audit WHERE project_id IS NULL AND LOWER(target) = LOWER($1) AND id NOT IN (
+            SELECT id FROM audit WHERE project_id IS NULL AND LOWER(target) = LOWER($1) ORDER BY id DESC LIMIT $2)",
+    )
+    .bind(database_tag(database_id))
+    .bind(APP_AUDIT_CAP)
+    .execute(db)
+    .await;
+}
+
+pub(crate) async fn trim_app_audit(db: &crate::db::DbPool, project_id: i64) {
+    let _ = sqlx::query(
+        "DELETE FROM audit WHERE project_id = $1 AND id NOT IN (
+            SELECT id FROM audit WHERE project_id = $1 ORDER BY id DESC LIMIT $2)",
+    )
+    .bind(project_id)
+    .bind(APP_AUDIT_CAP)
+    .execute(db)
+    .await;
+}
+
+#[cfg(test)]
+mod audit_cap_tests {
+    #[tokio::test]
+    async fn each_database_keeps_its_own_newest_hundred() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        for i in 0..105 {
+            for tag in ["DB #7", "DB #8"] {
+                sqlx::query("INSERT INTO audit(ts, actor, action, target) VALUES($1, 'a', 'database.stop', $2)")
+                    .bind(i as i64)
+                    .bind(tag)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+        }
+        sqlx::query("INSERT INTO audit(ts, actor, action, target) VALUES(0, 'a', 'x', 'DB #8')").execute(&db).await.unwrap();
+        trim_database_audit(&db, 7).await;
+        let count = |tag: &'static str| {
+            let db = db.clone();
+            async move { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit WHERE target = $1").bind(tag).fetch_one(&db).await.unwrap() }
+        };
+        assert_eq!(count("DB #7").await, 100);
+        assert_eq!(count("DB #8").await, 106, "another database is not trimmed by this one");
+        trim_database_audit(&db, 8).await;
+        assert_eq!(count("DB #8").await, 100);
+    }
+
+    use super::*;
+
+    #[tokio::test]
+    async fn app_audit_keeps_newest_hundred() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let pid: i64 = sqlx::query_scalar(
+            "INSERT INTO projects(name, slug, repo_url, deploy_dir, created_at, updated_at)
+             VALUES('cap', 'cap-app', 'local', '/tmp/cap', 0, 0) RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        for i in 0..105 {
+            sqlx::query("INSERT INTO audit(project_id, ts, actor, action) VALUES($2, $1, 'a', 'x')")
+                .bind(i as i64)
+                .bind(pid)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO audit(ts, actor, action) VALUES(0, 'a', 'panel')")
+            .execute(&db)
+            .await
+            .unwrap();
+        trim_app_audit(&db, pid).await;
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit WHERE project_id = $1").bind(pid).fetch_one(&db).await.unwrap();
+        assert_eq!(kept, 100);
+        let panel: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit WHERE project_id IS NULL").fetch_one(&db).await.unwrap();
+        assert_eq!(panel, 1, "panel-wide entries are not capped");
+    }
 }
 
 
@@ -618,6 +821,9 @@ pub(crate) async fn log_audit_project(
 pub(crate) struct LoginResponse {
     pub(crate) user: User,
     pub(crate) csrf: String,
+    /// The admin requires 2FA for this user and none is set up yet.
+    #[serde(rename = "twoFactorRequired")]
+    pub(crate) two_factor_required: bool,
     #[serde(rename = "activeSessions")]
     pub(crate) active_sessions: usize,
     #[serde(rename = "passkeyCount")]
@@ -701,6 +907,8 @@ pub(crate) async fn tests_state_helper() -> AppState {
     let vault = Arc::new(crate::vault::Vault::new(&base).unwrap());
     let auth = Arc::new(crate::auth::Auth::new(db.clone(), 3600));
     auth.ensure_admin().await;
+    crate::auth::grants::migrate_legacy_once(&db).await.unwrap();
+    crate::auth::grants::grant_legacy_delete_once(&db).await.unwrap();
     let projects = Arc::new(crate::projects::Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(crate::logs::Logs::new(db.clone()));
     let monitor = Arc::new(crate::monitor::Monitor::new());

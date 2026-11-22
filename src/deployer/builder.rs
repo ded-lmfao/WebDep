@@ -123,6 +123,25 @@ where
         }
     }
 
+    // Build scripts run user code too: same optional isolation as the running app.
+    #[allow(unused_mut)]
+    let mut build_isolated = false;
+    #[cfg(target_os = "linux")]
+    {
+        let (inner, dir) = (resolved_shell_cmd.clone(), cwd.to_path_buf());
+        if let Ok(prep) = tokio::task::spawn_blocking(move || {
+            crate::runtime::isolation::prepare(&inner, &dir, &dir, &format!("build-{}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+        })
+        .await
+        {
+            if let Some(w) = prep.warning {
+                log_fn("system", "warn", &w);
+            }
+            resolved_shell_cmd = prep.command;
+            build_isolated = prep.isolated;
+        }
+    }
+
     #[cfg(unix)]
     let mut cmd = tokio::process::Command::new("sh");
     #[cfg(unix)]
@@ -137,6 +156,9 @@ where
         .env("npm_config_fund", "false")
         .env("npm_config_progress", "false")
         .env("PIP_BREAK_SYSTEM_PACKAGES", "1");
+    if build_isolated {
+        cmd.env("HOME", "/tmp");
+    }
     if std::env::var("NODE_OPTIONS").is_err() {
         cmd.env("NODE_OPTIONS", "--max-old-space-size=448");
     }

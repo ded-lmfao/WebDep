@@ -11,7 +11,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros", "multipart"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-gzip"] }
+tower-http = { version = "0.6", features = ["compression-gzip"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "tls-rustls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -36,6 +36,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pki-types = "1"
 webpki-roots = "1.0"
 sha1 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [profile.release]
 opt-level = 2

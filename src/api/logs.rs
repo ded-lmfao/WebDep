@@ -259,6 +259,99 @@ pub(crate) struct AuditQuery {
     #[serde(rename = "databaseId")]
     database_id: Option<i64>,
     limit: Option<usize>,
+    /// Panel-wide feed only: entries older than this id (next page).
+    before: Option<i64>,
+    /// Panel-wide feed only: exact user name.
+    actor: Option<String>,
+    /// Panel-wide feed only: text in the action, target, or details.
+    q: Option<String>,
+}
+
+/// Panel-wide audit rows matching the filters, newest first.
+async fn global_audit_rows(
+    state: &AppState,
+    before: Option<i64>,
+    actor: Option<&str>,
+    q: Option<&str>,
+    limit: i64,
+) -> Result<Vec<sqlx::postgres::PgRow>, (StatusCode, String)> {
+    let pattern = q.map(str::trim).filter(|s| !s.is_empty()).map(|s| format!("%{}%", s.replace(['%', '_'], "")));
+    sqlx::query(
+        "SELECT id, project_id, ts, actor, action, target, detail, ip FROM audit
+         WHERE ($1::BIGINT IS NULL OR id < $1)
+           AND ($2::TEXT IS NULL OR LOWER(actor) = LOWER($2))
+           AND ($3::TEXT IS NULL OR action ILIKE $3 OR COALESCE(target, '') ILIKE $3 OR COALESCE(detail, '') ILIKE $3)
+         ORDER BY id DESC LIMIT $4",
+    )
+    .bind(before)
+    .bind(actor.map(str::trim).filter(|s| !s.is_empty()))
+    .bind(pattern)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+fn csv_field(s: &str) -> String {
+    // Quote every field; neutralise spreadsheet formulas.
+    let mut v = s.replace('"', "\"\"");
+    if v.starts_with(['=', '+', '-', '@']) {
+        v.insert(0, '\'');
+    }
+    format!("\"{v}\"")
+}
+
+/// `GET /api/audit/export?actor=&q=`: the panel-wide audit log as CSV (up to 50,000 rows).
+pub(crate) async fn audit_export_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AuditQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let u = verify_power(&state, &headers, "audit", None).await?;
+    if !u.has_power("settings_manage") {
+        return Err((StatusCode::FORBIDDEN, "Only admins can export the panel audit log.".into()));
+    }
+    let rows = global_audit_rows(&state, None, q.actor.as_deref(), q.q.as_deref(), 50_000).await?;
+    let mut out = String::from("time,user,action,target,details,ip\n");
+    for row in rows {
+        if let Ok(r) = pg_row_to_audit_item(&row, None) {
+            let when = chrono_like(r.ts);
+            out.push_str(&format!(
+                "{},{},{},{},{},{}\n",
+                csv_field(&when),
+                csv_field(&r.actor),
+                csv_field(&r.action),
+                csv_field(r.target.as_deref().unwrap_or("")),
+                csv_field(r.detail.as_deref().unwrap_or("")),
+                csv_field(r.ip.as_deref().unwrap_or("")),
+            ));
+        }
+    }
+    let mut res = out.into_response();
+    res.headers_mut().insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/csv; charset=utf-8"));
+    res.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_static("attachment; filename=\"webdep-audit.csv\""),
+    );
+    Ok(res)
+}
+
+/// UTC timestamp `YYYY-MM-DD HH:MM:SS` from unix milliseconds (no date crate needed).
+fn chrono_like(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil-from-days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, (rem % 3600) / 60, rem % 60)
 }
 
 pub(crate) async fn audit_handler(
@@ -270,21 +363,27 @@ pub(crate) async fn audit_handler(
         let (user, db) = crate::api::databases::get_authorized_database(
             &state,
             &headers,
-            &["databases", "databases_manage", "audit"],
+            &["databases", "databases_manage", "audit", "activity"],
             db_id,
         )
         .await?;
         (user, Some(db))
     } else {
-        (verify_power(&state, &headers, "audit", q.project_id).await?, None)
+        // Per-app activity: the app's `activity` power (or legacy `audit`); the panel-wide
+        // feed still needs panel-level `audit`.
+        let powers: &[&str] = if q.project_id.is_some() { &["activity", "audit"] } else { &["audit"] };
+        (verify_any_power(&state, &headers, powers, q.project_id).await?, None)
     };
     let max_limit = q.limit.unwrap_or(500).min(1000);
     let cache_key = format!(
-        "audit:d{}:p{}:u{}:l{}",
+        "audit:d{}:p{}:u{}:l{}:b{}:a{}:q{}",
         q.database_id.unwrap_or(0),
         q.project_id.unwrap_or(0),
         u.id,
-        max_limit
+        max_limit,
+        q.before.unwrap_or(0),
+        q.actor.as_deref().unwrap_or(""),
+        q.q.as_deref().unwrap_or("")
     );
     if let Some(res) = check_api_cache(&state.cache, &cache_key) {
         return Ok(res);
@@ -458,15 +557,9 @@ pub(crate) async fn audit_handler(
         list.sort_by(|a, b| b.ts.cmp(&a.ts).then_with(|| b.id.cmp(&a.id)));
         list.truncate(max_limit);
     } else {
-        let rows = sqlx::query(
-            "SELECT id, project_id, ts, actor, action, target, detail, ip FROM audit ORDER BY id DESC LIMIT $1",
-        )
-        .bind(max_limit as i64)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let rows = global_audit_rows(&state, q.before, q.actor.as_deref(), q.q.as_deref(), max_limit as i64).await?;
 
-        let can_global = u.is_main_admin || u.has_power("settings_manage");
+        let can_global = u.has_power("settings_manage");
         for row in rows {
             if let Ok(r) = pg_row_to_audit_item(&row, None) {
                 match r.project_id {

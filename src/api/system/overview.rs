@@ -211,6 +211,19 @@ pub(crate) fn compute_project_disk_formatted(p: &Project, cwd: &std::path::Path)
     (bytes, format_resource_bytes(bytes))
 }
 
+/// Same total as `compute_project_disk_formatted`, but measured now instead of from the cache.
+pub(crate) fn compute_project_disk_bytes_fresh(p: &Project, cwd: &std::path::Path) -> u64 {
+    let deploy_dir = resolve_workspace_path(&p.deploy_dir, cwd);
+    let deploy_size = deploy_dir.as_deref().map(crate::monitor::get_path_disk_size_fresh).unwrap_or(0);
+    let container_dir = cwd.join("data").join("containers").join(&p.slug);
+    let container_size = if deploy_dir.as_ref() != Some(&container_dir) {
+        crate::monitor::get_path_disk_size_fresh(&container_dir)
+    } else {
+        0
+    };
+    deploy_size.saturating_add(container_size)
+}
+
 static CACHED_CWD: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 static CACHED_EXE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
 
@@ -379,12 +392,13 @@ async fn compute_overview_bytes(
     let mut projs = state.projects.list().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     projs.retain(|p| !user.disabled && user.can_access_project(p.id));
 
-    let raw_dbs = if !user.disabled && user.has_any_power(&["databases", "databases_manage"]) {
+    let raw_dbs = if state.auth.can_list_databases_for_user(user).await {
         let mut list = state.databases.list_overview_summaries().await.unwrap_or_default();
         list.retain(|db| {
             crate::auth::Auth::user_has_database_power(
                 user,
                 &["databases", "databases_manage"],
+                db.id,
                 db.linked_project_id,
             )
         });

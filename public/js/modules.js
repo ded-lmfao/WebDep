@@ -11,6 +11,8 @@ import {
   escapeHtml,
   showConfirmDialog,
   nodeLabel,
+  openModal,
+  closeModal,
 } from './state.js';
 import { api, toast } from './api.js';
 
@@ -202,7 +204,9 @@ export function renderModulesView() {
 
   const catalog = Array.isArray(data.catalog) ? data.catalog : [];
   const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-  const isMainAdmin = Boolean(state.user?.isMainAdmin);
+  const isMainAdmin = Boolean(state.user?.isAdmin);
+  const addBtn = document.getElementById('modules-add-btn');
+  if (addBtn) addBtn.style.display = isMainAdmin ? '' : 'none';
 
   if (!nodes.length) {
     setHtmlIfChanged(wrap, '<div class="card" style="padding:24px; text-align:center; color:var(--text-dim);">No VPS nodes registered yet.</div>');
@@ -239,10 +243,12 @@ export function renderModulesView() {
           } else {
             action = '<span class="modules-not-installed">Not installed</span>';
           }
+          const isCustom = entry.category === 'custom';
           return `
             <div class="modules-tile${st.installed ? ' is-installed' : ''}" title="${escapeHtml(entry.description || entry.name)}">
               <div class="modules-tile-top">
-                <span class="modules-tile-name">${escapeHtml(entry.name.split(' ')[0])}</span>
+                <span class="modules-tile-name">${escapeHtml(isCustom ? entry.name : entry.name.split(' ')[0])}</span>
+                ${isCustom ? `<span class="modules-custom-tag">Custom</span>${isMainAdmin ? `<button type="button" class="modules-edit-btn" title="Edit ${escapeHtml(entry.name)}" aria-label="Edit ${escapeHtml(entry.name)}" onclick="window.openCustomModuleEditor('${escapeHtml(entry.id)}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>` : ''}` : ''}
               </div>
               <div class="modules-tile-status">${action}</div>
             </div>
@@ -280,6 +286,89 @@ function renderModulesLogs() {
   if (el) el.textContent = lastInstallLogs.join('\n\n');
 }
 
+// ---------------------------------------------------------------------------
+// Custom modules (admins add tools the built-in list doesn't have)
+// ---------------------------------------------------------------------------
+const PKG_KEYS = ['apt', 'dnf', 'apk', 'pacman', 'winget'];
+const splitWords = (v) => String(v || '').split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+
+export function openCustomModuleEditor(id = '') {
+  const defs = Array.isArray(modulesData?.customModules) ? modulesData.customModules : [];
+  const def = id ? defs.find((d) => d.id === id) : null;
+  const set = (elId, v) => { const el = document.getElementById(elId); if (el) el.value = v || ''; };
+  set('cm-id', def?.id);
+  set('cm-name', def?.name);
+  set('cm-command', def?.command);
+  set('cm-version', (def?.versionArgs || []).join(' '));
+  set('cm-desc', def?.description);
+  PKG_KEYS.forEach((k) => set(`cm-pkg-${k}`, ((def?.packages || {})[k] || []).join(' ')));
+  const title = document.getElementById('custom-module-title');
+  if (title) title.textContent = def ? `Edit ${def.name}` : 'Add module';
+  const del = document.getElementById('cm-delete');
+  if (del) del.style.display = def ? '' : 'none';
+  openModal('modal-custom-module');
+  setTimeout(() => document.getElementById('cm-name')?.focus(), 60);
+}
+
+document.getElementById('cm-save')?.addEventListener('click', async () => {
+  const val = (elId) => document.getElementById(elId)?.value || '';
+  const packages = {};
+  PKG_KEYS.forEach((k) => {
+    const words = splitWords(val(`cm-pkg-${k}`));
+    if (words.length) packages[k] = words;
+  });
+  const body = {
+    id: val('cm-id'),
+    name: val('cm-name').trim(),
+    command: val('cm-command').trim(),
+    versionArgs: splitWords(val('cm-version')),
+    description: val('cm-desc').trim(),
+    packages,
+  };
+  if (!body.name || !body.command) {
+    toast('Enter a name and a check command.', 'warning');
+    return;
+  }
+  if (!Object.keys(packages).length) {
+    toast('Add package names for at least one package manager.', 'warning');
+    return;
+  }
+  const btn = document.getElementById('cm-save');
+  if (btn) btn.disabled = true;
+  try {
+    const saved = await api('/api/cluster/custom-modules', { method: 'POST', body });
+    closeModal('modal-custom-module');
+    toast(`${saved.name} added to the module list. Install it on any VPS.`, 'success');
+    await loadModulesView(true);
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
+document.getElementById('cm-delete')?.addEventListener('click', async () => {
+  const id = document.getElementById('cm-id')?.value;
+  const name = document.getElementById('cm-name')?.value || 'this module';
+  if (!id) return;
+  const ok = await showConfirmDialog({
+    title: 'Remove custom module',
+    message: `Remove ${name} from the module list? Servers that already installed it keep it; remove it there first if you want it gone.`,
+    confirmText: 'Remove from list',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/cluster/custom-modules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    closeModal('modal-custom-module');
+    toast(`${name} removed from the list.`, 'success');
+    await loadModulesView(true);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+});
+
+window.openCustomModuleEditor = openCustomModuleEditor;
 window.loadModulesView = loadModulesView;
 window.refreshNodeModules = refreshNodeModules;
 window.installNodeModules = installNodeModules;

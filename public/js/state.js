@@ -366,16 +366,20 @@ const WEBSITE_WORKSPACE_TABS = new Set([
   'env',
   'files',
   'releases',
+  'backups',
   'rollbacks',
   'monitor',
   'audit',
+  'access',
 ]);
 
 const DATABASE_WORKSPACE_TABS = new Set([
   'deployments',
   'logs',
   'files',
+  'backups',
   'audit',
+  'access',
 ]);
 
 // ============================================================================
@@ -534,6 +538,62 @@ function showPromptDialog({ title = 'Input Required', message = '', placeholder 
   });
 }
 
+const LIMIT_DIALOG_INFO = {
+  disk: {
+    title: 'Disk limit reached',
+    why: 'This app uses more disk space than its limit allows, so it is stopped and cannot be started until space is freed.',
+    fix: 'Delete files or old releases, or ask an admin to raise the limit in Admin Panel > App Limits.',
+  },
+  ram_start: {
+    title: 'Memory limit too low to start',
+    why: 'The app stopped right after it started while a memory limit is set. A limit smaller than the app needs to start makes it crash straight away.',
+    fix: 'Raise the memory limit (admins: Admin Panel > App Limits) and start the app again. Check its Logs to confirm.',
+  },
+  ram: {
+    title: 'Memory limit reached',
+    why: 'This app is using almost all of the memory its limit allows. Past the limit it is slowed down, its memory requests fail and it may crash.',
+    fix: 'Reduce what the app keeps in memory, or ask an admin to raise the limit in Admin Panel > App Limits.',
+  },
+  cpu: {
+    title: 'CPU limit reached',
+    why: 'This app is using as much CPU as its limit allows, so it is being slowed down to stay at the limit.',
+    fix: 'Reduce its workload, or ask an admin to raise the limit in Admin Panel > App Limits.',
+  },
+  backups: {
+    title: 'Backup limit reached',
+    why: 'This app already holds the maximum number of backups its limit allows, so no new backup was made.',
+    fix: 'Delete an old backup (locked backups count too), or ask an admin to raise the limit in Admin Panel > App Limits.',
+  },
+};
+
+/** Explains why an action was refused because of an app limit. Resolves when dismissed. */
+function showLimitDialog(kind, detail) {
+  const info = LIMIT_DIALOG_INFO[kind] || { title: 'Limit reached', why: 'An app limit blocked this action.', fix: 'Ask an admin to review the limits.' };
+  return new Promise((resolve) => {
+    const { modal, inputWrap, msgEl, confirmBtn, cancelBtn, closeBtn } = prepareDialogModal({
+      title: info.title,
+      message: `${detail}
+
+Why: ${info.why}
+What to do: ${info.fix}`,
+      confirmText: 'OK',
+    });
+    inputWrap.style.display = 'none';
+    cancelBtn.style.display = 'none';
+    msgEl.style.whiteSpace = 'pre-line';
+    const cleanup = () => {
+      animateModalClose(modal);
+      msgEl.style.whiteSpace = '';
+      confirmBtn.onclick = null;
+      closeBtn.onclick = null;
+      resolve();
+    };
+    confirmBtn.onclick = cleanup;
+    closeBtn.onclick = cleanup;
+    animateModalOpen(modal);
+  });
+}
+
 function showCopyDialog({ title = 'Copy Value', message = '', value = '' } = {}) {
   return new Promise((resolve) => {
     const { modal, titleEl, msgEl, inputWrap, inputEl, confirmBtn, cancelBtn, closeBtn } = getDialogElements();
@@ -640,6 +700,32 @@ function setBtnLoading(btn, loading, defaultText, loadingText = 'Saving') {
   }
 }
 
+/** Icon-only button: an icon and no visible words. */
+function isIconOnlyButton(btn) {
+  return btn.classList.contains('btn-icon') || (Boolean(btn.querySelector('svg')) && !btn.textContent.trim());
+}
+
+/**
+ * Shows a button as busy. Icon-only buttons keep their size and show just a spinner (their
+ * title names the action); buttons with words show the spinner and `label`. The original
+ * contents are remembered so `restoreButtonIdle` can put them back.
+ */
+function setButtonBusy(btn, label) {
+  if (!btn) return;
+  if (btn.dataset.idleHtml === undefined) btn.dataset.idleHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.innerHTML = isIconOnlyButton(btn) ? '<span class="btn-spinner"></span>' : `<span class="btn-spinner"></span> ${label}`;
+}
+
+function restoreButtonIdle(btn, fallbackHtml = '') {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.removeAttribute('aria-busy');
+  btn.innerHTML = btn.dataset.idleHtml !== undefined ? btn.dataset.idleHtml : fallbackHtml;
+  delete btn.dataset.idleHtml;
+}
+
 function getSelectedProject() {
   const list = state.projects || [];
   return list.find((p) => p.id === state.selectedProjectId) || list[0] || null;
@@ -689,6 +775,7 @@ window.closeModal = closeModal;
 window.showConfirmDialog = showConfirmDialog;
 window.showPromptDialog = showPromptDialog;
 window.showCopyDialog = showCopyDialog;
+window.showLimitDialog = showLimitDialog;
 window.escapeHtml = escapeHtml;
 window.formatDate = formatDate;
 window.formatRelativeTime = formatRelativeTime;
@@ -838,11 +925,14 @@ export {
   showConfirmDialog,
   showPromptDialog,
   showCopyDialog,
+  showLimitDialog,
   escapeHtml,
   formatDate,
   formatRelativeTime,
   formatDuration,
   setBtnLoading,
+  setButtonBusy,
+  restoreButtonIdle,
   getSelectedProject,
   getSelectedDatabase,
   getFilesEntityContext,

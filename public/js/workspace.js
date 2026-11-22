@@ -4,6 +4,8 @@
  */
 
 import { icon } from './icons.js';
+import { loadAccountsView, syncSidebarMode, guardView } from './accounts.js';
+import { databaseScope } from './permissions.js';
 import {
   state,
   WEBSITE_WORKSPACE_TABS,
@@ -23,6 +25,23 @@ import {
   markViewStaggerPending,
   consumePendingViewStagger,
 } from './motion_ui.js';
+
+// Icons for the icon-only workspace action buttons (rounded 24px line icons).
+const WS_ICON_PATHS = {
+  deploy: '<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>',
+  start: '<path d="M7 4.5v15a1 1 0 0 0 1.52.85l12-7.5a1 1 0 0 0 0-1.7l-12-7.5A1 1 0 0 0 7 4.5z" fill="currentColor"/>',
+  stop: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>',
+  restart: '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+  maint: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+  gear: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  key: '<path d="M2.59 18.4A2 2 0 0 0 2 19.82V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.17a2 2 0 0 0 1.42-.59l.81-.81a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
+};
+
+function wsIcon(name) {
+  return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${WS_ICON_PATHS[name]}</svg>`;
+}
 
 let lastBannerEntityKey = null;
 
@@ -84,7 +103,6 @@ function navigateTo(viewName, entityParam = null) {
     showLogin();
     return;
   }
-  if (viewName === 'backups') viewName = 'releases';
   state.currentView = viewName;
 
   if (viewName === 'overview') {
@@ -157,7 +175,6 @@ function handleHashRoute() {
 
   const parts = (rawPath || 'overview').split('/').filter(Boolean);
   let view = parts[0] || 'overview';
-  if (view === 'backups') view = 'releases';
 
   let routeParam = parts[1] || null;
   if (view === 'overview') {
@@ -215,9 +232,11 @@ function updateBreadcrumbs() {
     env: 'Environment (.env)',
     files: 'Files',
     releases: 'Releases',
+    backups: 'Backups',
     rollbacks: 'Rollbacks',
     monitor: 'Monitoring',
     audit: 'Activity',
+    access: 'Permissions',
   };
 
   if (isInsideCard && state.selectedEntityKind === 'database') {
@@ -247,6 +266,13 @@ function updateBreadcrumbs() {
       nodes: 'Cluster Nodes',
       modules: 'VPS Modules',
       settings: 'Platform Settings',
+      account: 'My Account',
+      users: 'Admin Panel › Users',
+      requests: 'Admin Panel › Requests',
+      'admin-audit': 'Admin Panel › Audit',
+      ips: 'Admin Panel › IP Addresses',
+      moves: 'Admin Panel › Move Apps',
+      limits: 'Admin Panel › App Limits',
     };
     secEl.textContent = globalLabels[state.currentView] || state.currentView;
   }
@@ -362,39 +388,38 @@ function renderDatabaseWorkspaceHeader(banner) {
 
     const actions = document.getElementById('ws-project-actions');
     if (actions) {
-      const canManage = typeof window.hasPower === 'function' ? window.hasPower('databases_manage') : false;
-      const canControl = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases', 'databases_manage']) : false;
-      const canCreds = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases_manage', 'env']) : false;
+      const dbScope = databaseScope(d);
+      const canManage = typeof window.hasPower === 'function' ? window.hasPower('app_delete', dbScope) : false;
+      const canControl = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases', 'databases_manage'], dbScope) : false;
+      const canCreds = typeof window.hasAnyPower === 'function' ? window.hasAnyPower(['databases_manage', 'env'], dbScope) : false;
       const safeName = escapeHtml(d.name).replace(/'/g, '&#39;');
       actions.innerHTML = `
         <div class="ws-actions-group">
           ${canControl ? `
-            <button class="btn ${isRunning ? 'btn-secondary ws-btn-stop' : 'btn-success ws-btn-start'} btn-sm" id="ws-btn-db-toggle-${d.id}" onclick="toggleDatabaseState(${d.id})" ${(isStarting || isStopping) ? 'disabled' : ''}>
+            <button class="btn btn-sm btn-icon ${isRunning ? 'ws-btn-stop' : 'ws-btn-start'}" id="ws-btn-db-toggle-${d.id}" onclick="toggleDatabaseState(${d.id})" title="${isRunning ? 'Stop database' : isStarting ? 'Starting' : isStopping ? 'Stopping' : 'Start database'}" aria-label="${isRunning ? 'Stop database' : 'Start database'}" ${(isStarting || isStopping) ? 'disabled' : ''}>
               ${isRunning
-            ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="6" y="6" width="12" height="12"></rect></svg><span>Stop</span>`
+            ? wsIcon('stop')
             : isStarting
-              ? `<span class="btn-spinner"></span><span>Starting</span>`
+              ? `<span class="btn-spinner"></span>`
               : isStopping
-                ? `<span class="btn-spinner"></span><span>Stopping</span>`
-                : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg><span>Start</span>`}
+                ? `<span class="btn-spinner"></span>`
+                : wsIcon('start')}
             </button>
-            <button class="btn btn-secondary btn-sm ws-btn-restart" onclick="restartDatabase(${d.id})" title="Restart PostgreSQL cluster" ${(isStarting || isStopping) ? 'disabled' : ''}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"></path></svg>
-              <span>Restart</span>
+            <button class="btn btn-sm btn-icon ws-btn-restart" onclick="restartDatabase(${d.id})" title="Restart PostgreSQL cluster" aria-label="Restart PostgreSQL cluster" ${(isStarting || isStopping) ? 'disabled' : ''}>
+              ${wsIcon('restart')}
             </button>
           ` : ''}
         </div>
 
         <div class="ws-actions-group">
           ${canCreds ? `
-            <button class="btn btn-secondary btn-sm" onclick="showDatabaseDetails(${d.id})" title="Connection Strings &amp; Credentials">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
-              <span>Creds</span>
+            <button class="btn btn-sm btn-icon ws-btn-settings" onclick="showDatabaseDetails(${d.id})" title="Connection details and credentials" aria-label="Connection details">
+              ${wsIcon('key')}
             </button>
           ` : ''}
           ${canManage ? `
-            <button class="btn btn-sm ws-btn-delete" onclick="deleteDatabase(${d.id}, '${safeName}')" title="Delete Database">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            <button class="btn btn-sm btn-icon ws-btn-delete" onclick="deleteDatabase(${d.id}, '${safeName}')" title="Delete database" aria-label="Delete database">
+              ${wsIcon('trash')}
             </button>
           ` : ''}
         </div>
@@ -409,7 +434,9 @@ function renderDatabaseWorkspaceHeader(banner) {
     deployments: ['databases', 'databases_manage'],
     logs: ['databases', 'databases_manage', 'logs'],
     files: ['databases', 'databases_manage', 'files', 'files_write'],
-    audit: ['databases', 'databases_manage', 'audit'],
+    audit: ['databases', 'databases_manage', 'audit', 'activity'],
+    backups: ['databases_manage', 'backups'],
+    access: ['access_manage'],
   };
 
   const tabsBar = document.getElementById('ws-tabs-bar');
@@ -642,19 +669,7 @@ function renderWebsiteWorkspaceHeader() {
 
     const actions = document.getElementById('ws-project-actions');
     if (actions) {
-      const ico = (d) => `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">${d}</svg>`;
-      const I = {
-        deploy: ico('<polyline points="13 2 13 9 20 9"></polyline><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>'),
-        start: ico('<polygon points="5 3 19 12 5 21 5 3"></polygon>'),
-        stop: ico('<rect x="6" y="6" width="12" height="12"></rect>'),
-        restart: ico('<path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-1.19"></path>'),
-        maint: ico('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>'),
-        globe: ico('<circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>'),
-        move: ico('<path d="M5 12h14M13 5l7 7-7 7"></path>'),
-        gear: ico('<circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>'),
-        more: ico('<circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle>'),
-        trash: ico('<polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>'),
-      };
+      const I = Object.fromEntries(Object.keys(WS_ICON_PATHS).map((k) => [k, wsIcon(k)]));
       const localSource = !p.repo_url || p.repo_url === 'local';
       const canDeploy = hasPower('deploy') && (!isService || !localSource);
       const canProcess = hasPower('process');
@@ -663,37 +678,26 @@ function renderWebsiteWorkspaceHeader() {
       const neverDeployed = !isService && !p.deployed_sha;
       const settingsAction = isService ? `openEditServiceModal(${p.id})` : `openEditWebsiteModal(${p.id})`;
 
-      const menuItems = [];
-      if (!isService && canProcess) {
-        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="toggleMaintenanceMode(${p.id})">${I.maint}<span>${isMaintenance ? 'Exit maintenance mode' : 'Maintenance mode'}</span></button>`);
-      }
-      if (!isService && hasPower('domains')) {
-        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="openNginxModal(${p.id})">${I.globe}<span>Domains &amp; SSL</span></button>`);
-      }
-      if (canManage) {
-        menuItems.push(`<button type="button" class="menu-item" role="menuitem" onclick="window.openMoveToNodeModal && window.openMoveToNodeModal(${p.id})">${I.move}<span>Move to another node</span></button>`);
-        menuItems.push('<div class="menu-sep" role="separator"></div>');
-        menuItems.push(`<button type="button" class="menu-item menu-item-danger" role="menuitem" onclick="deleteProject(${p.id}, '${escapeHtml(p.slug)}')">${I.trash}<span>Delete ${isService ? 'service' : 'website'}</span></button>`);
-      }
+      const canMaint = !isService && canProcess;
+      const canDomains = hasPower('domains');
+      const canDelete = hasPower('app_delete');
 
       actions.innerHTML = `
         <div class="ws-actions-group">
-          ${canDeploy ? `<button class="btn btn-primary btn-sm" onclick="deployProject(${p.id})" title="${localSource ? 'Deploy the files uploaded in the Files tab' : 'Pull the latest commit and deploy it'}">${I.deploy}<span>Deploy</span></button>` : ''}
+          ${canDeploy ? `<button class="btn btn-sm btn-icon ws-btn-deploy" onclick="deployProject(${p.id})" title="${localSource ? 'Deploy the files uploaded in the Files tab' : 'Pull the latest commit and deploy it'}" aria-label="Deploy">${I.deploy}</button>` : ''}
           ${canProcess ? `
             ${isOnline || isMaintenance
-              ? `<button class="btn btn-secondary btn-sm ws-btn-stop" onclick="stopProject(${p.id})" title="Stop the process">${I.stop}<span>Stop</span></button>`
-              : `<button class="btn btn-secondary btn-sm ws-btn-start" onclick="startProject(${p.id})" ${neverDeployed ? 'disabled title="Deploy this website once before starting it"' : 'title="Start the process"'}>${I.start}<span>Start</span></button>`}
-            ${isOnline ? `<button class="btn btn-secondary btn-sm ws-btn-restart" onclick="restartProject(${p.id})" title="Restart the process">${I.restart}<span>Restart</span></button>` : ''}
+              ? `<button class="btn btn-sm btn-icon ws-btn-stop" onclick="stopProject(${p.id})" title="Stop the process" aria-label="Stop">${I.stop}</button>`
+              : `<button class="btn btn-sm btn-icon ws-btn-start" onclick="startProject(${p.id})" aria-label="Start" ${neverDeployed ? 'disabled title="Deploy this website once before starting it"' : 'title="Start the process"'}>${I.start}</button>`}
+            ${isOnline ? `<button class="btn btn-sm btn-icon ws-btn-restart" onclick="restartProject(${p.id})" title="Restart the process" aria-label="Restart the process">${I.restart}</button>` : ''}
           ` : ''}
         </div>
         <div class="ws-actions-group">
           ${isMaintenance ? `<span class="badge badge-warning" title="Visitors see the maintenance page">${I.maint} Maintenance</span>` : ''}
-          ${canManage ? `<button class="btn btn-secondary btn-sm" onclick="${settingsAction}" title="${isService ? 'Service settings' : 'Website settings'}">${I.gear}<span>Settings</span></button>` : ''}
-          ${menuItems.length ? `
-            <div class="menu-wrap">
-              <button type="button" class="btn btn-secondary btn-sm btn-icon" data-menu-toggle aria-haspopup="menu" aria-expanded="false" aria-label="More actions" title="More actions">${I.more}</button>
-              <div class="menu" role="menu">${menuItems.join('')}</div>
-            </div>` : ''}
+          ${canMaint ? `<button class="btn btn-sm btn-icon ws-btn-maint ${isMaintenance ? 'is-on' : ''}" onclick="toggleMaintenanceMode(${p.id})" title="${isMaintenance ? 'Exit maintenance mode' : 'Maintenance mode: show visitors a maintenance page'}" aria-label="${isMaintenance ? 'Exit maintenance mode' : 'Maintenance mode'}" aria-pressed="${isMaintenance ? 'true' : 'false'}">${I.maint}</button>` : ''}
+          ${canDomains ? `<button class="btn btn-sm btn-icon ws-btn-domains" onclick="openNginxModal(${p.id})" title="Domains and SSL certificates" aria-label="Domains and SSL">${I.globe}</button>` : ''}
+          ${canManage ? `<button class="btn btn-sm btn-icon ws-btn-settings" onclick="${settingsAction}" title="${isService ? 'Service settings' : 'Website settings'}" aria-label="Settings">${I.gear}</button>` : ''}
+          ${canDelete ? `<button class="btn btn-sm btn-icon ws-btn-delete" onclick="deleteProject(${p.id})" title="Delete this ${isService ? 'service' : 'website'}" aria-label="Delete this ${isService ? 'service' : 'website'}">${I.trash}</button>` : ''}
         </div>
       `;
     }
@@ -703,8 +707,10 @@ function renderWebsiteWorkspaceHeader() {
     logs: ['logs'],
     files: ['files', 'files_write'],
     env: ['env'],
-    audit: ['audit'],
+    backups: ['backups'],
+    audit: ['audit', 'activity'],
     monitor: ['monitor'],
+    access: ['access_manage'],
   };
   const hiddenSecondaryTabs = new Set(['rollbacks', 'monitor']);
 
@@ -772,10 +778,21 @@ function centerActiveWebsiteTab(smooth = true) {
   }
   return true;
 }
-window.addEventListener('resize', () => centerActiveWebsiteTab(false));
+// Resize fires many times per frame while dragging; measure and scroll once per frame.
+let resizeCenterQueued = false;
+window.addEventListener('resize', () => {
+  if (resizeCenterQueued) return;
+  resizeCenterQueued = true;
+  requestAnimationFrame(() => {
+    resizeCenterQueued = false;
+    centerActiveWebsiteTab(false);
+  });
+}, { passive: true });
 
 
 function renderCurrentView() {
+  state.currentView = guardView(state.currentView);
+  syncSidebarMode();
   updateBreadcrumbs();
   renderWebsiteWorkspaceHeader();
 
@@ -803,7 +820,7 @@ function renderCurrentView() {
       activeSidebarView = (curP && curP.project_kind === 'service') ? 'services' : 'projects';
     }
   }
-  document.querySelectorAll('.nav-item').forEach((item) => {
+  document.querySelectorAll('.nav-item, .user-snippet[data-view]').forEach((item) => {
     item.classList.toggle('active', item.getAttribute('data-view') === activeSidebarView);
   });
   document.querySelectorAll('#mobile-bottom-nav .mobile-nav-item[data-mobile-view]').forEach((item) => {
@@ -835,6 +852,7 @@ function renderCurrentView() {
     case 'github': void loadGithubView(); break;
     case 'deployments': void loadDeploymentsView(); break;
     case 'releases': void loadReleasesView(); break;
+    case 'backups': void loadBackupsView(); break;
     case 'rollbacks': void loadRollbacksView(); break;
     case 'logs': void loadLogsView(); break;
     case 'env': void loadEnvView(); break;
@@ -849,6 +867,16 @@ function renderCurrentView() {
     case 'audit': void loadAuditView(); break;
     case 'nodes': if (window.loadNodesView) void window.loadNodesView(); break;
     case 'modules': if (window.loadModulesView) void window.loadModulesView(); break;
+    case 'ips': if (window.loadIpsView) void window.loadIpsView(); break;
+    case 'moves': if (window.loadMovesView) void window.loadMovesView(); break;
+    case 'limits': if (window.loadLimitsView) void window.loadLimitsView(); break;
+    case 'account':
+    case 'users':
+    case 'requests':
+    case 'admin-audit':
+    case 'access':
+      loadAccountsView(state.currentView);
+      break;
   }
 }
 

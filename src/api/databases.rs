@@ -158,12 +158,13 @@ pub(crate) async fn list_databases_handler(
                     crate::auth::Auth::user_has_database_power(
                         &user,
                         &["databases", "databases_manage"],
+                        db.id,
                         db.linked_project_id,
                     )
                 })
                 .map(|mut db| {
                     let can_creds =
-                        crate::auth::Auth::user_can_view_db_credentials(&user, db.linked_project_id);
+                        crate::auth::Auth::user_can_view_db_credentials(&user, db.id, db.linked_project_id);
                     if !can_creds {
                         db.db_password = None;
                     }
@@ -202,13 +203,30 @@ pub(crate) async fn create_database_handler(
     headers: HeaderMap,
     Json(payload): Json<crate::databases::CreateDatabaseInput>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
-    let user = verify_power(&state, &headers, "databases_manage", payload.linked_project_id).await?;
+    let user = require_current_user(&state, &headers).await?;
+    if user.disabled || !user.has_any_power(&["create_databases", "databases_manage"]) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You don't have permission to create databases. Ask an admin for \"Create databases\".".to_string(),
+        ));
+    }
+    if let Some(pid) = payload.linked_project_id {
+        if !state.auth.can_access_project_for_user(&user, pid).await {
+            return Err((StatusCode::FORBIDDEN, "You can only link a database to an app you can open.".to_string()));
+        }
+    }
     let db = state.databases.create(payload)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if !user.is_admin {
+        crate::auth::grants::grant_owner(&state.db, user.id, crate::auth::grants::SCOPE_DATABASE, db.id, "database")
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        super::access::after_change(&state, user.id, "Created a database").await;
+    }
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
-    log_audit(&state, &user.username, "database.create", Some(&db.name), Some(&format!("Created PostgreSQL database '{}' on port {}", db.db_name, db.port))).await;
+    log_audit(&state, &user.username, "database.create", Some(&database_tag(db.id)), Some(&format!("Created PostgreSQL database '{}' on port {}", db.db_name, db.port))).await;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     Ok(Json(to_database_response(db, true, &cwd)))
 }
@@ -229,7 +247,7 @@ where
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
     let user = verify_db_access(state, headers, &["databases", "databases_manage"], &db).await?;
-    let can_creds = user.has_any_power(&["databases_manage", "env"]);
+    let can_creds = crate::auth::Auth::user_can_view_db_credentials(&user, db.id, db.linked_project_id);
     f.await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
@@ -245,6 +263,7 @@ pub(crate) async fn start_database_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
+    super::limits::ensure_database_under_disk_limit(&state, id).await?;
     run_database_lifecycle(&state, &headers, id, "database.start", "Started database container", state.databases.start(id)).await
 }
 
@@ -261,6 +280,7 @@ pub(crate) async fn restart_database_handler(
     headers: HeaderMap,
     AxPath(id): AxPath<i64>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
+    super::limits::ensure_database_under_disk_limit(&state, id).await?;
     run_database_lifecycle(&state, &headers, id, "database.restart", "Restarted database container", state.databases.restart(id)).await
 }
 
@@ -290,8 +310,12 @@ pub(crate) async fn delete_database_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))?;
-    let user = verify_db_access(&state, &headers, &["databases_manage"], &db).await?;
+    // Deleting a database is for admins and its owner (the per-app `app_delete` power).
+    let user = verify_db_access(&state, &headers, &["app_delete"], &db).await?;
     state.databases.delete(id).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::db_backups::remove_database_backups(state.cluster.data_dir(), id);
+    let _ = crate::auth::grants::remove_for_app(&state.db, crate::auth::grants::SCOPE_DATABASE, id).await;
+    state.auth.invalidate_sessions();
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
     log_audit(&state, &user.username, "database.delete", Some(&format!("DB #{}", id)), Some("Deleted database container")).await;
@@ -389,7 +413,7 @@ pub(crate) async fn link_database_handler(
         }
     }
 
-    log_audit(&state, &user.username, "database.link", Some(&db.name), Some(&format!("Linked database '{}' to {} '{}'", db.name, target_noun, p.name))).await;
+    log_audit(&state, &user.username, "database.link", Some(&database_tag(db.id)), Some(&format!("Linked database '{}' to {} '{}'", db.name, target_noun, p.name))).await;
     Ok(Json(serde_json::json!({
         "ok": true,
         "message": format!("Database linked to {} '{}' and credentials injected!", target_noun, p.name)
@@ -438,7 +462,7 @@ pub(crate) async fn unlink_database_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
-    log_audit(&state, &actor.username, "database.unlink", Some(&db.name), Some(&desc)).await;
+    log_audit(&state, &actor.username, "database.unlink", Some(&database_tag(db.id)), Some(&desc)).await;
 
     Ok(Json(serde_json::json!({ "ok": true, "message": desc })))
 }

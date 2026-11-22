@@ -128,6 +128,22 @@ pub async fn spawn_project_process_pure(
         }
     }
 
+    // Optional isolation (Linux, WEBDEP_ISOLATE_APPS=1): own namespaces, only its own folder visible,
+    // unprivileged user. See runtime/isolation.rs.
+    #[allow(unused_mut)]
+    let mut isolated = false;
+    #[cfg(target_os = "linux")]
+    {
+        let (own, work, inner, key) = (base_dir.clone(), work_dir.clone(), final_cmd.clone(), format!("app-{}", p.id));
+        if let Ok(prep) = tokio::task::spawn_blocking(move || super::isolation::prepare(&inner, &own, &work, &key)).await {
+            if let Some(w) = prep.warning {
+                log_cb("system", "warn", &w);
+            }
+            final_cmd = prep.command;
+            isolated = prep.isolated;
+        }
+    }
+
     let java_info = detect_java_exe();
 
     #[cfg(windows)]
@@ -149,9 +165,23 @@ pub async fn spawn_project_process_pure(
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(false);
 
+    let limits_procs = match crate::runtime::limits::prepare(&format!("app-{}", p.id), p.cpu_limit, p.memory_limit_mb) {
+        Ok(path) => path,
+        Err(e) => {
+            log_cb("system", "warn", &format!("Resource limits not applied: {e}. The app runs without limits."));
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = &limits_procs;
+
     #[cfg(unix)]
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            if let Some(ref procs) = limits_procs {
+                crate::runtime::limits::join_in_child(procs)?;
+            }
             libc::setsid();
             libc::umask(0o027);
             let no_core = libc::rlimit {
@@ -172,6 +202,12 @@ pub async fn spawn_project_process_pure(
     cmd.env("WEBDEP_PROJECT_ID", p.id.to_string());
     cmd.env("WEBDEP_PROJECT_SLUG", &p.slug);
     cmd.env("WEBDEP_CONTAINER_ID", &container.container_id);
+    // Under a memory limit, make Java and Node size their heap by the limit, not by the machine's RAM.
+    for (key, value) in crate::runtime::limits::memory_hints(&final_cmd, p.memory_limit_mb) {
+        if !isolated_env.contains_key(key) && std::env::var_os(key).is_none() {
+            cmd.env(key, value);
+        }
+    }
 
     if let Some((_, ref java_home)) = java_info {
         let bin_dir = java_home.join("bin");
@@ -213,6 +249,10 @@ pub async fn spawn_project_process_pure(
     for (k, v) in &isolated_env {
         cmd.env(k, v);
     }
+    if isolated {
+        // The unprivileged user has no home folder of its own; /tmp is private to the app.
+        cmd.env("HOME", "/tmp");
+    }
 
     let mut child = cmd.spawn().map_err(|e| {
         format!(
@@ -222,6 +262,16 @@ pub async fn spawn_project_process_pure(
             e
         )
     })?;
+
+    // Windows: put the app under its CPU and memory limits as soon as it exists.
+    #[cfg(windows)]
+    if p.cpu_limit > 0 || p.memory_limit_mb > 0 {
+        if let Some(handle) = child.raw_handle() {
+            if let Err(e) = crate::runtime::limits::apply_to_process(handle, p.cpu_limit, p.memory_limit_mb) {
+                log_cb("system", "warn", &format!("Resource limits not applied: {e}. The app runs without limits."));
+            }
+        }
+    }
 
     let pid = child.id().unwrap_or(0);
     clear_container_pids_in(container);
@@ -276,8 +326,18 @@ pub async fn spawn_project_process_pure(
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     if let Ok(Some(status)) = child.try_wait() {
-        let err_msg = format!("Process exited immediately with code {}", status);
+        let mut err_msg = format!("Process exited immediately with code {}", status);
         log_cb("system", "warn", &err_msg);
+        if p.memory_limit_mb > 0 {
+            // A memory limit smaller than the app needs makes it crash right away: say so.
+            err_msg = format!(
+                "{}'{}' stopped right after starting ({}) while a memory limit of {} MB is set. A limit smaller than the app needs to start makes it crash right away.",
+                crate::api::limits::RAM_START_TAG,
+                p.name,
+                status,
+                p.memory_limit_mb
+            );
+        }
         return Err(err_msg);
     }
 

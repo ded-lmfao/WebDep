@@ -93,6 +93,21 @@ pub struct Project {
     pub placement_version: i64,
     #[serde(default)]
     pub assigned_port: Option<u16>,
+    /// Node IP the app's domains are served on; empty = every address.
+    #[serde(default)]
+    pub bind_ip: String,
+    /// CPU limit as a percentage of one core; 0 = no limit.
+    #[serde(default)]
+    pub cpu_limit: i32,
+    /// Memory limit in MB; 0 = no limit.
+    #[serde(default)]
+    pub memory_limit_mb: i32,
+    /// Disk limit in MB; 0 = no limit. The app is stopped when it grows past it.
+    #[serde(default)]
+    pub disk_limit_mb: i64,
+    /// Backups the app may hold at a time; 0 = no limit.
+    #[serde(default)]
+    pub backup_limit: i32,
 }
 
 pub fn default_placement_version() -> i64 { 1 }
@@ -121,7 +136,7 @@ pub const SELECT_PROJECT_FIELDS: &str = "\
     current_release_id, deployed_sha, last_poll_at, app_status, \
     app_pid, app_started_at, domains, ssl_email, \
     created_at, updated_at, project_kind, access_mode, allowed_ips, \
-    node_id, placement_version, assigned_port";
+    node_id, placement_version, assigned_port, bind_ip, cpu_limit, memory_limit_mb, disk_limit_mb, backup_limit";
 
 pub fn pg_row_to_project(r: &sqlx::postgres::PgRow) -> Result<Project, sqlx::Error> {
     use sqlx::Row;
@@ -162,6 +177,11 @@ pub fn pg_row_to_project(r: &sqlx::postgres::PgRow) -> Result<Project, sqlx::Err
         node_id: r.try_get(30)?,
         placement_version: r.try_get::<Option<i64>, _>(31)?.unwrap_or(1),
         assigned_port: r.try_get::<Option<i32>, _>(32)?.and_then(|p| u16::try_from(p).ok()),
+        bind_ip: r.try_get::<Option<String>, _>(33)?.unwrap_or_default(),
+        cpu_limit: r.try_get::<Option<i32>, _>(34)?.unwrap_or(0),
+        memory_limit_mb: r.try_get::<Option<i32>, _>(35)?.unwrap_or(0),
+        disk_limit_mb: r.try_get::<Option<i64>, _>(36)?.unwrap_or(0),
+        backup_limit: r.try_get::<Option<i32>, _>(37)?.unwrap_or(0),
     })
 }
 

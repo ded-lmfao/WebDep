@@ -8,9 +8,35 @@ use crate::db::DbPool;
 use super::password::{constant_time_eq, hash_password, random_token, verify_password};
 use super::session::Session;
 use super::totp::{sync_real_utc_offset, verify_totp_code};
-use super::user::User;
+use super::user::{User, USER_COLUMNS};
 
 pub const ACCESS_REVOKE_CHANNEL: &str = "webdep_access_revoke";
+
+/// A session as shown to its owner or an admin (never the secret id itself).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    #[serde(rename = "ref")]
+    pub session_ref: String,
+    pub created_at: i64,
+    pub last_active_at: i64,
+    pub expires_at: i64,
+    pub ip: String,
+    pub user_agent: String,
+}
+
+/// What the database stores for a session: the SHA-256 of the id in the browser's cookie. A
+/// copy of the database (or a backup of it) therefore holds nothing that can be used to sign in.
+pub fn session_key(session_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(session_id.as_bytes()))
+}
+
+/// Short, non-reversible reference for a session id.
+pub fn session_ref(session_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(session_id.as_bytes()))[..16].to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,6 +202,13 @@ impl Auth {
     }
 
     pub fn record_failure(&self, key: &str) -> Option<u64> {
+        let max_attempts = if key.starts_with("2fa:") || key.starts_with("2fa_user:") { 3 } else { 5 };
+        self.record_failure_limit(key, max_attempts, 600)
+    }
+
+    /// Counts a failure under `key` (failures older than 10 minutes are forgotten) and locks the
+    /// key for `lock_s` seconds once `max_attempts` is reached. Returns the lock time when it locks.
+    pub fn record_failure_limit(&self, key: &str, max_attempts: u32, lock_s: u64) -> Option<u64> {
         let now = Self::now_secs();
         let mut map = self.failures.lock().unwrap();
         let entry = map.entry(key.to_string()).or_insert(FailureRecord {
@@ -189,14 +222,9 @@ impl Auth {
             entry.locked_until_s = 0;
         }
         entry.count += 1;
-        let max_attempts = if key.starts_with("2fa:") || key.starts_with("2fa_user:") {
-            3
-        } else {
-            5
-        };
         if entry.count >= max_attempts {
-            entry.locked_until_s = now + 600;
-            return Some(600);
+            entry.locked_until_s = now + lock_s;
+            return Some(lock_s);
         }
         None
     }
@@ -355,9 +383,7 @@ impl Auth {
     }
 
     pub async fn get_user_by_id(&self, id: i64) -> Option<User> {
-        let row = sqlx::query(
-            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at FROM users WHERE id = $1",
-        )
+        let row = sqlx::query(&format!("SELECT {USER_COLUMNS} FROM users WHERE id = $1"))
         .bind(id)
         .fetch_optional(&self.db)
         .await
@@ -365,6 +391,7 @@ impl Auth {
         .flatten()?;
 
         let mut u = User::from_pg_row(&row).ok()?;
+        u.grants = self.load_grants(&u).await?;
         u.presence = if u.disabled {
             "offline".to_string()
         } else {
@@ -373,16 +400,34 @@ impl Auth {
         Some(u)
     }
 
+    /// Main admin needs no grant rows. A load failure denies (returns None) rather than
+    /// silently authorizing with empty grants.
+    async fn load_grants(&self, user: &User) -> Option<super::grants::Grants> {
+        if user.is_admin {
+            return Some(Default::default());
+        }
+        match super::grants::load(&self.db, user.id).await {
+            Ok(g) => Some(g),
+            Err(e) => {
+                tracing::warn!("Failed to load access grants for user {}: {}", user.id, e);
+                None
+            }
+        }
+    }
+
+    /// Every user with their grants (for the admin user list).
     pub async fn list_users(&self) -> Result<Vec<User>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at FROM users ORDER BY id ASC",
-        )
-        .fetch_all(&self.db)
-        .await?;
+        let rows = sqlx::query(&format!("SELECT {USER_COLUMNS} FROM users ORDER BY id ASC"))
+            .fetch_all(&self.db)
+            .await?;
+        let mut all_grants = super::grants::load_all(&self.db).await?;
 
         let mut list = Vec::with_capacity(rows.len());
         for row in rows {
             let mut u = User::from_pg_row(&row)?;
+            if !u.is_admin {
+                u.grants = all_grants.remove(&u.id).unwrap_or_default();
+            }
             u.presence = if u.disabled {
                 "offline".to_string()
             } else {
@@ -393,19 +438,22 @@ impl Auth {
         Ok(list)
     }
 
-    pub async fn get_user_by_username(&self, username: &str) -> Option<(User, String)> {
-        let row = sqlx::query(
-            "SELECT id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at, password_hash
-             FROM users WHERE LOWER(username) = LOWER($1)",
-        )
-        .bind(username)
+    /// Looks a user up by username or email (case-insensitive) and returns the password hash.
+    /// The returned user carries no grants: load it by id before authorizing.
+    pub async fn get_user_by_username(&self, login: &str) -> Option<(User, String)> {
+        let row = sqlx::query(&format!(
+            "SELECT {USER_COLUMNS}, password_hash FROM users
+             WHERE LOWER(username) = LOWER($1) OR (email IS NOT NULL AND LOWER(email) = LOWER($1))
+             ORDER BY (LOWER(username) = LOWER($1)) DESC LIMIT 1"
+        ))
+        .bind(login)
         .fetch_optional(&self.db)
         .await
         .ok()
         .flatten()?;
 
         let user = User::from_pg_row(&row).ok()?;
-        let hash: String = row.try_get(7).ok()?;
+        let hash: String = row.try_get(12).ok()?;
         Some((user, hash))
     }
 
@@ -415,7 +463,13 @@ impl Auth {
             && (now_s as i64).saturating_sub(last_active_at) > (self.session_idle_timeout_s as i64)
     }
 
+    #[cfg(test)]
     pub async fn create_session(&self, user_id: i64) -> Result<Session, sqlx::Error> {
+        self.create_session_with_meta(user_id, "", "").await
+    }
+
+    /// Creates a session and records where it started (shown in the sessions list).
+    pub async fn create_session_with_meta(&self, user_id: i64, ip: &str, user_agent: &str) -> Result<Session, sqlx::Error> {
         let session_id = random_token(32);
         let csrf_token = random_token(24);
         let now_s = Self::now_secs();
@@ -423,13 +477,16 @@ impl Auth {
         let last_active_at = now_s as i64;
 
         sqlx::query(
-            "INSERT INTO sessions(id, user_id, expires_at, last_active_at, csrf_token) VALUES($1, $2, $3, $4, $5)",
+            "INSERT INTO sessions(id, user_id, expires_at, last_active_at, csrf_token, created_at, ip, user_agent)
+             VALUES($1, $2, $3, $4, $5, $4, $6, $7)",
         )
-        .bind(&session_id)
+        .bind(session_key(&session_id))
         .bind(user_id)
         .bind(expires_at)
         .bind(last_active_at)
         .bind(&csrf_token)
+        .bind(ip.chars().take(64).collect::<String>())
+        .bind(user_agent.chars().take(200).collect::<String>())
         .execute(&self.db)
         .await?;
 
@@ -456,7 +513,7 @@ impl Auth {
         }
         let _ = sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
             .bind(now_i64)
-            .bind(session_id)
+            .bind(session_key(session_id))
             .execute(&self.db)
             .await;
     }
@@ -468,6 +525,7 @@ impl Auth {
     pub async fn get_session_with_touch(&self, session_id: &str, touch_activity: bool) -> Option<(Session, User)> {
         let now_s = Self::now_secs();
 
+        #[allow(clippy::large_enum_variant)]
         enum CacheCheck {
             Miss,
             Expired,
@@ -514,12 +572,9 @@ impl Auth {
         }
 
         let row = sqlx::query(
-            "SELECT s.id, s.user_id, s.expires_at, s.last_active_at, s.csrf_token, u.username, u.disabled, u.permissions, u.allowed_projects, COALESCE(u.totp_enabled, FALSE), u.created_at
-             FROM sessions s
-             JOIN users u ON u.id = s.user_id
-             WHERE s.id = $1 AND s.expires_at > $2",
+            "SELECT id, user_id, expires_at, last_active_at, csrf_token FROM sessions WHERE id = $1 AND expires_at > $2",
         )
-        .bind(session_id)
+        .bind(session_key(session_id))
         .bind(now_s as i64)
         .fetch_optional(&self.db)
         .await
@@ -527,24 +582,14 @@ impl Auth {
         .flatten()?;
 
         let session = Session {
-            id: row.try_get(0).ok()?,
+            id: session_id.to_string(),
             user_id: row.try_get(1).ok()?,
             expires_at: row.try_get(2).ok()?,
             last_active_at: row.try_get(3).ok()?,
             csrf_token: row.try_get(4).ok()?,
         };
-        let disabled_bool: bool = row.try_get::<Option<bool>, _>(6).ok().flatten().unwrap_or(false);
-        let totp_bool: bool = row.try_get::<Option<bool>, _>(9).ok().flatten().unwrap_or(false);
-        let user = User::from_db(
-            session.user_id,
-            row.try_get(5).ok()?,
-            if disabled_bool { 1 } else { 0 },
-            row.try_get::<Option<String>, _>(7).ok().flatten().unwrap_or_else(|| "[\"*\"]".into()),
-            row.try_get::<Option<String>, _>(8).ok().flatten().unwrap_or_else(|| "[\"*\"]".into()),
-            if totp_bool { 1 } else { 0 },
-            row.try_get(10).ok()?,
-        );
-
+        // Loads profile and grants; a grant load failure denies the session.
+        let user = self.get_user_by_id(session.user_id).await?;
         let mut valid = (!user.disabled).then_some((session, user))?;
         if self.is_idle_expired(valid.0.last_active_at, now_s) {
             self.delete_session(session_id).await;
@@ -575,9 +620,54 @@ impl Auth {
             map.remove(session_id);
         }
         let _ = sqlx::query("DELETE FROM sessions WHERE id = $1")
-            .bind(session_id)
+            .bind(session_key(session_id))
             .execute(&self.db)
             .await;
+    }
+
+    /// Live sessions of a user. Session ids are secrets, so each is identified by a short hash.
+    pub async fn list_user_sessions(&self, user_id: i64) -> Vec<SessionInfo> {
+        let now = Self::now_secs() as i64;
+        let rows: Vec<(String, i64, i64, i64, String, String)> = sqlx::query_as(
+            "SELECT id, created_at, last_active_at, expires_at, ip, user_agent FROM sessions
+             WHERE user_id = $1 AND expires_at > $2 ORDER BY last_active_at DESC",
+        )
+        .bind(user_id)
+        .bind(now)
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .map(|(id, created_at, last_active_at, expires_at, ip, user_agent)| SessionInfo {
+                session_ref: session_ref(&id),
+                created_at,
+                last_active_at,
+                expires_at,
+                ip,
+                user_agent,
+            })
+            .collect()
+    }
+
+    /// Signs out one session of a user, found by its short hash. Returns whether it existed.
+    pub async fn revoke_session_by_ref(&self, user_id: i64, reference: &str) -> bool {
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM sessions WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&self.db)
+            .await
+            .unwrap_or_default();
+        // The table holds keys (hashes), so remove the row by key and drop every cached session.
+        match ids.into_iter().find(|key| session_ref(key) == reference) {
+            Some(key) => {
+                self.invalidate_sessions();
+                let _ = sqlx::query("DELETE FROM sessions WHERE id = $1")
+                    .bind(&key)
+                    .execute(&self.db)
+                    .await;
+                true
+            }
+            None => false,
+        }
     }
 
     pub async fn revoke_other_sessions(&self, user_id: i64, keep_session_id: &str) -> usize {
@@ -587,7 +677,7 @@ impl Auth {
         }
         sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id != $2")
             .bind(user_id)
-            .bind(keep_session_id)
+            .bind(session_key(keep_session_id))
             .execute(&self.db)
             .await
             .map(|r| r.rows_affected() as usize)
@@ -675,6 +765,8 @@ impl Auth {
             .await
     }
 
+    /// `project` / `database` with an id check that app's grants; anything else (or no id)
+    /// checks panel-level powers.
     pub async fn has_any_power_for_scope(
         &self,
         user: &User,
@@ -685,52 +777,45 @@ impl Auth {
         if user.disabled {
             return false;
         }
-        if user.is_main_admin {
-            return true;
+        match (scope_type, scope_id) {
+            (super::grants::SCOPE_PROJECT, Some(pid)) => user.has_project_power(pid, powers),
+            (super::grants::SCOPE_DATABASE, Some(db_id)) => user.has_database_power(db_id, None, powers),
+            _ => user.has_any_power(powers),
         }
-        if scope_type == "project" {
-            if let Some(pid) = scope_id {
-                if !user.can_access_project(pid) {
-                    return false;
-                }
-            }
-        }
-        user.has_any_power(powers)
     }
 
     pub fn user_has_database_power(
         user: &User,
         powers: &[&str],
+        db_id: i64,
         linked_project_id: Option<i64>,
     ) -> bool {
-        if user.disabled {
-            return false;
-        }
-        if user.is_main_admin {
-            return true;
-        }
-        if let Some(pid) = linked_project_id {
-            return user.can_access_project(pid) && user.has_any_power(powers);
-        }
-        user.has_any_power(powers) && (user.all_projects || user.has_power("databases_manage"))
+        !user.disabled && user.has_database_power(db_id, linked_project_id, powers)
     }
 
-    pub fn user_can_view_db_credentials(user: &User, linked_project_id: Option<i64>) -> bool {
-        Self::user_has_database_power(user, &["databases_manage", "env"], linked_project_id)
+    pub fn user_can_view_db_credentials(user: &User, db_id: i64, linked_project_id: Option<i64>) -> bool {
+        Self::user_has_database_power(user, &["databases_manage", "env"], db_id, linked_project_id)
     }
 
     pub async fn has_database_power_for_user(
         &self,
         user: &User,
         powers: &[&str],
-        _db_id: i64,
+        db_id: i64,
         linked_project_id: Option<i64>,
     ) -> bool {
-        Self::user_has_database_power(user, powers, linked_project_id)
+        Self::user_has_database_power(user, powers, db_id, linked_project_id)
     }
 
+    /// True when the user holds a database power at panel level, on any database, or on
+    /// any project they can reach.
     pub async fn can_list_databases_for_user(&self, user: &User) -> bool {
-        !user.disabled && user.has_any_power(&["databases", "databases_manage"])
+        const DB_POWERS: [&str; 2] = ["databases", "databases_manage"];
+        !user.disabled
+            && (user.has_any_power(&DB_POWERS)
+                || user.grants.databases.values().chain(user.grants.projects.values()).any(|set| {
+                    set.contains(super::grants::ALL_POWERS) || DB_POWERS.iter().any(|p| set.contains(*p))
+                }))
     }
 
     pub async fn can_view_db_credentials_for_user(
@@ -739,8 +824,7 @@ impl Auth {
         db_id: i64,
         linked_project_id: Option<i64>,
     ) -> bool {
-        let _ = db_id;
-        Self::user_can_view_db_credentials(user, linked_project_id)
+        Self::user_can_view_db_credentials(user, db_id, linked_project_id)
     }
 
     pub async fn count_active_sessions(&self, user_id: i64) -> usize {
@@ -842,7 +926,7 @@ mod tests {
         let now_i64 = Auth::now_secs() as i64;
         sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
             .bind(now_i64 - 60)
-            .bind(&sess.id)
+            .bind(session_key(&sess.id))
             .execute(&db)
             .await
             .unwrap();
@@ -855,11 +939,62 @@ mod tests {
 
         sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
             .bind(now_i64 - 200)
-            .bind(&sess.id)
+            .bind(session_key(&sess.id))
             .execute(&db)
             .await
             .unwrap();
         auth.invalidate_sessions();
         assert!(auth.get_session(&sess.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sessions_are_stored_hashed_and_still_work() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let auth = Auth::with_timeouts(db.clone(), 3600, 0);
+        auth.ensure_admin().await;
+        let sess = auth.create_session(1).await.unwrap();
+
+        let stored: Vec<String> = sqlx::query_scalar("SELECT id FROM sessions WHERE user_id = 1")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert!(!stored.contains(&sess.id), "the cookie value must not be in the database");
+        assert_eq!(stored, vec![session_key(&sess.id)]);
+
+        // Signing in with the cookie value works; the hash itself is not a valid cookie value.
+        assert!(auth.get_session(&sess.id).await.is_some());
+        auth.invalidate_sessions();
+        assert!(auth.get_session(&session_key(&sess.id)).await.is_none());
+
+        // Listing and revoking by reference still work.
+        let listed = auth.list_user_sessions(1).await;
+        assert_eq!(listed.len(), 1);
+        assert!(auth.revoke_session_by_ref(1, &listed[0].session_ref).await);
+        assert!(auth.get_session(&sess.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn failures_lock_only_the_key_they_were_counted_under() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let auth = Auth::with_timeouts(db, 3600, 0);
+        // The attacker's own (user, address) pair locks after 5 failures...
+        for _ in 0..4 {
+            assert_eq!(auth.record_failure_limit("login:admin|203.0.113.9", 5, 600), None);
+        }
+        assert_eq!(auth.record_failure_limit("login:admin|203.0.113.9", 5, 600), Some(600));
+        assert!(auth.check_lockout("login:admin|203.0.113.9").is_some());
+        // ...while the real admin on another address is unaffected.
+        assert!(auth.check_lockout("login:admin|198.51.100.4").is_none());
+        // The per-address key trips on guessing across usernames; a per-username key only slows down.
+        for _ in 0..29 {
+            auth.record_failure_limit("loginip:203.0.113.9", 30, 600);
+        }
+        assert_eq!(auth.record_failure_limit("loginip:203.0.113.9", 30, 600), Some(600));
+        for _ in 0..99 {
+            auth.record_failure_limit("loginuser:admin", 100, 60);
+        }
+        assert_eq!(auth.record_failure_limit("loginuser:admin", 100, 60), Some(60));
+        auth.clear_failures("login:admin|203.0.113.9");
+        assert!(auth.check_lockout("login:admin|203.0.113.9").is_none());
     }
 }

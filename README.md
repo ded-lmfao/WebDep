@@ -237,9 +237,35 @@ Move a website or backend service from one VPS to another directly from its work
 | **Websites** | Multi-framework web apps placed on any node with auto-allocated ports, custom domains, Caddy HTTPS, and maintenance mode. |
 | **Services** | 24/7 background daemons (Lavalink/Java, Python workers, Node bots, Go/Rust binaries) with live PID tracking and log streaming. |
 | **Databases** | Isolated native PostgreSQL clusters on any node with SCRAM-SHA-256 auth, local/mesh/CIDR/public rules, and 1-click `DATABASE_URL` linking. |
-| **Nodes** | Cluster Nodes & Mesh Topology view with per-node network charts, display names, `+ Add Node` token/command generator, drain/evacuate, and `Update Fleet`. |
-| **Modules** | Per-VPS runtime readiness (Git, Node.js, Python, Java, Go, Rust, PHP, Ruby, .NET, UnRAR) with one-click install/remove through the server's package manager (Main Admin only). |
-| **Platform Settings** | WebAuthn Passkeys, TOTP 2FA, users with simple access levels (Viewer / Developer / Full access / Custom) and per-website scope, GitHub tokens, SHA-256 verified Core/Fleet updates, server cache/restart controls, and 15 themes. |
+| **My Account** | Every user's own profile (name, email), password, passkeys, TOTP 2FA, sessions, and a read-only list of the apps they can access. |
+| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **IP Addresses**, **Move Apps**, **App Limits**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
+
+#### Accounts & Permissions
+- **Sign-up requests**: people create an account request from the sign-in page; it waits in **Admin Panel › Requests** and an account exists only after approval. Admins can also create accounts directly (with a temporary password the user must change). Self-registration can be switched off in **Platform Settings › Accounts**.
+- **Roles**: the **Main Admin** (from `.env`) can make other users **Admin** (full access). Everyone else starts with no access.
+- **Per-app permissions**: every website, service, and database has a **Permissions** tab. Pick people and tick exactly what they can do there (logs, files, deploy, start/stop, backups, env, domains, settings, activity, connection details, and so on).
+- **Creating apps**: the panel permissions *Create websites*, *Create services*, and *Create databases* let a user add apps of that kind. They own what they create (every permission on it, including delete).
+- **Delegation**: **Manage access** on an app, and the panel permissions *View users*, *Create accounts*, *Edit or disable users*, and *Approve or reject requests*, let trusted users help. Nobody can give a permission they don't hold, and every change is written to the audit log.
+- **Account security** (**Platform Settings › Accounts**): limit sign-up requests to certain email domains, require 2FA for admins or everyone, create one-time password reset links, and see or end any user's sessions. The sign-up form has a built-in bot check.
+- **Nodes** (topology, `+ Add Node`, drain/evacuate, `Update Fleet`), **VPS Modules** (runtime installs), and **Platform Settings** (GitHub tokens, Core/Fleet updates, cache/restart, themes) live in the Admin Panel.
+
+#### Ports, IPs, and limits (Admin Panel › IP Addresses)
+- **Port ranges per node**: new apps take the lowest free port in the node's range. Ports stay private (only Caddy and the mesh reach them) until made public, and the firewall follows automatically. If a node has no free port, the app isn't created and the panel says so.
+- **Several IPs per VPS**: add the VPS's public IPs and choose one per website or service; Caddy then serves its domains on that IP only.
+- **Resource limits** (set at creation, changed by admins in **App Limits**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root) and Job Objects on Windows; limits are checked shortly after an app starts or restarts and then every 2 minutes: a disk limit stops the app when it grows past it, and an app that reaches its memory or CPU limit keeps running but is slowed down; either way the people who can see the app get a pop-up explaining it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
+- **Move Apps** moves a website or service to another node (admins only).
+
+#### Backups and restore (the **Backups** tab of every website, service and database)
+- **Create backup** saves every file in the app's Files folder plus its environment variables as one archive, built in the background, with its size, file count, creator, status and checksum. Optionally leave out names such as `cache` or `*.log`. A backup limit per app (App Limits) caps how many it can hold.
+- **Restore** replaces the app's files with the backup (nothing is merged), stops and restarts the app, restores the environment variables, and keeps the replaced files for 24 hours so it can be undone. It checks the checksum first and swaps folders with rollback, so a bad backup or a failure never leaves the app half restored. You confirm by typing the app's name.
+- **Download**, **lock** (a locked backup can't be deleted) and **delete** are on each row. Apps on other VPSes are backed up and restored on that VPS.
+- **Databases** are backed up as a PostgreSQL dump while they keep running (no downtime). **Restore** replaces everything in the database inside a single transaction: if anything fails, the database is left exactly as it was. The database must be running. Databases on other VPSes are not supported yet.
+- Backups are always manual. Releases are a separate list (the newest 5 are kept).
+
+#### Maintenance
+- The control database is backed up automatically once a day (seven kept) and before upgrades; files are in `data/backups/control-db/`.
+- The Audit page searches and exports to CSV; panel-wide history is kept 365 days.
+- Optional webhook notifications (set the `notify_webhook_url` setting) for new account requests, a VPS going offline or back online, low free ports, and apps stopped for going over their disk limit.
 
 The panel is fully responsive: on phones and tablets the sidebar becomes a drawer with a bottom tab bar, and data tables turn into compact cards.
 
@@ -250,8 +276,17 @@ Opening any website or service exposes its workspace toolbar (**Start / Stop / R
 - **Logs** — Real-time stdout/stderr and build log streaming over SSE/WebSocket.
 - **Files** — In-browser remote file explorer, upload/download, and syntax-highlighted editor scoped strictly to the project root.
 - **Environment** — AES-256-GCM encrypted `.env` Vault secrets and linked database bindings.
-- **Releases** — Build archives, local snapshots, **Save Off-Node on Web-Core**, and **Restore to Node**.
-- **Activity** — Workload audit trail and placement/shift events.
+- **Releases** — The newest five releases and rollback to any of them.
+- **Backups** — Manual backups you can restore, download, lock and delete (also on every database).
+- **Activity** — Workload audit trail and placement/shift events (visible with the app's *View activity* permission).
+- **Permissions** — Who can use this app and what they can do (admins, and users with *Manage access* on it).
+
+### Isolating apps (Linux)
+By default an app runs as the same server user as the panel, so code a user deploys could read the panel's data folder and other apps' files. On a Linux server where the panel runs as root, set `WEBDEP_ISOLATE_APPS=1` (needs util-linux: `unshare`, `setpriv`, `mount`) and every app and build is started:
+- in its own **PID, mount, IPC and UTS namespaces** (`unshare`): it cannot see or signal other processes;
+- with the panel's data folder and working folder **covered by an empty tmpfs**, only the app's own folder bound back in, and a private `/tmp`: other apps and the panel's secrets do not exist for it;
+- as an **unprivileged user** (`setpriv --no-new-privs`, uid/gid `WEBDEP_APP_UID`/`WEBDEP_APP_GID`, default 65534) that cannot undo any of this.
+The app's folder is handed to that user on start. Runtimes must be installed where that user can run them (not under `/root`). CPU and memory limits (cgroups) apply on top. The network stays shared because the reverse proxy reaches apps on their ports. The App Limits page says whether isolation is active. Turn it on for a test app first: it has not been exercised on a real Linux server yet.
 
 ### Data Layout
 
@@ -266,6 +301,10 @@ Everything WebDep stores lives under `DATA_DIR` (default `./data` inside the ins
 | `caddy/`, `mesh/`, `keys/` | Reverse-proxy config and certificates, WireGuard mesh, deploy keys. |
 
 Do not copy these folders while PostgreSQL is running; use panel backups or stop WebDep first.
+
+### Upgrading and rolling back
+
+WebDep backs up its control database before every upgrade that changes it. See [docs/UPGRADING.md](docs/UPGRADING.md) for what each release changes, how the backup works, and how to roll back.
 
 ### Upgrading from 2.x (SQLite → PostgreSQL)
 
@@ -330,7 +369,10 @@ WebDep loads configuration from `.env` in the process's current working director
 | `PUBLIC_IP` | *(auto-detected)* | Optional override for Core panel IP returned by `/api/cluster/panel-info`. |
 | `WEBDEP_NODE_P2P_BIND` | `0.0.0.0` | Bind address for Web-Node's direct P2P archive receiver. |
 | `WEBDEP_NODE_P2P_PORT` | `0` *(ephemeral)* | TCP port for Web-Node's direct P2P HTTP receiver (`0` picks a free port). |
+| `WEBDEP_SKIP_DB_BACKUP` | `false` | Set to `1` to skip the automatic control-database backup taken before an upgrade applies new migrations. Only if you back up yourself. |
 | `WEBDEP_MANAGE_FIREWALL` | `true` | Set to `false` to stop WebDep from editing UFW/iptables (panel, app, database and WireGuard mesh rules). Use it when the host firewall is managed elsewhere. |
+| `WEBDEP_ISOLATE_APPS` | `false` | Linux, panel running as root: set to `1` to run every app and build isolated (see *Isolating apps*). |
+| `WEBDEP_APP_UID` / `WEBDEP_APP_GID` | `65534` | The unprivileged user and group isolated apps run as. |
 | `RUST_LOG` | `webdep=info` | Tracing log filter (`debug`, `info`, `warn`, `error`). |
 
 ---

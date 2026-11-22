@@ -89,7 +89,7 @@ export async function syncThemeFromServer() {
 
 function canSaveGlobalSettings() {
   if (!state.user) return false;
-  if (state.user.isMainAdmin) return true;
+  if (state.user.isAdmin || state.user.isMainAdmin) return true;
   const perms = state.user.permissions || [];
   return perms.includes('*') || perms.includes('settings_manage');
 }

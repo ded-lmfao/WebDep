@@ -377,6 +377,16 @@ pub fn invalidate_path_disk_cache(path: &std::path::Path) {
     }
 }
 
+/// Measures a directory right now, skipping the cache (and refreshing it). Used where an old value
+/// would let a limit be missed, such as refusing to start an app that is over its disk limit.
+pub fn get_path_disk_size_fresh(path: &std::path::Path) -> u64 {
+    let bytes = compute_disk_size(path);
+    if let Ok(mut guard) = DISK_USAGE_CACHE.write() {
+        guard.get_or_insert_with(HashMap::new).insert(path.to_path_buf(), (bytes, std::time::Instant::now()));
+    }
+    bytes
+}
+
 /// Returns on-disk storage size in bytes for a directory or file.
 /// Traverses filesystem safely without following symlinks to prevent loops.
 /// Employs a non-blocking in-memory cache (120s TTL) with background refresh so HTTP threads never stall on I/O.

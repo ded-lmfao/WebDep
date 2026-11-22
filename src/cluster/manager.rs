@@ -101,6 +101,10 @@ pub struct ClusterManager {
 }
 
 impl ClusterManager {
+    pub fn db_pool(&self) -> DbPool {
+        self.db.clone()
+    }
+
     pub fn new(db: DbPool, data_dir: PathBuf) -> Self {
         Self {
             db,
@@ -134,12 +138,20 @@ impl ClusterManager {
         let tags = input.tags.unwrap_or_default();
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
 
+        let port_range = match (input.port_min, input.port_max) {
+            (Some(min), Some(max)) => {
+                super::ports::validate_range(min, max)?;
+                Some((i32::from(min), i32::from(max)))
+            }
+            (None, None) => None,
+            _ => return Err("Enter both the lowest and the highest port, or leave both empty.".into()),
+        };
         let raw_token = generate_secret("wdjoin_");
         let token_hash = hash_token(&raw_token);
 
         let id: i64 = sqlx::query_scalar(
-            "INSERT INTO node_enroll_tokens(token_hash, label, region, tags_json, created_by, expires_at, created_at)
-             VALUES($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO node_enroll_tokens(token_hash, label, region, tags_json, created_by, expires_at, created_at, port_min, port_max)
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING id",
         )
         .bind(&token_hash)
@@ -149,6 +161,8 @@ impl ClusterManager {
         .bind(created_by)
         .bind(expires_at)
         .bind(now)
+        .bind(port_range.map(|r| r.0))
+        .bind(port_range.map(|r| r.1))
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Failed creating enrollment token: {e}"))?;
@@ -416,6 +430,22 @@ impl ClusterManager {
             .await
             .map_err(|e| format!("Failed committing node enrollment: {e}"))?;
 
+        // Port range chosen when the join command was created.
+        let token_range: Option<(Option<i32>, Option<i32>)> =
+            sqlx::query_as("SELECT port_min, port_max FROM node_enroll_tokens WHERE id = $1")
+                .bind(token_id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
+        if let Some((Some(min), Some(max))) = token_range {
+            if let (Ok(min), Ok(max)) = (u16::try_from(min), u16::try_from(max)) {
+                if let Err(e) = super::ports::set_range(&self.db, node_id, min, max).await {
+                    tracing::warn!("Could not apply port range to node #{node_id}: {e}");
+                }
+            }
+        }
+
         let peers = self.list_peer_configs().await?;
         self.broadcast_peer_sync().await;
 
@@ -619,6 +649,17 @@ impl ClusterManager {
     ) -> Result<(), String> {
         let now = now_secs();
         let caps_json = serde_json::to_string(capabilities).unwrap_or_else(|_| "{}".to_string());
+        let was_offline: Option<String> = sqlx::query_scalar(
+            "SELECT COALESCE(NULLIF(display_name, ''), name) FROM nodes WHERE id = $1 AND status = 'offline' AND is_local = FALSE",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten();
+        if let Some(label) = was_offline {
+            crate::maintenance::notify(&self.db, "node.online", format!("WebDep: node {label} is back online.")).await;
+        }
         sqlx::query(
             "UPDATE nodes
              SET status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'online' END,
@@ -650,7 +691,20 @@ impl ClusterManager {
         capabilities: &NodeCapabilities,
     ) -> Result<(), String> {
         let now = now_secs();
-        let caps_json = serde_json::to_string(capabilities).unwrap_or_else(|_| "{}".to_string());
+        let mut capabilities = capabilities.clone();
+        let prefix = crate::cluster::modules::CUSTOM_MODULE_PREFIX;
+        if !capabilities.modules.iter().any(|m| m.id.starts_with(prefix)) {
+            let previous: Option<String> = sqlx::query_scalar("SELECT capabilities_json FROM nodes WHERE id = $1")
+                .bind(node_id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
+            if let Some(prev) = previous.and_then(|raw| serde_json::from_str::<NodeCapabilities>(&raw).ok()) {
+                capabilities.modules.extend(prev.modules.into_iter().filter(|m| m.id.starts_with(prefix)));
+            }
+        }
+        let caps_json = serde_json::to_string(&capabilities).unwrap_or_else(|_| "{}".to_string());
         sqlx::query(
             "UPDATE nodes
              SET capabilities_json = $2,
@@ -704,6 +758,17 @@ impl ClusterManager {
 
     pub async fn mark_node_offline(&self, node_id: i64) -> Result<(), String> {
         let now = now_secs();
+        let was_online: Option<String> = sqlx::query_scalar(
+            "SELECT COALESCE(NULLIF(display_name, ''), name) FROM nodes WHERE id = $1 AND status = 'online' AND is_local = FALSE",
+        )
+        .bind(node_id)
+        .fetch_optional(&self.db)
+        .await
+        .ok()
+        .flatten();
+        if let Some(label) = was_online {
+            crate::maintenance::notify(&self.db, "node.offline", format!("WebDep: node {label} went offline.")).await;
+        }
         sqlx::query(
             "UPDATE nodes
              SET status = CASE WHEN status = 'draining' THEN 'draining' ELSE 'offline' END,
@@ -905,18 +970,23 @@ impl ClusterManager {
             loop {
                 interval.tick().await;
                 let cutoff = now_secs() - 45;
-                let _ = sqlx::query(
+                let gone: Vec<String> = sqlx::query_scalar(
                     "UPDATE nodes
                      SET status = 'offline', updated_at = $2
                      WHERE status = 'online'
                        AND is_local = FALSE
                        AND last_seen_at IS NOT NULL
-                       AND last_seen_at < $1",
+                       AND last_seen_at < $1
+                     RETURNING COALESCE(NULLIF(display_name, ''), name)",
                 )
                 .bind(cutoff)
                 .bind(now_secs())
-                .execute(&mgr.db)
-                .await;
+                .fetch_all(&mgr.db)
+                .await
+                .unwrap_or_default();
+                for label in gone {
+                    crate::maintenance::notify(&mgr.db, "node.offline", format!("WebDep: node {label} stopped responding.")).await;
+                }
             }
         });
     }
@@ -1024,12 +1094,19 @@ impl ClusterManager {
             Ok(reply.result)
         } else {
             let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
-            Err((
-                status,
-                reply
-                    .error
-                    .unwrap_or_else(|| format!("Remote '{op}' failed on Web-Node #{node_id}")),
-            ))
+            let message = reply
+                .error
+                .unwrap_or_else(|| format!("Remote '{op}' failed on Web-Node #{node_id}"));
+            // An older worker doesn't know newer commands: say so instead of a bare 404.
+            if message.starts_with("Unknown remote RPC op") {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "Web-Node #{node_id} runs an older WebDep that doesn't support '{op}'. Update it with Update Fleet in Admin Panel > Nodes, then try again."
+                    ),
+                ));
+            }
+            Err((status, message))
         }
     }
 

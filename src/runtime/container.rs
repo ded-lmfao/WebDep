@@ -509,7 +509,11 @@ impl Runtime {
                 .await;
             alloc
         };
-        self.allow_firewall_port(port, Some(p.id));
+        // Nodes with a port range follow the app's access mode and the port's public flag;
+        // nodes without one keep opening the app port as before.
+        if p.access_mode == "public" || crate::cluster::ports::should_open_publicly(&self.db, p.node_id, port).await {
+            self.allow_firewall_port(port, Some(p.id));
+        }
         ensure_container_with_port(p, port)
     }
 

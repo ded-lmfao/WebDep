@@ -28,6 +28,8 @@
 .ws-btn-stop { color: var(--danger-light) !important; border-color: var(--danger-border) !important; }
 .ws-btn-stop:hover { background: var(--danger-bg) !important; }
 .ws-btn-delete { background: transparent !important; border: 1px solid var(--danger-border) !important; color: var(--danger-light) !important; padding: 0 8px !important; }
+.ws-btn-restart { background: transparent !important; border: 1px solid var(--warning-border) !important; color: var(--warning-light) !important; }
+.ws-btn-restart:hover:not(:disabled) { background: var(--warning-bg) !important; border-color: var(--warning) !important; }
 .ws-btn-delete:hover { background: var(--danger-fill) !important; border-color: var(--danger-fill) !important; color: #ffffff !important; }
 
 .ws-tabs-bar {
@@ -109,3 +111,18 @@
 }
 
 
+
+/* Icon-only workspace actions: colour says what each does, the tooltip names it */
+.ws-btn-deploy { background: var(--accent-glow) !important; border: 1px solid var(--accent-border) !important; color: var(--accent-light) !important; }
+.ws-btn-deploy:hover:not(:disabled) { background: var(--accent) !important; color: #ffffff !important; }
+.ws-btn-start { background: transparent !important; border: 1px solid var(--success-border) !important; color: var(--success-light) !important; }
+.ws-btn-start:hover:not(:disabled) { background: var(--success-bg) !important; border-color: var(--success) !important; }
+.ws-btn-stop { background: transparent !important; border: 1px solid var(--danger-border) !important; color: var(--danger-light) !important; }
+.ws-btn-stop:hover:not(:disabled) { background: var(--danger-bg) !important; }
+.ws-btn-maint { background: transparent !important; border: 1px solid var(--border-medium) !important; color: var(--text-muted) !important; }
+.ws-btn-maint:hover:not(:disabled), .ws-btn-maint.is-on { background: var(--warning-bg) !important; border-color: var(--warning-border) !important; color: var(--warning-light) !important; }
+.ws-btn-domains, .ws-btn-settings { background: transparent !important; border: 1px solid var(--border-medium) !important; color: var(--text-muted) !important; }
+.ws-btn-domains:hover:not(:disabled), .ws-btn-settings:hover:not(:disabled) { background: var(--bg-card-hover) !important; color: var(--text-main) !important; }
+.ws-btn-delete.btn-icon { padding: 0 !important; }
+.ws-actions-group .btn-icon { width: 30px; height: 30px; border-radius: var(--radius-sm); }
+.ws-actions-group .btn-icon svg { width: 15px; height: 15px; }

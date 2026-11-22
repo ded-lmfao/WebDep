@@ -27,7 +27,18 @@ import {
 import { loadProjects } from './websites.js';
 import { loadDatabases } from './databases.js';
 import { navigateTo, handleHashRoute } from './workspace.js';
-import { renderSecurityStatusSummary, loadSettingsView } from './settings.js';
+import { renderSecurityStatusSummary } from './settings.js';
+import { hasPower, hasAnyPower, isAdmin, canCreate } from './permissions.js';
+import {
+  applyAccountChrome,
+  requirePasswordChange,
+  requireTwoFactorSetup,
+  refreshRegistrationLink,
+  noteLoginError,
+  maybeShowResetForm,
+} from './accounts.js';
+
+export { hasPower, hasAnyPower };
 
 // Re-export passkeys & QR code generation modules for 100% backward compatibility
 export * from './auth_passkeys.js';
@@ -180,6 +191,7 @@ export async function initAuth() {
       }
       state.user = me.user;
       state.csrf = me.csrf;
+      state.twoFactorRequired = Boolean(me.twoFactorRequired);
       state.activeSessions = me.activeSessions || 1;
       state.passkeyCount = me.passkeyCount || 0;
       await onAuthenticated(false);
@@ -263,6 +275,18 @@ export function showLogin(skipIntro = false) {
   const mf = document.getElementById('login-2fa-form');
   if (lf) lf.style.display = 'block';
   if (mf) mf.style.display = 'none';
+  const rf = document.getElementById('login-register-form');
+  if (rf) rf.style.display = 'none';
+  const rs = document.getElementById('login-request-status');
+  if (rs) rs.style.display = 'none';
+  const forced = document.getElementById('force-password-overlay');
+  if (forced) forced.hidden = true;
+  const forced2fa = document.getElementById('force-2fa-overlay');
+  if (forced2fa) forced2fa.hidden = true;
+  const rs2 = document.getElementById('login-reset-form');
+  if (rs2) rs2.style.display = 'none';
+  void refreshRegistrationLink();
+  maybeShowResetForm();
 
   const passInput = document.getElementById('login-password');
   if (passInput) {
@@ -297,16 +321,6 @@ export function toggleLoginPasswordVisibility() {
   togglePasswordField('login-password', document.getElementById('toggle-pw-visibility'));
 }
 
-export function hasPower(power) {
-  if (!state.user) return false;
-  if (state.user.isMainAdmin) return true;
-  const perms = state.user.permissions || [];
-  return perms.includes('*') || perms.includes(power);
-}
-
-export function hasAnyPower(powers) {
-  return Array.isArray(powers) && powers.some((p) => hasPower(p));
-}
 
 export async function onAuthenticated(isFreshLogin = false) {
   if (!state.user || !state.csrf || state.pendingMfaToken) {
@@ -314,37 +328,40 @@ export async function onAuthenticated(isFreshLogin = false) {
     return;
   }
 
-  const curUserEl = document.getElementById('current-user-name');
-  if (curUserEl) curUserEl.textContent = state.user.username;
-  const curRoleEl = document.getElementById('current-user-role');
-  if (curRoleEl) curRoleEl.textContent = state.user.isMainAdmin ? 'Main admin' : 'User';
-  const curAvatarEl = document.getElementById('current-user-avatar');
-  if (curAvatarEl) curAvatarEl.textContent = (state.user.username || 'AD').slice(0, 2).toUpperCase();
+  if (state.user.mustChangePassword) {
+    await requirePasswordChange();
+    if (!state.user || !state.csrf) return;
+    isFreshLogin = false;
+  }
+  if (state.twoFactorRequired && !state.user.totpEnabled) {
+    await requireTwoFactorSetup();
+    if (!state.user || !state.csrf) return;
+    isFreshLogin = false;
+  }
+  applyAccountChrome();
 
   const navPowerMap = {
     env: ['env'],
     domains: ['domains'],
     backups: ['backups'],
     databases: ['databases', 'databases_manage'],
-    // Cluster infrastructure (node IPs, WireGuard endpoints, package installs) is for operators only.
-    nodes: ['system_manage'],
-    modules: ['system_manage'],
   };
   Object.entries(navPowerMap).forEach(([view, pwrs]) => {
     const navEl = document.querySelector(`.nav-item[data-view="${view}"]`);
-    if (navEl) navEl.style.display = hasAnyPower(pwrs) ? '' : 'none';
+    const show = hasAnyPower(pwrs) || (view === 'databases' && canCreate('database'));
+    if (navEl) navEl.style.display = show ? '' : 'none';
   });
 
   const addSiteBtn = document.getElementById('add-website-header-btn');
-  if (addSiteBtn) addSiteBtn.style.display = hasPower('projects_manage') ? '' : 'none';
+  if (addSiteBtn) addSiteBtn.style.display = canCreate('website') ? '' : 'none';
   const addSvcBtn = document.getElementById('add-service-header-btn');
-  if (addSvcBtn) addSvcBtn.style.display = hasPower('services_manage') ? '' : 'none';
+  if (addSvcBtn) addSvcBtn.style.display = canCreate('service') ? '' : 'none';
   const addDbBtn = document.getElementById('add-database-header-btn');
-  if (addDbBtn) addDbBtn.style.display = hasPower('databases_manage') ? '' : 'none';
+  if (addDbBtn) addDbBtn.style.display = canCreate('database') ? '' : 'none';
   const addNodeBtn = document.getElementById('add-node-header-btn');
-  if (addNodeBtn) addNodeBtn.style.display = state.user.isMainAdmin ? '' : 'none';
+  if (addNodeBtn) addNodeBtn.style.display = isAdmin() ? '' : 'none';
 
-  const shouldLoadDbs = hasAnyPower(['databases', 'databases_manage']);
+  const shouldLoadDbs = hasAnyPower(['databases', 'databases_manage']) || canCreate('database');
   await Promise.all([
     typeof loadProjects === 'function' ? loadProjects() : (window.loadProjects ? window.loadProjects() : Promise.resolve()),
     shouldLoadDbs
@@ -389,6 +406,7 @@ export async function onAuthenticated(isFreshLogin = false) {
 export async function applyAuthSuccess(res) {
   state.pendingMfaToken = null;
   state.user = res.user;
+  state.twoFactorRequired = Boolean(res.twoFactorRequired);
   state.csrf = res.csrf;
   state.activeSessions = res.activeSessions || 1;
   state.passkeyCount = res.passkeyCount || 0;
@@ -433,9 +451,10 @@ document.getElementById('login-form')?.addEventListener('submit', async (e) => {
       return;
     }
 
+    noteLoginError('');
     await applyAuthSuccess(res);
   } catch (err) {
-    toast(err.message, 'error');
+    if (!noteLoginError(err.message)) toast(err.message, 'error');
   } finally {
     if (btn) {
       btn.disabled = false;
@@ -757,23 +776,6 @@ export async function revokeOtherSessions() {
   }
 }
 
-export async function adminResetUser2fa(userId, username) {
-  const ok = await showConfirmDialog({
-    title: 'Reset User 2FA',
-    message: `Are you sure you want to disable and reset Two-Factor Authentication for "${username}"?`,
-    confirmText: 'Reset 2FA',
-    danger: true,
-  });
-  if (!ok) return;
-  try {
-    await api(`/api/users/${userId}/reset-2fa`, { method: 'POST' });
-    toast(`Reset 2FA for "${username}".`, 'success');
-    await loadSettingsView();
-  } catch (err) {
-    toast(`Reset 2FA failed: ${err.message}`, 'error');
-  }
-}
-
 // Bind globals for onclick inline HTML handlers
 window.resetCleanUrl = resetCleanUrl;
 window.stopPolling = stopPolling;
@@ -786,6 +788,7 @@ window.stopLoginCanvasAnimation = stopLoginCanvasAnimation;
 window.togglePasswordField = togglePasswordField;
 window.toggleLoginPasswordVisibility = toggleLoginPasswordVisibility;
 window.hasPower = hasPower;
+window.canCreate = canCreate;
 window.hasAnyPower = hasAnyPower;
 window.openSecurityModal = openSecurityModal;
 window.switchSecurityTab = switchSecurityTab;
@@ -795,4 +798,3 @@ window.confirmEnable2fa = confirmEnable2fa;
 window.copyRecoveryCodes = copyRecoveryCodes;
 window.disable2fa = disable2fa;
 window.revokeOtherSessions = revokeOtherSessions;
-window.adminResetUser2fa = adminResetUser2fa;

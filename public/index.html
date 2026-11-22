@@ -22,14 +22,8 @@
     }
   </style>
   <meta name="color-scheme" content="dark light">
-  <script>
-    try {
-      var savedTheme = localStorage.getItem('webdep.theme');
-      if (savedTheme) document.documentElement.dataset.theme = savedTheme;
-      if (localStorage.getItem('webdep.sidebarCollapsed') === '1') document.documentElement.classList.add('sidebar-collapsed');
-    } catch (_) {}
-  </script>
-  <link rel="stylesheet" href="/style.css?v=3.27.0">
+  <script src="/js/boot.js"></script>
+  <link rel="stylesheet" href="/style.css?v=3.28.0">
   <link rel="modulepreload" href="/vendor/framer-motion/dom.js">
   <link rel="modulepreload" href="/js/login_motion.js">
   <link rel="modulepreload" href="/js/motion_ui.js">
@@ -98,13 +92,13 @@
         <!-- Step 1: Standard Username/Password Form (Uncluttered) -->
         <form id="login-form">
           <div class="form-group">
-            <label class="form-label" for="login-username">Username</label>
+            <label class="form-label" for="login-username">Username or email</label>
             <div class="input-with-icon">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
                 <circle cx="12" cy="7" r="4"></circle>
               </svg>
-              <input type="text" id="login-username" class="form-control" placeholder="username" required
+              <input type="text" id="login-username" class="form-control" placeholder="Username or email" required
                 autocomplete="username webauthn">
             </div>
           </div>
@@ -122,7 +116,7 @@
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
                 <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
               </svg>
-              <input type="password" id="login-password" class="form-control" placeholder="••••••••••••" required
+              <input type="password" id="login-password" class="form-control" placeholder="Password" required
                 autocomplete="current-password">
             </div>
           </div>
@@ -156,6 +150,65 @@
               <span>Sign in with Passkey</span>
             </button>
           </div>
+          <p class="login-register-hint" id="login-register-hint" hidden>
+            No account? <button type="button" class="btn-text-action" id="login-register-link">Create account</button>
+          </p>
+        </form>
+
+        <!-- Password reset (from a one-time link an admin created) -->
+        <form id="login-reset-form" style="display: none;" autocomplete="off">
+          <p class="login-register-intro">Choose a new password for your account. This link works once.</p>
+          <div class="form-group">
+            <label class="form-label" for="reset-password">New password</label>
+            <input type="password" id="reset-password" class="form-control" required minlength="8" autocomplete="new-password" placeholder="New password">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="reset-password-confirm">Confirm new password</label>
+            <input type="password" id="reset-password-confirm" class="form-control" required minlength="8" autocomplete="new-password" placeholder="Confirm new password">
+          </div>
+          <button type="submit" class="btn btn-primary btn-login-submit" id="reset-btn"><span>Set password</span></button>
+          <button type="button" class="btn-text-back" id="reset-back-btn">&larr; Back to sign-in</button>
+        </form>
+
+        <!-- Account request status (pending review / declined) -->
+        <div id="login-request-status" class="login-request-status" style="display: none;" role="status" aria-live="polite">
+          <div class="login-request-icon" id="login-request-icon" aria-hidden="true">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </div>
+          <h3 id="login-request-title">Request under review</h3>
+          <p id="login-request-text"></p>
+          <ol class="login-request-steps" id="login-request-steps">
+            <li class="is-done">Request sent</li>
+            <li class="is-current">Admin review</li>
+            <li>Sign in to the panel</li>
+          </ol>
+          <button type="button" class="btn btn-secondary btn-login-submit" id="login-request-back">Back to sign-in</button>
+        </div>
+
+        <!-- Account request (self-registration) -->
+        <form id="login-register-form" style="display: none;" autocomplete="off">
+          <p class="login-register-intro">An admin reviews every request. You can sign in once it's approved.</p>
+          <div class="form-group">
+            <label class="form-label" for="register-name">Full name</label>
+            <input type="text" id="register-name" class="form-control" maxlength="80" autocomplete="name">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="register-email">Email</label>
+            <input type="email" id="register-email" class="form-control" required autocomplete="email" placeholder="Email address">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="register-username">Username</label>
+            <input type="text" id="register-username" class="form-control" required minlength="3" maxlength="32" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="register-password">Password</label>
+            <input type="password" id="register-password" class="form-control" required minlength="8" autocomplete="new-password">
+          </div>
+          <button type="submit" class="btn btn-primary btn-login-submit" id="register-btn"><span>Send request</span></button>
+          <button type="button" class="btn-text-back" id="register-back-btn">&larr; Back to sign-in</button>
         </form>
 
         <!-- Step 2: Two-Factor Authentication Challenge -->
@@ -172,7 +225,7 @@
           <div class="form-group">
             <label class="form-label" for="login-2fa-code">Authenticator or Recovery Code</label>
             <input type="text" id="login-2fa-code" class="form-control login-2fa-input"
-              placeholder="123456 or ABCD-1234" required autocomplete="one-time-code">
+              placeholder="Authenticator or recovery code" required autocomplete="one-time-code">
           </div>
           <button type="submit" class="btn btn-primary btn-login-submit" id="login-2fa-btn">
             <span>Verify &amp; Sign In</span>
@@ -204,6 +257,7 @@
       </div>
 
       <nav class="nav-menu">
+      <div class="nav-group nav-group-main" id="nav-group-main">
         <div class="nav-section-title">Platform</div>
         <a class="nav-item active" data-view="overview">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -246,6 +300,35 @@
           <span>Databases</span>
           <span class="nav-badge" id="badge-databases-count">0</span>
         </a>
+
+      </div>
+
+      <div class="nav-group nav-group-admin" id="nav-group-admin" hidden>
+        <a class="nav-item nav-item-back" data-admin-exit>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <line x1="19" y1="12" x2="5" y2="12"></line>
+            <polyline points="12 19 5 12 12 5"></polyline>
+          </svg>
+          <span>Back to Panel</span>
+        </a>
+        <div class="nav-section-title">Admin Panel</div>
+        <a class="nav-item" data-view="users">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+            <circle cx="9" cy="7" r="4"></circle>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+          </svg>
+          <span>Users</span>
+        </a>
+        <a class="nav-item" data-view="requests">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline>
+            <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
+          </svg>
+          <span>Requests</span>
+          <span class="nav-badge nav-badge-alert" id="badge-requests-count" hidden>0</span>
+        </a>
         <a class="nav-item" data-view="nodes">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <rect x="2" y="3" width="20" height="7" rx="2"></rect>
@@ -264,8 +347,37 @@
           </svg>
           <span>VPS Modules</span>
         </a>
-
-        <div class="nav-section-title">Administration</div>
+        <a class="nav-item" data-view="ips">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path>
+            <path d="M2 12h20"></path>
+          </svg>
+          <span>IP Addresses</span>
+        </a>
+        <a class="nav-item" data-view="moves">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M8 3 4 7l4 4"></path>
+            <path d="M4 7h16"></path>
+            <path d="m16 21 4-4-4-4"></path>
+            <path d="M20 17H4"></path>
+          </svg>
+          <span>Move Apps</span>
+        </a>
+        <a class="nav-item" data-view="limits">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M4 21v-7"></path>
+            <path d="M4 10V3"></path>
+            <path d="M12 21v-9"></path>
+            <path d="M12 8V3"></path>
+            <path d="M20 21v-5"></path>
+            <path d="M20 12V3"></path>
+            <path d="M1 14h6"></path>
+            <path d="M9 8h6"></path>
+            <path d="M17 16h6"></path>
+          </svg>
+          <span>App Limits</span>
+        </a>
         <a class="nav-item" data-view="settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <circle cx="12" cy="12" r="3"></circle>
@@ -275,12 +387,33 @@
           </svg>
           <span>Platform Settings</span>
         </a>
+        <a class="nav-item" data-view="admin-audit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+          </svg>
+          <span>Audit</span>
+        </a>
+      </div>
+
       </nav>
 
       <div class="sidebar-footer" style="flex-direction: column; align-items: stretch; gap: 8px;">
+        <div class="nav-group nav-group-account">
+          <a class="nav-item nav-item-admin-entry" data-admin-enter hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+              <polyline points="9 12 11 14 15 10"></polyline>
+            </svg>
+            <span>Admin Panel</span>
+            <span class="nav-badge nav-badge-alert" id="badge-admin-requests" hidden>0</span>
+          </a>
+        </div>
         <div class="sidebar-user-row" style="display: flex; align-items: center; justify-content: space-between;">
-          <div class="user-snippet" id="user-profile-snippet" style="cursor: pointer;"
-            title="Open Account Security (Password & 2FA)">
+          <div class="user-snippet" id="user-profile-snippet" data-view="account" role="button" tabindex="0" style="cursor: pointer;"
+            title="My Account" aria-label="My Account">
             <div class="user-avatar" id="current-user-avatar">AD</div>
             <div class="user-info">
               <span class="user-name" id="current-user-name">Admin</span>
@@ -408,6 +541,14 @@
               </svg>
               <span>Releases</span>
             </button>
+            <button class="ws-tab-item" data-ws-tab="backups" onclick="switchWebsiteTab('backups')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <polyline points="21 8 21 21 3 21 3 8"></polyline>
+                <rect x="1" y="3" width="22" height="5"></rect>
+                <line x1="10" y1="12" x2="14" y2="12"></line>
+              </svg>
+              <span>Backups</span>
+            </button>
             <button class="ws-tab-item" data-ws-tab="rollbacks" onclick="switchWebsiteTab('rollbacks')"
               style="display: none;">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -429,6 +570,13 @@
                 <polyline points="12 6 12 12 16 14"></polyline>
               </svg>
               <span>Activity</span>
+            </button>
+            <button class="ws-tab-item" data-ws-tab="access" onclick="switchWebsiteTab('access')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+              </svg>
+              <span>Permissions</span>
             </button>
           </div>
         </div>
@@ -949,34 +1097,37 @@
               <div class="pagination-bar" id="releases-pagination"></div>
             </div>
           </div>
+        </section>
 
-          <div class="card" style="margin-top: 16px;">
-            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
-              <div>
-                <span class="card-title">Snapshots &amp; Off-Node Backups</span>
-                <span style="font-size: 12px; color: var(--text-dim); margin-left: 8px;">Off-Node archives are stored on Web-Core for cross-node disaster recovery</span>
-              </div>
-              <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); cursor: pointer;">
-                  <input type="checkbox" id="backup-offnode-checkbox" checked>
-                  <span>Off-Node Archive (Web-Core)</span>
-                </label>
-                <button class="btn btn-secondary btn-sm" id="create-backup-snapshot-btn" onclick="createProjectBackupSnapshot()">
-                  + Take Snapshot
-                </button>
-              </div>
+        <!-- ==================== BACKUPS VIEW ==================== -->
+        <section id="view-backups" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Backups</h1>
+              <p id="backups-view-subtitle">Manual backups of this app. Restoring replaces its files and settings with the backup.</p>
             </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header bk-header">
+              <div>
+                <span class="card-title">Backups</span>
+                <span class="bk-usage" id="backups-usage"></span>
+              </div>
+              <button class="btn btn-primary btn-sm" id="create-backup-snapshot-btn" onclick="openCreateBackupModal()">Create backup</button>
+            </div>
+            <div class="bk-banner" id="backups-restore-banner" role="status" hidden></div>
             <div class="card-body" style="padding: 0;">
               <div class="table-responsive">
-                <table class="table">
+                <table class="table bk-table">
                   <thead>
                     <tr>
                       <th>Backup</th>
+                      <th>Status</th>
                       <th>Storage</th>
                       <th>Size</th>
-                      <th>Note</th>
                       <th>Created</th>
-                      <th>Restore Target &amp; Actions</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody id="backups-table-body">
@@ -1401,12 +1552,12 @@
               <div class="env-quick-field env-quick-key">
                 <label class="env-quick-label" for="env-quick-key-input">Key</label>
                 <input type="text" id="env-quick-key-input" class="form-control env-mono-input"
-                  placeholder="e.g. API_SECRET (or paste KEY=VALUE)" autocomplete="off">
+                  placeholder="Variable name (or paste KEY=VALUE)" autocomplete="off">
               </div>
               <div class="env-quick-field env-quick-val">
                 <label class="env-quick-label" for="env-quick-val-input">Value</label>
                 <input type="text" id="env-quick-val-input" class="form-control env-mono-input"
-                  placeholder="e.g. your-secret-value" autocomplete="off">
+                  placeholder="Variable value" autocomplete="off">
               </div>
               <div class="env-quick-field env-quick-type">
                 <span class="env-quick-label">Visibility</span>
@@ -1572,7 +1723,7 @@
                 </div>
               </div>
               <textarea id="env-raw-editor-textarea" class="form-control env-raw-textarea" rows="16" spellcheck="false"
-                placeholder="# Paste or edit your .env variables here&#10;PORT=3000&#10;NODE_ENV=production&#10;JWT_SECRET=your-secret-key"
+                placeholder="Paste or edit KEY=VALUE lines, one per line"
                 aria-label="Raw .env editor"></textarea>
               <div
                 style="display: flex; justify-content: space-between; align-items: center; margin-top: 12px; flex-wrap: wrap; gap: 10px;">
@@ -1651,66 +1802,12 @@
         <section id="view-settings" class="view-section">
           <div class="view-header">
             <div class="view-title-group">
-              <h1>Settings</h1>
+              <h1>Platform Settings</h1>
             </div>
           </div>
 
           <div class="settings-cards-grid">
-            <!-- 1. Account Security Card -->
-            <div class="project-card settings-card" id="settings-security-card">
-              <div class="project-card-header"
-                style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
-                <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
-                  <div class="project-card-icon" style="color: var(--text-main);">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                      stroke-linejoin="round">
-                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-                    </svg>
-                  </div>
-                  <div style="min-width: 0;">
-                    <div class="project-info-title" style="font-size: 15px; font-weight: 500;">
-                      <span>Account Security</span>
-                    </div>
-                    <div
-                      style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
-                      Passkeys &bull; TOTP 2FA &bull; Sessions
-                    </div>
-                  </div>
-                </div>
-                <span class="badge badge-neutral" id="settings-2fa-status-badge"
-                  style="flex-shrink: 0;">Checking</span>
-              </div>
-
-              <div class="settings-sec-summary-row">
-                <div class="settings-sec-item">
-                  <div class="settings-sec-label">User</div>
-                  <div class="settings-sec-val" id="settings-sec-username">admin</div>
-                </div>
-                <div class="settings-sec-item">
-                  <div class="settings-sec-label">Passkeys</div>
-                  <div class="settings-sec-val" id="settings-sec-passkeys-text">None</div>
-                </div>
-                <div class="settings-sec-item">
-                  <div class="settings-sec-label">2FA (TOTP)</div>
-                  <div class="settings-sec-val" id="settings-sec-2fa-text">Disabled</div>
-                </div>
-                <div class="settings-sec-item">
-                  <div class="settings-sec-label">Sessions</div>
-                  <div class="settings-sec-val" id="settings-sec-sessions">1 active</div>
-                </div>
-              </div>
-
-              <div class="project-card-actions" style="justify-content: flex-start;">
-                <button type="button" class="btn btn-primary btn-sm" id="settings-open-passkeys-btn"
-                  onclick="openSecurityModal('passkeys')">Passkeys</button>
-                <button type="button" class="btn btn-secondary btn-sm"
-                  onclick="openSecurityModal('password')">Password</button>
-                <button type="button" class="btn btn-secondary btn-sm" id="settings-open-2fa-btn"
-                  onclick="openSecurityModal('2fa')">2FA</button>
-                <button type="button" class="btn btn-secondary btn-sm" onclick="revokeOtherSessions()">Revoke</button>
-              </div>
-            </div>
-
+            <div class="settings-section-label">Platform</div>
             <!-- 3. Platform Version & 1-Click Self-Update Card -->
             <div class="project-card settings-card" id="settings-update-card">
               <div class="project-card-header"
@@ -1755,7 +1852,7 @@
 
               <div style="display: flex; align-items: center; gap: 8px;">
                 <input type="text" class="form-control" id="platform-update-repo-input"
-                  placeholder="owner/repo or https://github.com/owner/repo.git"
+                  placeholder="Repository (owner/name or Git URL)"
                   style="flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11.5px;"
                   aria-label="Platform update repository">
                 <button type="button" class="btn btn-secondary btn-sm" id="save-platform-repo-btn"
@@ -1817,6 +1914,53 @@
               </div>
             </div>
 
+            <div class="project-card settings-card settings-card-accounts" id="settings-accounts-card">
+              <div class="project-card-header" style="min-height: 40px; display: flex; align-items: center;">
+                <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
+                  <div class="project-card-icon" style="color: var(--text-main);">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                  </div>
+                  <div style="min-width: 0;">
+                    <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Accounts &amp; sign-in</span></div>
+                    <div style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">Who can ask for an account &bull; Two-factor rules</div>
+                  </div>
+                </div>
+              </div>
+              <div class="settings-accounts-grid">
+                <div class="settings-accounts-col">
+                  <label class="acct-switch-row">
+                    <span>
+                      <strong>Allow self-registration</strong>
+                      <small>Shows "Create account" on the sign-in page. Requests wait in Admin Panel &rsaquo; Requests.</small>
+                    </span>
+                    <input type="checkbox" id="setting-allow-registration" class="acct-switch">
+                  </label>
+                  <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label" for="setting-registration-domains">Allowed email domains for requests</label>
+                    <input type="text" id="setting-registration-domains" class="form-control" placeholder="Email domains, comma separated (empty: any)">
+                    <span class="form-hint">Only these domains can request an account. Leave empty to allow any.</span>
+                  </div>
+                </div>
+                <div class="settings-accounts-col">
+                  <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label" for="setting-require-2fa">Require two-factor authentication</label>
+                    <select id="setting-require-2fa" class="form-control">
+                      <option value="off">Off</option>
+                      <option value="admins">For admins</option>
+                      <option value="everyone">For everyone</option>
+                    </select>
+                    <span class="form-hint">People without it are asked to set it up before they can use the panel.</span>
+                  </div>
+                  <div class="settings-accounts-actions">
+                    <button type="button" class="btn btn-primary btn-sm" id="setting-accounts-save">Save account rules</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section-label">Deploy &amp; integrations</div>
             <!-- 2. GitHub Tokens & Deploy Defaults Card -->
             <div class="project-card settings-card settings-card-wide" id="settings-global-config-card">
               <div class="project-card-header"
@@ -1885,7 +2029,8 @@
               </form>
             </div>
 
-            <!-- 5. Platform Appearance & Predefined Themes Card -->
+            <div class="settings-section-label">Appearance</div>
+
             <div class="project-card settings-card settings-card-wide" id="settings-theme-card">
               <div class="project-card-header"
                 style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
@@ -1922,57 +2067,264 @@
             </div>
 
             <!-- 6. User Permissions Card (Full Width Table Card) -->
-            <div class="project-card settings-card settings-card-wide" id="settings-users-card">
+          </div>
+        </section>
+
+        <!-- ==================== MY ACCOUNT VIEW ==================== -->
+        <section id="view-account" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>My Account</h1>
+              <p>Your profile, sign-in security, and what you can access</p>
+            </div>
+          </div>
+          <div class="settings-cards-grid">
+            <div class="project-card settings-card" id="account-profile-card">
+              <div class="project-card-header" style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
+                <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Profile</span></div>
+                <span class="badge badge-neutral" id="account-role-badge">User</span>
+              </div>
+              <form id="account-profile-form" class="acct-form" autocomplete="off">
+                <div class="form-group">
+                  <label class="form-label" for="account-username">Username</label>
+                  <input type="text" id="account-username" class="form-control" disabled>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="account-display-name">Full name</label>
+                  <input type="text" id="account-display-name" class="form-control" maxlength="80">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="account-email">Email</label>
+                  <input type="email" id="account-email" class="form-control" placeholder="Email address">
+                </div>
+                <div class="project-card-actions" style="justify-content: flex-start;">
+                  <button type="submit" class="btn btn-primary btn-sm" id="account-profile-save">Save profile</button>
+                </div>
+              </form>
+            </div>
+            <!-- Account security (password, passkeys, 2FA, sessions) -->
+            <div class="project-card settings-card" id="settings-security-card">
               <div class="project-card-header"
                 style="min-height: 40px; display: flex; justify-content: space-between; align-items: center;">
                 <div style="display: flex; align-items: center; gap: 12px; min-width: 0;">
                   <div class="project-card-icon" style="color: var(--text-main);">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
                       stroke-linejoin="round">
-                      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                      <circle cx="9" cy="7" r="4"></circle>
-                      <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-                      <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                     </svg>
                   </div>
                   <div style="min-width: 0;">
                     <div class="project-info-title" style="font-size: 15px; font-weight: 500;">
-                      <span>User Permissions</span>
-                      <span class="badge badge-neutral" id="settings-users-count-badge"
-                        style="font-size: 10.5px;">RBAC</span>
+                      <span>Account Security</span>
                     </div>
                     <div
                       style="font-size: 12px; color: var(--text-dim); margin-top: 2px;">
-                      Access &amp; Powers &bull; 2FA &bull; Scope
+                      Passkeys &bull; TOTP 2FA &bull; Sessions
                     </div>
                   </div>
                 </div>
-                <button class="btn btn-primary btn-sm" id="create-user-modal-btn">+ Add User</button>
+                <span class="badge badge-neutral" id="settings-2fa-status-badge"
+                  style="flex-shrink: 0;">Checking</span>
               </div>
 
-              <div class="table-responsive"
-                style="border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-alt);">
-                <table class="table tbl-users">
-                  <thead>
-                    <tr>
-                      <th>User</th>
-                      <th>2FA</th>
-                      <th>Websites</th>
-                      <th>Powers</th>
-                      <th>Status</th>
-                      <th style="text-align: right;">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody id="users-table-body">
-                    <tr>
-                      <td colspan="6" style="text-align: center; padding: 24px;">Loading users</td>
-                    </tr>
-                  </tbody>
-                </table>
+              <div class="settings-sec-summary-row">
+                <div class="settings-sec-item">
+                  <div class="settings-sec-label">User</div>
+                  <div class="settings-sec-val" id="settings-sec-username">admin</div>
+                </div>
+                <div class="settings-sec-item">
+                  <div class="settings-sec-label">Passkeys</div>
+                  <div class="settings-sec-val" id="settings-sec-passkeys-text">None</div>
+                </div>
+                <div class="settings-sec-item">
+                  <div class="settings-sec-label">2FA (TOTP)</div>
+                  <div class="settings-sec-val" id="settings-sec-2fa-text">Disabled</div>
+                </div>
+                <div class="settings-sec-item">
+                  <div class="settings-sec-label">Sessions</div>
+                  <div class="settings-sec-val" id="settings-sec-sessions">1 active</div>
+                </div>
               </div>
-              <div class="pagination-bar settings-users-pagination" id="users-pagination"></div>
+
+              <div class="project-card-actions" style="justify-content: flex-start;">
+                <button type="button" class="btn btn-primary btn-sm" id="settings-open-passkeys-btn"
+                  onclick="openSecurityModal('passkeys')">Passkeys</button>
+                <button type="button" class="btn btn-secondary btn-sm"
+                  onclick="openSecurityModal('password')">Password</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="settings-open-2fa-btn"
+                  onclick="openSecurityModal('2fa')">2FA</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="revokeOtherSessions()">Revoke</button>
+              </div>
+            </div>
+
+            <div class="project-card settings-card settings-card-wide" id="account-sessions-card">
+              <div class="project-card-header" style="min-height: 40px;">
+                <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Where you're signed in</span></div>
+              </div>
+              <div id="account-sessions-body"></div>
+            </div>
+            <div class="project-card settings-card settings-card-wide" id="account-access-card">
+              <div class="project-card-header" style="min-height: 40px;">
+                <div class="project-info-title" style="font-size: 15px; font-weight: 500;"><span>Your access</span></div>
+              </div>
+              <div id="account-access-body" class="acct-myaccess"></div>
             </div>
           </div>
+        </section>
+
+        <!-- ==================== ADMIN: USERS VIEW ==================== -->
+        <section id="view-users" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Users</h1>
+              <p>Accounts that can sign in to this panel</p>
+            </div>
+            <div class="view-actions">
+              <input type="text" id="users-search-input" class="form-control" placeholder="Search users" style="width: 220px;" autocomplete="off">
+              <button class="btn btn-primary" id="users-create-btn" hidden>Create account</button>
+            </div>
+          </div>
+          <div class="table-responsive acct-table-wrap">
+            <table class="table acct-table">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Role</th>
+                  <th>Access</th>
+                  <th>2FA</th>
+                  <th>Status</th>
+                  <th>Last sign-in</th>
+                  <th style="text-align: right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="users-list-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ==================== ADMIN: REQUESTS VIEW ==================== -->
+        <section id="view-requests" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Requests</h1>
+              <p>Account requests from the sign-in page. An account exists only after approval.</p>
+            </div>
+            <div class="view-actions">
+              <div class="filter-pills" id="requests-filter">
+                <button class="pill active" data-requests-filter="pending">Pending</button>
+                <button class="pill" data-requests-filter="all">History</button>
+              </div>
+            </div>
+          </div>
+          <div class="table-responsive acct-table-wrap">
+            <table class="table acct-table">
+              <thead>
+                <tr>
+                  <th>Person</th>
+                  <th>Email</th>
+                  <th>Requested</th>
+                  <th>Status</th>
+                  <th style="text-align: right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="requests-list-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ==================== ADMIN: AUDIT VIEW ==================== -->
+        <section id="view-admin-audit" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Audit</h1>
+              <p>Every action taken across the panel, newest first</p>
+            </div>
+            <div class="view-actions">
+              <input type="text" id="admin-audit-actor" class="form-control" placeholder="User name" style="width: 150px;" autocomplete="off" aria-label="Filter by user">
+              <input type="text" id="admin-audit-search" class="form-control" placeholder="Search action, target, or details" style="width: 240px;" autocomplete="off" aria-label="Search the audit log">
+              <button type="button" class="btn btn-secondary btn-sm" id="admin-audit-export">Export CSV</button>
+            </div>
+          </div>
+          <div class="table-responsive acct-table-wrap">
+            <table class="table acct-table">
+              <thead>
+                <tr><th>When</th><th>User</th><th>Action</th><th>Target</th><th>Details</th></tr>
+              </thead>
+              <tbody id="admin-audit-body"></tbody>
+            </table>
+          </div>
+          <div class="maint-more"><button type="button" class="btn btn-secondary btn-sm" id="admin-audit-more" hidden>Load more</button></div>
+        </section>
+
+        <!-- ==================== ADMIN: IP ADDRESSES VIEW ==================== -->
+        <section id="view-ips" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>IP Addresses</h1>
+              <p>Each node's ports: open or close them, set the range, and move apps between ports or nodes.</p>
+            </div>
+            <div class="view-actions">
+              <input type="text" id="ips-search" class="form-control" placeholder="Search a port or app" style="width: 220px;" autocomplete="off">
+              <button class="btn btn-secondary btn-sm" onclick="window.loadIpsView && window.loadIpsView()">Refresh</button>
+            </div>
+          </div>
+          <div id="ips-view-body" class="ip-view-body"></div>
+        </section>
+
+        <!-- ==================== ADMIN: MOVE APPS VIEW ==================== -->
+        <!-- ==================== ADMIN: APP LIMITS VIEW ==================== -->
+        <section id="view-limits" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>App Limits</h1>
+              <p>CPU, memory, disk, and backup limits for every website, service, and database. Empty or 0 means no limit.</p>
+            </div>
+            <div class="view-actions">
+              <input type="text" id="limits-search" class="form-control" placeholder="Search apps, types, or nodes" style="width: 240px;" autocomplete="off">
+            </div>
+          </div>
+          <div id="limits-banner" class="acct-callout" hidden></div>
+          <div id="isolation-banner" class="acct-callout" hidden></div>
+          <div class="table-responsive acct-table-wrap">
+            <table class="table acct-table lim-table">
+              <thead>
+                <tr><th>App</th><th>Type</th><th>Node</th><th>CPU (% of a core)</th><th>Memory (MB)</th><th>Disk</th><th>Backups</th><th style="text-align: right;">Action</th></tr>
+              </thead>
+              <tbody id="limits-list-body"></tbody>
+            </table>
+          </div>
+          <p class="acct-muted" style="margin-top:10px">CPU and memory are enforced on Linux servers (as root) and on Windows. Limits are checked shortly after an app starts or restarts and then every 2 minutes. An app that grows past its disk limit is stopped and can't be started until it is under the limit; an app at its memory or CPU limit keeps running but is slowed down. In each case the people who can see the app get a pop-up explaining it. Backups is the most an app can hold at a time.</p>
+        </section>
+
+        <section id="view-moves" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Move Apps</h1>
+              <p>Move a website or service to another node. Only admins can do this.</p>
+            </div>
+            <div class="view-actions">
+              <input type="text" id="moves-search" class="form-control" placeholder="Search apps, nodes, or IPs" style="width: 240px;" autocomplete="off">
+            </div>
+          </div>
+          <div class="table-responsive acct-table-wrap">
+            <table class="table acct-table">
+              <thead>
+                <tr><th>App</th><th>Type</th><th>Node</th><th>Port</th><th>Status</th><th style="text-align: right;">Action</th></tr>
+              </thead>
+              <tbody id="moves-list-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ==================== APP PERMISSIONS TAB ==================== -->
+        <section id="view-access" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1 id="access-view-title">Permissions</h1>
+              <p id="access-view-subtitle">Who can use this app, and what they can do</p>
+            </div>
+          </div>
+          <div id="access-view-body" class="acct-access-panel"></div>
         </section>
 
         <!-- ==================== 11C. CLUSTER NODES VIEW ==================== -->
@@ -2045,6 +2397,7 @@
             </div>
             <div class="view-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
               <button class="btn btn-secondary btn-sm" onclick="window.loadModulesView && window.loadModulesView(true)">Rescan</button>
+              <button class="btn btn-primary btn-sm" id="modules-add-btn" onclick="window.openCustomModuleEditor && window.openCustomModuleEditor()" style="display: none;">Add module</button>
             </div>
           </div>
 
@@ -2195,11 +2548,11 @@
             style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; margin-bottom: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-name">Website Name *</label>
-              <input type="text" id="website-name" class="form-control" placeholder="e.g. LSMD Portal" required>
+              <input type="text" id="website-name" class="form-control" placeholder="Website name" required>
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-port">Port *</label>
-              <input type="number" id="website-port" class="form-control" placeholder="3000" required min="1"
+              <input type="number" id="website-port" class="form-control" placeholder="Port" required min="1"
                 max="65535">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
@@ -2220,14 +2573,14 @@
                   Repos &nearr;</a>
               </div>
               <input type="text" id="website-repo" class="form-control"
-                placeholder="https://github.com/owner/repo.git (optional)">
+                placeholder="Git repository URL (optional)">
               <select id="github-repos-select" class="form-control"
                 style="display: none; margin-top: 6px; font-size: 12px;" aria-label="Select GitHub repository"></select>
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-domains">Custom Domains <span
                   style="color:var(--text-dim); font-weight:400;">(optional)</span></label>
-              <input type="text" id="website-domains" class="form-control" placeholder="app.example.com">
+              <input type="text" id="website-domains" class="form-control" placeholder="Domain name">
             </div>
           </div>
 
@@ -2236,15 +2589,15 @@
             style="display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; margin-bottom: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-install-cmd">Install Command</label>
-              <input type="text" id="website-install-cmd" class="form-control" placeholder="npm ci">
+              <input type="text" id="website-install-cmd" class="form-control" placeholder="Install command">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-build-cmd">Build Command</label>
-              <input type="text" id="website-build-cmd" class="form-control" placeholder="npm run build">
+              <input type="text" id="website-build-cmd" class="form-control" placeholder="Build command">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="website-start-cmd">Start Command *</label>
-              <input type="text" id="website-start-cmd" class="form-control" placeholder="node server.js" required>
+              <input type="text" id="website-start-cmd" class="form-control" placeholder="Start command" required>
             </div>
           </div>
 
@@ -2270,11 +2623,13 @@
           <div class="form-group" id="website-allowed-ips-wrap" style="display: none; margin-bottom: 12px;">
             <label class="form-label" for="website-allowed-ips">Allowed Client IP Addresses / CIDRs</label>
             <textarea id="website-allowed-ips" class="form-control" rows="2"
-              placeholder="e.g. 203.0.113.80, 198.51.100.0/24 (comma or newline separated)"
+              placeholder="IP addresses or CIDR ranges, comma or newline separated"
               style="font-family: var(--font-mono); font-size: 12.5px;"></textarea>
             <span class="form-hint">Firewall rules (UFW) will be configured to strictly permit connections to this port
               from these remote IPs.</span>
           </div>
+
+          <div id="website-limits-slot" class="limits-slot"></div>
 
           <!-- Hidden defaults: auto-deploy disabled by default, slug and deploy dir auto-derived -->
           <input type="checkbox" id="website-auto-deploy" style="display: none;" aria-label="Enable auto deploy">
@@ -2355,7 +2710,7 @@
             style="display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="service-name">Service Name *</label>
-              <input type="text" id="service-name" class="form-control" placeholder="e.g. My Backend Service" required>
+              <input type="text" id="service-name" class="form-control" placeholder="Service name" required>
             </div>
             <div class="form-group" id="service-branch-group" style="margin-bottom: 0; display: none;">
               <label class="form-label" for="service-branch">Branch *</label>
@@ -2372,7 +2727,7 @@
                 Repos &nearr;</a>
             </div>
             <input type="text" id="service-repo" class="form-control"
-              placeholder="https://github.com/owner/repository.git">
+              placeholder="Git repository URL">
             <select id="service-github-repos-select" class="form-control"
               style="display: none; margin-top: 6px; font-size: 12px;" aria-label="Select GitHub repository"></select>
           </div>
@@ -2384,12 +2739,12 @@
               <label class="form-label" for="service-install-cmd">Install Command <span
                   style="color:var(--text-dim); font-weight:400;">(optional)</span></label>
               <input type="text" id="service-install-cmd" class="form-control"
-                placeholder="e.g. npm ci or pip install -r requirements.txt">
+                placeholder="Install command">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="service-start-cmd">Start Command *</label>
               <input type="text" id="service-start-cmd" class="form-control"
-                placeholder="e.g. java -jar Lavalink.jar or node index.js" required>
+                placeholder="Start command" required>
             </div>
           </div>
 
@@ -2398,13 +2753,13 @@
             style="display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-bottom: 12px;">
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="service-port">Assigned Port *</label>
-              <input type="number" id="service-port" class="form-control" placeholder="e.g. 1112 or 8000" min="1"
+              <input type="number" id="service-port" class="form-control" placeholder="Port" min="1"
                 max="65535" required>
             </div>
             <div class="form-group" style="margin-bottom: 0;">
               <label class="form-label" for="service-domain">Custom Domain <span
                   style="color:var(--text-dim); font-weight:400;">(optional)</span></label>
-              <input type="text" id="service-domain" class="form-control" placeholder="e.g. service.yourdomain.com">
+              <input type="text" id="service-domain" class="form-control" placeholder="Domain name">
             </div>
           </div>
 
@@ -2430,11 +2785,13 @@
           <div class="form-group" id="service-allowed-ips-wrap" style="display: none; margin-bottom: 12px;">
             <label class="form-label" for="service-allowed-ips">Allowed Client IP Addresses / CIDRs</label>
             <textarea id="service-allowed-ips" class="form-control" rows="2"
-              placeholder="e.g. 203.0.113.80, 198.51.100.0/24 (comma or newline separated)"
+              placeholder="IP addresses or CIDR ranges, comma or newline separated"
               style="font-family: var(--font-mono); font-size: 12.5px;"></textarea>
             <span class="form-hint">Firewall rules (UFW) will be configured to strictly permit connections to this port
               from these remote IPs.</span>
           </div>
+
+          <div id="service-limits-slot" class="limits-slot"></div>
 
           <input type="hidden" id="service-slug">
           <input type="hidden" id="service-deploy-dir">
@@ -2469,7 +2826,7 @@
             </label>
             <div style="display: flex; gap: 8px;">
               <input type="text" id="caddy-domains-input" class="form-control"
-                placeholder="e.g. portal.example.com, app.example.com">
+                placeholder="Domain names, comma separated">
               <button class="btn btn-primary" id="caddy-save-domains-btn" onclick="saveCaddyDomains()"
                 style="white-space: nowrap;">Save &amp; Apply</button>
             </div>
@@ -2498,88 +2855,6 @@
   </div>
 
   <!-- ADD / BULK ENV VAR MODAL -->
-  <div class="modal-overlay" id="modal-env">
-    <div class="modal-container" style="max-width: 620px; width: 94%;">
-      <div class="modal-header">
-        <h3 class="modal-title" id="env-modal-title">Add Environment Variable</h3>
-        <button class="modal-close" data-close-modal>&times;</button>
-      </div>
-      <div class="modal-body">
-        <!-- Target Website Indicator in Modal -->
-        <div
-          style="display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; border: 1px solid var(--border-subtle); font-size: 12px;">
-          <span style="color: var(--text-muted);">Target Website:</span>
-          <strong id="env-modal-target-project" style="color: var(--accent-light);">Loading</strong>
-        </div>
-
-        <!-- Mode Switch Tabs -->
-        <div class="env-mode-tabs"
-          style="display: flex; gap: 4px; background: var(--bg-input); padding: 4px; border-radius: 8px; margin-bottom: 16px; border: 1px solid var(--border-subtle);">
-          <button type="button" class="env-mode-tab active" id="tab-env-single" onclick="switchEnvModalTab('single')"
-            style="flex: 1; padding: 8px 12px; background: var(--bg-card); border: 1px solid var(--border-medium); border-radius: 6px; color: var(--text-main); font-size: 13px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px;">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            <span>Single Variable</span>
-          </button>
-          <button type="button" class="env-mode-tab" id="tab-env-bulk" onclick="switchEnvModalTab('bulk')"
-            style="flex: 1; padding: 8px 12px; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); font-size: 13px; font-weight: 500; cursor: pointer;">
-            Bulk .env File
-          </button>
-        </div>
-
-        <!-- Mode 1: Single Variable Form -->
-        <div id="env-section-single">
-          <form id="add-env-form" autocomplete="off" onsubmit="handleSaveEnv(event); return false;">
-            <div class="form-group">
-              <label class="form-label" for="env-key-input">Variable Key *</label>
-              <input type="text" id="env-key-input" class="form-control" placeholder="API_SECRET" autocomplete="off">
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="env-value-input">Value *</label>
-              <textarea id="env-value-input" class="form-control" rows="3" placeholder="your-secret-value" autocomplete="off"></textarea>
-            </div>
-            <div class="form-group">
-              <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-                <input type="checkbox" id="env-secret-checkbox" checked>
-                Mask as Sensitive Secret (AES-256-GCM encrypted)
-              </label>
-            </div>
-          </form>
-        </div>
-
-        <!-- Mode 2: Bulk .env File Form -->
-        <div id="env-section-bulk" style="display: none;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <label class="form-label" for="env-bulk-input" style="margin-bottom: 0;">Copy & Paste Raw .env File</label>
-            <button type="button" class="btn btn-secondary btn-sm" id="env-load-existing-btn" onclick="loadCurrentEnv()"
-              style="font-size: 11px; padding: 4px 8px;">
-              Load Current .env
-            </button>
-          </div>
-          <div class="form-group">
-            <textarea id="env-bulk-input" class="form-control" rows="11"
-              placeholder="# Paste your .env file here&#10;PORT=3000&#10;JWT_SECRET=supersecret123&#10;NODE_ENV=production"
-              style="font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.5; tab-size: 2; white-space: pre;"></textarea>
-            <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Supports KEY=VALUE, comments (#),
-              optional "export", and quoted strings.</p>
-          </div>
-          <div class="form-group" style="display: flex; flex-direction: column; gap: 8px;">
-            <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-              <input type="checkbox" id="env-bulk-secret-checkbox" checked>
-              Mask imported variables as Sensitive Secrets
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-              <input type="checkbox" id="env-bulk-replace-checkbox">
-              Replace ALL existing variables (Warning: deletes variables not in this list)
-            </label>
-          </div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" data-close-modal>Cancel</button>
-        <button class="btn btn-primary" id="save-env-btn" onclick="handleSaveEnv(event)">Save Variable</button>
-      </div>
-    </div>
-  </div>
 
   <!-- REVEAL PASSWORD CONFIRMATION MODAL -->
   <div class="modal-overlay" id="modal-reveal">
@@ -2623,155 +2898,112 @@
     </div>
   </div>
 
-  <!-- CREATE / EDIT USER MODAL -->
-  <div class="modal-overlay" id="modal-create-user">
-    <div class="modal-container user-access-modal" style="max-width: 600px;">
+  <!-- CUSTOM MODULE EDITOR (Admin Panel > VPS Modules) -->
+  <div class="modal-overlay" id="modal-custom-module">
+    <div class="modal-container" style="max-width: 620px;">
       <div class="modal-header">
-        <h3 class="modal-title" id="user-modal-title">Create Platform User</h3>
+        <h3 class="modal-title" id="custom-module-title">Add module</h3>
         <button class="modal-close" data-close-modal>&times;</button>
       </div>
       <div class="modal-body">
-        <form id="create-user-form" autocomplete="off">
-          <input type="hidden" id="user-edit-id" value="">
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label" for="user-new-username">Username *</label>
-              <input type="text" id="user-new-username" class="form-control" placeholder="e.g. dev_alex" required autocomplete="off">
-            </div>
-            <div class="form-group">
-              <label class="form-label" for="user-new-password" id="user-password-label">Password (min 6 chars)
-                *</label>
-              <input type="password" id="user-new-password" class="form-control" minlength="6" placeholder="••••••••" autocomplete="new-password">
-            </div>
+        <form id="custom-module-form" autocomplete="off">
+          <input type="hidden" id="cm-id">
+          <p class="acct-editor-note" style="margin-top:0">Adds a tool to the module list on every VPS. The panel installs it with the server's own package manager and checks it by running the command below.</p>
+          <div class="acct-grid-2">
+            <div class="form-group"><label class="form-label" for="cm-name">Name</label>
+              <input id="cm-name" class="form-control" maxlength="40" placeholder="Module name" required></div>
+            <div class="form-group"><label class="form-label" for="cm-command">Check command</label>
+              <input id="cm-command" class="form-control" maxlength="64" placeholder="Command name" required></div>
+            <div class="form-group"><label class="form-label" for="cm-version">Version flag</label>
+              <input id="cm-version" class="form-control" maxlength="80" placeholder="Version flag"></div>
+            <div class="form-group"><label class="form-label" for="cm-desc">Description</label>
+              <input id="cm-desc" class="form-control" maxlength="200" placeholder="Short description"></div>
           </div>
-
-          <div class="ua-section">
-            <div class="ua-section-title">What can this user do?</div>
-            <div class="ua-roles" role="group" aria-label="Access level">
-              <button type="button" class="ua-role" data-user-role="readonly" onclick="setUserPowerPreset('readonly')">
-                <span class="ua-role-name">Viewer</span>
-                <span class="ua-role-desc">Can look, can't change anything</span>
-              </button>
-              <button type="button" class="ua-role" data-user-role="defaults" onclick="setUserPowerPreset('defaults')">
-                <span class="ua-role-name">Developer</span>
-                <span class="ua-role-desc">Deploy, restart, files and backups</span>
-              </button>
-              <button type="button" class="ua-role" data-user-role="all" onclick="setUserPowerPreset('all')">
-                <span class="ua-role-name">Full access</span>
-                <span class="ua-role-desc">Every permission</span>
-              </button>
-              <button type="button" class="ua-role" data-user-role="custom" onclick="setUserPowerPreset('custom')">
-                <span class="ua-role-name">Custom</span>
-                <span class="ua-role-desc">Pick permissions yourself</span>
-              </button>
-            </div>
-            <details class="ua-perms" id="user-perms-details">
-              <summary><span id="user-perms-summary">Permissions</span></summary>
-              <div class="ua-perms-body">
-              <div class="ua-perm-group">
-                <div class="ua-perm-group-title">Apps</div>
-                <div class="ua-perm-grid">
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="deploy" checked>
-                    <span><span class="ua-perm-name">Deploy &amp; roll back</span><span class="ua-perm-hint">Ship new code, redeploy, roll back</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="process" checked>
-                    <span><span class="ua-perm-name">Start, stop &amp; restart</span><span class="ua-perm-hint">Control running apps</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="projects_manage">
-                    <span><span class="ua-perm-name">Add &amp; delete websites</span><span class="ua-perm-hint">Create, edit and remove websites</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="services_manage">
-                    <span><span class="ua-perm-name">Add &amp; delete services</span><span class="ua-perm-hint">Create, edit and remove services</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="domains">
-                    <span><span class="ua-perm-name">Domains &amp; SSL</span><span class="ua-perm-hint">Attach domains, manage certificates</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="backups" checked>
-                    <span><span class="ua-perm-name">Backups</span><span class="ua-perm-hint">Create and restore backups</span></span>
-                  </label>
-                </div>
-              </div>
-              <div class="ua-perm-group">
-                <div class="ua-perm-group-title">Files &amp; data</div>
-                <div class="ua-perm-grid">
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="files" checked>
-                    <span><span class="ua-perm-name">View files</span><span class="ua-perm-hint">Browse and download</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="files_write">
-                    <span><span class="ua-perm-name">Edit files</span><span class="ua-perm-hint">Upload, edit and delete</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="env">
-                    <span><span class="ua-perm-name">Environment variables</span><span class="ua-perm-hint">See and change .env secrets</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="databases">
-                    <span><span class="ua-perm-name">Use databases</span><span class="ua-perm-hint">Start, stop and view logs</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="databases_manage">
-                    <span><span class="ua-perm-name">Manage databases</span><span class="ua-perm-hint">Create, expose and delete</span></span>
-                  </label>
-                </div>
-              </div>
-              <div class="ua-perm-group">
-                <div class="ua-perm-group-title">Monitoring &amp; panel</div>
-                <div class="ua-perm-grid">
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="logs" checked>
-                    <span><span class="ua-perm-name">App logs</span><span class="ua-perm-hint">View and download logs</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="audit">
-                    <span><span class="ua-perm-name">Activity log</span><span class="ua-perm-hint">See who did what</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="monitor">
-                    <span><span class="ua-perm-name">Server stats</span><span class="ua-perm-hint">CPU, memory and network</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="settings_manage">
-                    <span><span class="ua-perm-name">Panel settings</span><span class="ua-perm-hint">Change settings, clear cache</span></span>
-                  </label>
-                  <label class="ua-perm">
-                    <input type="checkbox" class="user-power-check" value="system_manage">
-                    <span><span class="ua-perm-name">Restart &amp; update panel</span><span class="ua-perm-hint">Restart WebDep, install updates</span></span>
-                  </label>
-                </div>
-              </div>
-              </div>
-            </details>
-          </div>
-
-          <div class="ua-section">
-            <div class="ua-section-title">Which websites and services?</div>
-            <div class="ua-scope">
-              <label class="ua-scope-option">
-                <input type="radio" name="user-project-scope" id="user-all-projects-check" value="all" checked>
-                <span>All of them</span>
-              </label>
-              <label class="ua-scope-option">
-                <input type="radio" name="user-project-scope" id="user-some-projects-radio" value="some">
-                <span>Only the ones I pick</span>
-              </label>
-            </div>
-            <div id="user-projects-checklist" class="ua-project-list" hidden></div>
+          <div class="acct-editor-heading" style="margin-top:6px">Package names</div>
+          <p class="acct-editor-note">Fill in the managers your servers use. Separate several packages with spaces.</p>
+          <div class="acct-grid-2">
+            <div class="form-group"><label class="form-label" for="cm-pkg-apt">apt (Debian, Ubuntu)</label>
+              <input id="cm-pkg-apt" class="form-control" placeholder="Package names"></div>
+            <div class="form-group"><label class="form-label" for="cm-pkg-dnf">dnf / yum (Fedora, RHEL)</label>
+              <input id="cm-pkg-dnf" class="form-control" placeholder="Package names"></div>
+            <div class="form-group"><label class="form-label" for="cm-pkg-apk">apk (Alpine)</label>
+              <input id="cm-pkg-apk" class="form-control" placeholder="Package names"></div>
+            <div class="form-group"><label class="form-label" for="cm-pkg-pacman">pacman (Arch)</label>
+              <input id="cm-pkg-pacman" class="form-control" placeholder="Package names"></div>
+            <div class="form-group"><label class="form-label" for="cm-pkg-winget">winget (Windows)</label>
+              <input id="cm-pkg-winget" class="form-control" placeholder="Package IDs"></div>
           </div>
         </form>
       </div>
       <div class="modal-footer">
+        <button class="btn btn-danger" id="cm-delete" style="margin-right:auto; display:none;">Remove from list</button>
         <button class="btn btn-secondary" data-close-modal>Cancel</button>
-        <button class="btn btn-primary" id="save-new-user-btn">Save User</button>
+        <button class="btn btn-primary" id="cm-save">Save module</button>
       </div>
     </div>
+  </div>
+
+  <!-- USER EDITOR MODAL (create / edit account) -->
+  <div class="modal-overlay" id="modal-user-editor">
+    <div class="modal-container acct-editor-modal" style="max-width: 720px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="user-editor-title">Create account</h3>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body" id="user-editor-body"></div>
+      <div class="modal-footer" id="user-editor-footer">
+        <button class="btn btn-secondary" data-close-modal>Cancel</button>
+        <button class="btn btn-primary" id="user-editor-save">Create account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SESSIONS OF A USER (admin) -->
+  <div class="modal-overlay" id="modal-user-sessions">
+    <div class="modal-container" style="max-width: 640px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="user-sessions-title">Sessions</h3>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body" id="user-sessions-body"></div>
+      <div class="modal-footer">
+        <button class="btn btn-danger" id="user-sessions-revoke-all" style="margin-right:auto">Sign out everywhere</button>
+        <button class="btn btn-secondary" data-close-modal>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- REQUIRED TWO-FACTOR SETUP -->
+  <div id="force-2fa-overlay" class="acct-force-overlay" hidden>
+    <div class="acct-force-card">
+      <h2>Set up two-factor authentication</h2>
+      <p>Your admin requires an authenticator app for your account. Set it up to keep using the panel.</p>
+      <button type="button" class="btn btn-primary" id="force-2fa-start" style="width: 100%;">Set up now</button>
+      <button type="button" class="btn-text-back" id="force-2fa-logout">Sign out</button>
+    </div>
+  </div>
+
+  <!-- FORCED PASSWORD CHANGE (temporary passwords) -->
+  <div id="force-password-overlay" class="acct-force-overlay" hidden>
+    <form id="force-password-form" class="acct-force-card" autocomplete="off">
+      <h2>Set a new password</h2>
+      <p>Your account was created with a temporary password. Choose your own to continue.</p>
+      <div class="form-group">
+        <label class="form-label" for="force-pw-current">Temporary password</label>
+        <input type="password" id="force-pw-current" class="form-control" required autocomplete="current-password">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="force-pw-next">New password</label>
+        <input type="password" id="force-pw-next" class="form-control" required minlength="8" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="force-pw-confirm">Confirm new password</label>
+        <input type="password" id="force-pw-confirm" class="form-control" required minlength="8" autocomplete="new-password">
+      </div>
+      <p class="acct-form-error" id="force-pw-error" hidden></p>
+      <button type="submit" class="btn btn-primary" id="force-pw-save" style="width: 100%;">Save and continue</button>
+      <button type="button" class="btn-text-back" id="force-pw-logout">Sign out</button>
+    </form>
   </div>
 
   <!-- ACCOUNT SECURITY MODAL (PASSWORD, PASSKEYS, TOTP 2FA & SESSIONS) -->
@@ -2832,7 +3064,7 @@
             </div>
             <div style="display: flex; gap: 8px; flex-wrap: wrap;">
               <input type="text" id="passkey-device-name" class="form-control"
-                placeholder="e.g. iPhone Face ID or Android Fingerprint" style="flex: 1; min-width: 190px;">
+                placeholder="Device name" style="flex: 1; min-width: 190px;">
               <button type="button" class="btn btn-primary" id="register-passkey-btn" onclick="registerNewPasskey()"
                 style="display: inline-flex; align-items: center; gap: 8px;">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -2898,7 +3130,7 @@
             </div>
             <div class="form-group" id="pwd-2fa-group" style="display: none;">
               <label class="form-label" for="pwd-2fa-code">6-Digit 2FA Authenticator Code *</label>
-              <input type="text" id="pwd-2fa-code" class="form-control" placeholder="123456" autocomplete="off"
+              <input type="text" id="pwd-2fa-code" class="form-control" placeholder="6-digit code" autocomplete="off"
                 style="font-family: var(--font-mono); letter-spacing: 0.12em;">
             </div>
             <label
@@ -2964,7 +3196,7 @@
               </div>
               <div class="form-group">
                 <label class="form-label" for="tfa-verify-code">2. Enter 6-Digit Code from Authenticator App *</label>
-                <input type="text" id="tfa-verify-code" class="form-control" placeholder="123456" maxlength="10"
+                <input type="text" id="tfa-verify-code" class="form-control" placeholder="6-digit code" maxlength="10"
                   autocomplete="one-time-code"
                   style="font-family: var(--font-mono); font-size: 16px; letter-spacing: 0.14em; text-align: center; font-weight: 600;">
               </div>
@@ -3014,7 +3246,7 @@
             </div>
             <div class="form-group">
               <label class="form-label" for="tfa-disable-code">6-Digit Authenticator Code or Recovery Code *</label>
-              <input type="text" id="tfa-disable-code" class="form-control" placeholder="123456 or ABCD-1234"
+              <input type="text" id="tfa-disable-code" class="form-control" placeholder="Authenticator or recovery code"
                 autocomplete="off" style="font-family: var(--font-mono);">
             </div>
             <button type="button" class="btn btn-danger" style="width: 100%;" onclick="disable2fa()">
@@ -3073,7 +3305,7 @@
           <div class="form-group">
             <label class="form-label" for="release-note-input">Release Note / Version Tag</label>
             <input type="text" id="release-note-input" class="form-control"
-              placeholder="e.g. Release v2.0 - Production">
+              placeholder="Release note">
             <span class="form-hint">Recorded in the control database and kept as an instant rollback target.</span>
           </div>
         </form>
@@ -3097,23 +3329,23 @@
         <form id="create-database-form" autocomplete="off" onsubmit="handleCreateDatabaseSubmit(event)">
           <div class="form-group">
             <label class="form-label" for="db-create-name">Display Name</label>
-            <input type="text" id="db-create-name" class="form-control" placeholder="e.g. Production PostgreSQL"
+            <input type="text" id="db-create-name" class="form-control" placeholder="Display name"
               required autocomplete="off">
           </div>
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
             <div class="form-group">
               <label class="form-label" for="db-create-dbname">Database Name</label>
-              <input type="text" id="db-create-dbname" class="form-control" placeholder="e.g. app_production" required autocomplete="off">
+              <input type="text" id="db-create-dbname" class="form-control" placeholder="Database name" required autocomplete="off">
             </div>
             <div class="form-group">
               <label class="form-label" for="db-create-user">Database User</label>
-              <input type="text" id="db-create-user" class="form-control" placeholder="e.g. app_user" required autocomplete="off">
+              <input type="text" id="db-create-user" class="form-control" placeholder="Database user" required autocomplete="off">
             </div>
           </div>
           <div class="form-group">
             <label class="form-label" for="db-create-password">Password</label>
             <div style="display: flex; gap: 8px;">
-              <input type="password" id="db-create-password" class="form-control" placeholder="Strong password" required
+              <input type="password" id="db-create-password" class="form-control" placeholder="Password" required
                 autocomplete="new-password" style="font-family: var(--font-mono);">
               <button type="button" class="btn btn-secondary btn-sm"
                 onclick="togglePasswordVisibility('db-create-password')">Show</button>
@@ -3138,7 +3370,7 @@
           <div class="form-group">
             <label class="form-label" for="db-create-domain">Custom Domain / Hostname <span
                 style="color:var(--text-dim); font-weight:400;">(optional)</span></label>
-            <input type="text" id="db-create-domain" class="form-control" placeholder="e.g. postgres.yourdomain.com">
+            <input type="text" id="db-create-domain" class="form-control" placeholder="Domain name">
             <span class="form-hint">If set, external connection URLs and psql commands will use this hostname instead of
               the VPS IP address.</span>
           </div>
@@ -3154,11 +3386,13 @@
           <div class="form-group" id="db-create-allowed-ips-wrap" style="display: none;">
             <label class="form-label" for="db-create-allowed-ips">Allowed Client IP Addresses / CIDRs</label>
             <textarea id="db-create-allowed-ips" class="form-control" rows="2"
-              placeholder="e.g. 203.0.113.80, 198.51.100.0/24"
+              placeholder="IP addresses or CIDR ranges"
               style="font-family: var(--font-mono); font-size: 12.5px;"></textarea>
             <span class="form-hint">Firewall rules (UFW) will be configured to strictly permit connections from these
               remote IPs.</span>
           </div>
+
+          <div id="db-create-limits-slot" class="limits-slot"></div>
 
           <!-- Real-time database provisioning progress track -->
           <div id="db-create-progress-container"
@@ -3306,18 +3540,18 @@
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="add-node-label">Name</label>
-              <input type="text" class="form-control" id="add-node-label" value="VPS-2" placeholder="e.g. VPS-2">
+              <input type="text" class="form-control" id="add-node-label" placeholder="Node name">
             </div>
             <div class="form-group">
               <label class="form-label" for="add-node-region">Region</label>
-              <input type="text" class="form-control" id="add-node-region" value="mumbai-IND" placeholder="e.g. mumbai-IND">
+              <input type="text" class="form-control" id="add-node-region" placeholder="Region">
             </div>
           </div>
 
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="add-node-target-ip">New VPS public IP <span style="color: var(--text-dim); font-weight: 400;">(optional)</span></label>
-              <input type="text" class="form-control" id="add-node-target-ip" placeholder="e.g. 203.0.113.25">
+              <input type="text" class="form-control" id="add-node-target-ip" placeholder="Public IP address">
             </div>
             <div class="form-group">
               <label class="form-label" for="add-node-ttl">Command expires in</label>
@@ -3328,6 +3562,18 @@
               </select>
             </div>
           </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="add-node-port-min">Lowest app port</label>
+              <input type="number" class="form-control" id="add-node-port-min" min="1024" max="65535" placeholder="Lowest port">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="add-node-port-max">Highest app port</label>
+              <input type="number" class="form-control" id="add-node-port-max" min="1024" max="65535" placeholder="Highest port">
+            </div>
+          </div>
+          <p class="acct-editor-note" style="margin-top:-4px">Apps on the new VPS get these ports in order, lowest first. They stay private (only Caddy and other nodes reach them) until you make one public, and the VPS firewall is updated as soon as it connects. Leave both empty to keep automatic ports; you can set a range later in Admin Panel &rsaquo; IP Addresses.</p>
 
           <div class="form-group" style="margin-bottom: 0;">
             <label class="form-label" for="add-node-core-url">This panel's address <span style="color: var(--text-dim); font-weight: 400;">(the new VPS must reach it)</span></label>
@@ -3435,6 +3681,38 @@
     </div>
   </div>
 
+  <!-- MODAL: CREATE BACKUP -->
+  <div class="modal-overlay" id="modal-create-backup">
+    <div class="modal-container" style="max-width: 480px;">
+      <div class="modal-header">
+        <div>
+          <h3 class="modal-title">Create backup</h3>
+          <div id="backup-modal-subtitle" style="font-size: 11.5px; color: var(--text-dim); margin-top: 2px;">Saves every file in the app's Files folder and its environment variables.</div>
+        </div>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="form-group" style="margin:0">
+          <label class="form-label" for="backup-note">Note</label>
+          <input type="text" id="backup-note" class="form-control" maxlength="200" placeholder="What this backup is for" autocomplete="off">
+        </div>
+        <div class="form-group" id="backup-ignore-wrap" style="margin:0">
+          <label class="form-label" for="backup-ignore">Leave out (optional)</label>
+          <textarea id="backup-ignore" class="form-control" rows="3" placeholder="File or folder names, one per line"></textarea>
+          <span class="form-hint">Matches names at any depth. A name, <code>*.ext</code>, or <code>prefix*</code>. Nothing is left out by default.</span>
+        </div>
+        <label id="backup-offnode-wrap" class="form-checkbox" style="font-size: 13px;" hidden>
+          <input type="checkbox" id="backup-offnode-checkbox">
+          <span>Also keep a copy on Web-Core, to recover if this VPS is lost (slower; made as a folder copy)</span>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-close-modal>Cancel</button>
+        <button class="btn btn-primary" id="backup-create-confirm" onclick="submitCreateBackup()">Create backup</button>
+      </div>
+    </div>
+  </div>
+
   <!-- MODAL: MOVE TO NODE & LIVE P2P SHIFT -->
   <div class="modal-overlay" id="modal-move-project-node">
     <div class="modal-container" style="max-width: 620px;">
@@ -3489,7 +3767,7 @@
   <div class="toast-container" id="toast-container"></div>
 
   <!-- Client Script -->
-  <script type="module" src="/app.js?v=3.18.0"></script>
+  <script type="module" src="/app.js?v=3.19.0"></script>
 </body>
 
 </html>

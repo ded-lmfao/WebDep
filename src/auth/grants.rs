@@ -1,0 +1,602 @@
+//! Per-user access grants stored in `access_grants`.
+//!
+//! A grant row gives a user a set of powers on one scope:
+//! - `global`   (scope_id NULL): panel-level powers (settings, system, account admin…)
+//! - `project`  (scope_id = project id, or NULL for every project): websites and services
+//! - `database` (scope_id = database id, or NULL for every database)
+//!
+//! Having a grant row for an app is what gives access to that app, even with an empty
+//! power list. `"*"` inside a power list means every power for that scope.
+
+use std::collections::{HashMap, HashSet};
+
+use sqlx::{PgConnection, Row};
+
+use crate::db::DbPool;
+
+pub const ALL_POWERS: &str = "*";
+pub const APP_DELETE: &str = "app_delete";
+const LEGACY_MIGRATION_META_KEY: &str = "legacy_grants_migrated_at";
+
+/// Panel powers an admin (or a delegate holding them) can hand out from the user editor.
+pub const PANEL_ACCOUNT_POWERS: &[&str] = &[
+    "users_view", "users_create", "users_edit", "requests_review",
+    "create_websites", "create_services", "create_databases",
+];
+
+/// Panel power that lets a user create apps of `kind` ("website", "service", "database").
+pub fn create_power(kind: &str) -> &'static str {
+    match kind {
+        "service" => "create_services",
+        "database" => "create_databases",
+        _ => "create_websites",
+    }
+}
+
+/// Makes `user_id` the owner of an app they just created: every power on that app.
+pub async fn grant_owner(db: &DbPool, user_id: i64, scope: &str, app_id: i64, kind: &str) -> Result<(), sqlx::Error> {
+    let powers: Vec<String> = kind_catalog(kind).iter().map(|p| p.to_string()).collect();
+    upsert(db, user_id, scope, Some(app_id), &powers, Some(user_id)).await
+}
+/// Powers a website or service grant may hold.
+pub const PROJECT_POWERS: &[&str] = &[
+    "logs", "files", "files_write", "deploy", "process", "backups", "env", "domains",
+    "projects_manage", "services_manage", "activity", "access_manage", "app_delete",
+];
+/// Powers a database grant may hold.
+pub const DATABASE_POWERS: &[&str] = &["databases", "env", "databases_manage", "backups", "activity", "access_manage", "app_delete"];
+
+/// Checklist shown for one kind of app, in display order.
+pub fn kind_catalog(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "website" => &[
+            "logs", "files", "files_write", "deploy", "process", "backups", "env", "domains",
+            "projects_manage", "activity", "access_manage", "app_delete",
+        ],
+        "service" => &[
+            "logs", "files", "files_write", "deploy", "process", "backups", "env",
+            "services_manage", "activity", "access_manage", "app_delete",
+        ],
+        "database" | "all-databases" => DATABASE_POWERS,
+        _ => PROJECT_POWERS,
+    }
+}
+
+pub fn catalog(scope: &str) -> &'static [&'static str] {
+    match scope {
+        SCOPE_PROJECT => PROJECT_POWERS,
+        SCOPE_DATABASE => DATABASE_POWERS,
+        _ => PANEL_ACCOUNT_POWERS,
+    }
+}
+
+pub const SCOPE_GLOBAL: &str = "global";
+pub const SCOPE_PROJECT: &str = "project";
+pub const SCOPE_DATABASE: &str = "database";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Grants {
+    pub panel: HashSet<String>,
+    /// `None` key = applies to every project, including ones created later.
+    pub projects: HashMap<Option<i64>, HashSet<String>>,
+    /// `None` key = applies to every database, including ones created later.
+    pub databases: HashMap<Option<i64>, HashSet<String>>,
+}
+
+fn set_has_any(set: &HashSet<String>, powers: &[&str]) -> bool {
+    set.contains(ALL_POWERS) || powers.iter().any(|p| set.contains(*p))
+}
+
+fn scoped_has_any(map: &HashMap<Option<i64>, HashSet<String>>, id: i64, powers: &[&str]) -> bool {
+    [Some(id), None]
+        .iter()
+        .filter_map(|k| map.get(k))
+        .any(|set| set_has_any(set, powers))
+}
+
+/// JSON shape: `{"panel": [...], "projects": {"*": [...], "12": [...]}, "databases": {...}}`
+/// where `"*"` is the every-app grant.
+impl serde::Serialize for Grants {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        fn sorted(set: &HashSet<String>) -> Vec<&String> {
+            let mut v: Vec<&String> = set.iter().collect();
+            v.sort();
+            v
+        }
+        fn scoped(map: &HashMap<Option<i64>, HashSet<String>>) -> std::collections::BTreeMap<String, Vec<&String>> {
+            map.iter()
+                .map(|(k, v)| (k.map_or_else(|| ALL_POWERS.to_string(), |id| id.to_string()), sorted(v)))
+                .collect()
+        }
+        let mut m = ser.serialize_map(Some(3))?;
+        m.serialize_entry("panel", &sorted(&self.panel))?;
+        m.serialize_entry("projects", &scoped(&self.projects))?;
+        m.serialize_entry("databases", &scoped(&self.databases))?;
+        m.end()
+    }
+}
+
+impl Grants {
+    /// Every power held on one app (its own grant plus the every-app grant), or `None`
+    /// when the user has no grant reaching it.
+    pub fn powers_on(&self, scope: &str, id: Option<i64>) -> Option<HashSet<String>> {
+        let map = match scope {
+            SCOPE_PROJECT => &self.projects,
+            SCOPE_DATABASE => &self.databases,
+            _ => return Some(self.panel.clone()),
+        };
+        let mut out: Option<HashSet<String>> = None;
+        let keys = if id.is_some() { vec![id, None] } else { vec![None] };
+        for key in &keys {
+            if let Some(set) = map.get(key) {
+                out.get_or_insert_with(HashSet::new).extend(set.iter().cloned());
+            }
+        }
+        out
+    }
+
+    pub fn panel_has_any(&self, powers: &[&str]) -> bool {
+        set_has_any(&self.panel, powers)
+    }
+
+    pub fn can_access_project(&self, project_id: i64) -> bool {
+        self.projects.contains_key(&Some(project_id)) || self.projects.contains_key(&None)
+    }
+
+    pub fn project_has_any(&self, project_id: i64, powers: &[&str]) -> bool {
+        scoped_has_any(&self.projects, project_id, powers)
+    }
+
+    pub fn database_has_any(&self, database_id: i64, powers: &[&str]) -> bool {
+        scoped_has_any(&self.databases, database_id, powers)
+    }
+
+    /// Converts the pre-grants permission model (one global power list plus an allowed
+    /// project list) into grants that authorize exactly the same requests:
+    /// - every power stays available for panel-level (unscoped) checks;
+    /// - each allowed project (or every project for `*`) gets the same powers;
+    /// - databases not linked to a project were reachable by "all projects" users and by
+    ///   holders of `databases_manage`, so those users get an every-database grant.
+    pub fn from_legacy(permissions: &[String], all_projects: bool, allowed_projects: &[i64]) -> Self {
+        let powers: HashSet<String> = permissions.iter().cloned().collect();
+        let mut out = Grants {
+            panel: powers.clone(),
+            ..Default::default()
+        };
+        // Deleting an app used to need the manage power; it is now its own per-app power.
+        // Carry it over so nobody loses what they could do before the upgrade.
+        let mut project_powers = powers.clone();
+        if set_has_any(&powers, &["projects_manage", "services_manage"]) {
+            project_powers.insert(APP_DELETE.to_string());
+        }
+        let mut database_powers = powers.clone();
+        if set_has_any(&powers, &["databases_manage"]) {
+            database_powers.insert(APP_DELETE.to_string());
+        }
+        if all_projects {
+            out.projects.insert(None, project_powers);
+        } else {
+            for pid in allowed_projects {
+                out.projects.insert(Some(*pid), project_powers.clone());
+            }
+        }
+        if all_projects || set_has_any(&powers, &["databases_manage"]) {
+            out.databases.insert(None, database_powers);
+        }
+        out
+    }
+
+    fn rows(&self) -> Vec<(&'static str, Option<i64>, &HashSet<String>)> {
+        let mut rows = Vec::new();
+        if !self.panel.is_empty() {
+            rows.push((SCOPE_GLOBAL, None, &self.panel));
+        }
+        for (id, set) in &self.projects {
+            rows.push((SCOPE_PROJECT, *id, set));
+        }
+        for (id, set) in &self.databases {
+            rows.push((SCOPE_DATABASE, *id, set));
+        }
+        rows
+    }
+}
+
+/// Parses the legacy `users.permissions` JSON array. Invalid JSON yields no powers.
+pub fn parse_legacy_permissions(json: &str) -> Vec<String> {
+    serde_json::from_str(json).unwrap_or_default()
+}
+
+/// Parses the legacy `users.allowed_projects` JSON array into (all_projects, ids).
+/// Invalid JSON is treated as "all projects", matching the original behaviour.
+pub fn parse_legacy_projects(json: &str) -> (bool, Vec<i64>) {
+    let Ok(vals) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return (true, Vec::new());
+    };
+    let mut all = false;
+    let mut ids = Vec::new();
+    for v in vals {
+        if v.as_str() == Some(ALL_POWERS) {
+            all = true;
+        } else if let Some(pid) = v.as_i64() {
+            ids.push(pid);
+        } else if let Some(pid) = v.as_str().and_then(|s| s.parse::<i64>().ok()) {
+            ids.push(pid);
+        }
+    }
+    (all, ids)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+/// Loads the unexpired grants of one user.
+pub async fn load(db: &DbPool, user_id: i64) -> Result<Grants, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT scope_type, scope_id, powers_json FROM access_grants
+         WHERE user_id = $1 AND (expires_at IS NULL OR expires_at > $2)",
+    )
+    .bind(user_id)
+    .bind(now_ms())
+    .fetch_all(db)
+    .await?;
+
+    let mut out = Grants::default();
+    for row in rows {
+        let scope: String = row.try_get(0)?;
+        let scope_id: Option<i64> = row.try_get(1)?;
+        let powers: HashSet<String> = parse_legacy_permissions(&row.try_get::<String, _>(2)?)
+            .into_iter()
+            .collect();
+        match scope.as_str() {
+            SCOPE_GLOBAL => out.panel.extend(powers),
+            SCOPE_PROJECT => out.projects.entry(scope_id).or_default().extend(powers),
+            SCOPE_DATABASE => out.databases.entry(scope_id).or_default().extend(powers),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Loads unexpired grants of every user, keyed by user id.
+pub async fn load_all(db: &DbPool) -> Result<HashMap<i64, Grants>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT user_id, scope_type, scope_id, powers_json FROM access_grants
+         WHERE expires_at IS NULL OR expires_at > $1",
+    )
+    .bind(now_ms())
+    .fetch_all(db)
+    .await?;
+    let mut out: HashMap<i64, Grants> = HashMap::new();
+    for row in rows {
+        let g = out.entry(row.try_get(0)?).or_default();
+        let scope_id: Option<i64> = row.try_get(2)?;
+        let powers = parse_legacy_permissions(&row.try_get::<String, _>(3)?);
+        match row.try_get::<String, _>(1)?.as_str() {
+            SCOPE_GLOBAL => g.panel.extend(powers),
+            SCOPE_PROJECT => g.projects.entry(scope_id).or_default().extend(powers),
+            SCOPE_DATABASE => g.databases.entry(scope_id).or_default().extend(powers),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Creates or replaces one grant row (`scope_id` NULL = every app of that scope, or the
+/// panel for `global`).
+pub async fn upsert(
+    db: &DbPool,
+    user_id: i64,
+    scope: &str,
+    scope_id: Option<i64>,
+    powers: &[String],
+    granted_by: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    let mut sorted: Vec<&String> = powers.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+    let ts = now_ms();
+    sqlx::query(
+        "INSERT INTO access_grants(user_id, scope_type, scope_id, role_preset, powers_json, granted_by, created_at, updated_at)
+         VALUES($1, $2, $3, 'custom', $4, $5, $6, $6)
+         ON CONFLICT (user_id, scope_type, COALESCE(scope_id, 0))
+         DO UPDATE SET powers_json = EXCLUDED.powers_json, granted_by = EXCLUDED.granted_by, updated_at = EXCLUDED.updated_at",
+    )
+    .bind(user_id)
+    .bind(scope)
+    .bind(scope_id)
+    .bind(serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".into()))
+    .bind(granted_by)
+    .bind(ts)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn remove(db: &DbPool, user_id: i64, scope: &str, scope_id: Option<i64>) -> Result<bool, sqlx::Error> {
+    let res = sqlx::query(
+        "DELETE FROM access_grants WHERE user_id = $1 AND scope_type = $2 AND scope_id IS NOT DISTINCT FROM $3",
+    )
+    .bind(user_id)
+    .bind(scope)
+    .bind(scope_id)
+    .execute(db)
+    .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Drops grants that point at deleted apps.
+pub async fn remove_for_app(db: &DbPool, scope: &str, scope_id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM access_grants WHERE scope_type = $1 AND scope_id = $2")
+        .bind(scope)
+        .bind(scope_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Replaces every grant of `user_id` with `grants`. Run inside a transaction.
+pub async fn replace(
+    conn: &mut PgConnection,
+    user_id: i64,
+    grants: &Grants,
+    granted_by: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM access_grants WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *conn)
+        .await?;
+    let ts = now_ms();
+    for (scope, scope_id, set) in grants.rows() {
+        let mut powers: Vec<&String> = set.iter().collect();
+        powers.sort();
+        sqlx::query(
+            "INSERT INTO access_grants(user_id, scope_type, scope_id, role_preset, powers_json, granted_by, created_at, updated_at)
+             VALUES($1, $2, $3, 'custom', $4, $5, $6, $6)",
+        )
+        .bind(user_id)
+        .bind(scope)
+        .bind(scope_id)
+        .bind(serde_json::to_string(&powers).unwrap_or_else(|_| "[]".into()))
+        .bind(granted_by)
+        .bind(ts)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Rebuilds a user's grants from legacy permission JSON (test fixtures).
+#[cfg(test)]
+pub async fn replace_from_legacy_json(
+    db: &DbPool,
+    user_id: i64,
+    permissions_json: &str,
+    allowed_projects_json: &str,
+    granted_by: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    let perms = parse_legacy_permissions(permissions_json);
+    let (all, ids) = parse_legacy_projects(allowed_projects_json);
+    let grants = Grants::from_legacy(&perms, all, &ids);
+    let mut tx = db.begin().await?;
+    replace(&mut tx, user_id, &grants, granted_by).await?;
+    tx.commit().await
+}
+
+/// One-time conversion of every existing user's legacy permissions into grants.
+/// Idempotent: guarded by a `_meta` marker written in the same transaction.
+pub async fn migrate_legacy_once(db: &DbPool) -> Result<usize, sqlx::Error> {
+    let mut tx = db.begin().await?;
+    // Serialize concurrent boots on the marker row.
+    sqlx::query("LOCK TABLE _meta IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await?;
+    let done: Option<String> = sqlx::query_scalar("SELECT value FROM _meta WHERE key = $1")
+        .bind(LEGACY_MIGRATION_META_KEY)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if done.is_some() {
+        return Ok(0);
+    }
+
+    let users = sqlx::query("SELECT id, username, permissions, allowed_projects FROM users")
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut migrated = 0;
+    for row in users {
+        let id: i64 = row.try_get(0)?;
+        let username: String = row.try_get(1)?;
+        if super::user::User::is_main_admin_identity(id, &username) {
+            continue;
+        }
+        let perms = parse_legacy_permissions(&row.try_get::<Option<String>, _>(2)?.unwrap_or_default());
+        let projects_json = row.try_get::<Option<String>, _>(3)?.unwrap_or_else(|| "[\"*\"]".into());
+        let (all, ids) = parse_legacy_projects(&projects_json);
+        replace(&mut tx, id, &Grants::from_legacy(&perms, all, &ids), None).await?;
+        migrated += 1;
+    }
+
+    sqlx::query("INSERT INTO _meta(key, value) VALUES($1, $2)")
+        .bind(LEGACY_MIGRATION_META_KEY)
+        .bind(now_ms().to_string())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(migrated)
+}
+
+/// Adds `app_delete` to the project and database grants of users who could delete apps
+/// before it became its own power (they held the matching manage power). Idempotent and
+/// guarded by a marker, so installs converted by an earlier build are brought up to date.
+pub async fn grant_legacy_delete_once(db: &DbPool) -> Result<usize, sqlx::Error> {
+    const MARKER: &str = "legacy_delete_grants_migrated_at";
+    let mut tx = db.begin().await?;
+    sqlx::query("LOCK TABLE _meta IN SHARE ROW EXCLUSIVE MODE").execute(&mut *tx).await?;
+    let done: Option<String> = sqlx::query_scalar("SELECT value FROM _meta WHERE key = $1")
+        .bind(MARKER)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if done.is_some() {
+        return Ok(0);
+    }
+    let users = sqlx::query("SELECT id, username, permissions FROM users").fetch_all(&mut *tx).await?;
+    let mut changed = 0;
+    for row in users {
+        let id: i64 = row.try_get(0)?;
+        let username: String = row.try_get(1)?;
+        if super::user::User::is_main_admin_identity(id, &username) {
+            continue;
+        }
+        let legacy: HashSet<String> = parse_legacy_permissions(&row.try_get::<Option<String>, _>(2)?.unwrap_or_default())
+            .into_iter()
+            .collect();
+        let for_projects = set_has_any(&legacy, &["projects_manage", "services_manage"]);
+        let for_databases = set_has_any(&legacy, &["databases_manage"]);
+        if !for_projects && !for_databases {
+            continue;
+        }
+        let grants = sqlx::query("SELECT id, scope_type, powers_json FROM access_grants WHERE user_id = $1")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+        for g in grants {
+            let scope: String = g.try_get(1)?;
+            let wanted = (scope == SCOPE_PROJECT && for_projects) || (scope == SCOPE_DATABASE && for_databases);
+            if !wanted {
+                continue;
+            }
+            let mut powers = parse_legacy_permissions(&g.try_get::<String, _>(2)?);
+            if powers.iter().any(|p| p == APP_DELETE || p == ALL_POWERS) {
+                continue;
+            }
+            powers.push(APP_DELETE.to_string());
+            powers.sort();
+            sqlx::query("UPDATE access_grants SET powers_json = $1, updated_at = $2 WHERE id = $3")
+                .bind(serde_json::to_string(&powers).unwrap_or_else(|_| "[]".into()))
+                .bind(now_ms())
+                .bind(g.try_get::<i64, _>(0)?)
+                .execute(&mut *tx)
+                .await?;
+            changed += 1;
+        }
+    }
+    sqlx::query("INSERT INTO _meta(key, value) VALUES($1, $2)").bind(MARKER).bind(now_ms().to_string()).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn perms(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn legacy_all_projects_maps_to_wildcards() {
+        let g = Grants::from_legacy(&perms(&["deploy", "logs"]), true, &[]);
+        assert!(g.can_access_project(42));
+        assert!(g.project_has_any(42, &["deploy"]));
+        assert!(!g.project_has_any(42, &["env"]));
+        assert!(g.panel_has_any(&["logs"]));
+        assert!(g.databases.contains_key(&None));
+    }
+
+    #[test]
+    fn manage_powers_carry_the_delete_right() {
+        let g = Grants::from_legacy(&perms(&["projects_manage", "files"]), false, &[4]);
+        assert!(g.project_has_any(4, &[APP_DELETE]));
+        let none = Grants::from_legacy(&perms(&["deploy"]), true, &[]);
+        assert!(!none.project_has_any(1, &[APP_DELETE]), "no manage power, no delete");
+        let db = Grants::from_legacy(&perms(&["databases_manage"]), false, &[]);
+        assert!(db.database_has_any(9, &[APP_DELETE]));
+    }
+
+    #[test]
+    fn legacy_restricted_projects_map_to_project_grants() {
+        let g = Grants::from_legacy(&perms(&["files"]), false, &[10, 20]);
+        assert!(g.can_access_project(10));
+        assert!(g.can_access_project(20));
+        assert!(!g.can_access_project(30));
+        assert!(g.project_has_any(10, &["files", "files_write"]));
+        assert!(!g.project_has_any(30, &["files"]));
+        assert!(g.databases.is_empty());
+    }
+
+    #[test]
+    fn legacy_access_without_powers_still_grants_project_access() {
+        let g = Grants::from_legacy(&[], false, &[7]);
+        assert!(g.can_access_project(7));
+        assert!(!g.project_has_any(7, &["deploy"]));
+    }
+
+    #[test]
+    fn databases_manage_reaches_unlinked_databases() {
+        let g = Grants::from_legacy(&perms(&["databases_manage"]), false, &[1]);
+        assert!(g.database_has_any(99, &["databases", "databases_manage"]));
+    }
+
+    #[test]
+    fn wildcard_power_matches_everything() {
+        let g = Grants::from_legacy(&perms(&["*"]), false, &[3]);
+        assert!(g.project_has_any(3, &["anything"]));
+        assert!(g.panel_has_any(&["system_manage"]));
+        assert!(g.database_has_any(5, &["databases"]));
+    }
+
+    #[test]
+    fn legacy_project_json_parsing() {
+        assert_eq!(parse_legacy_projects("[\"*\"]"), (true, vec![]));
+        assert_eq!(parse_legacy_projects("[1, \"2\"]"), (false, vec![1, 2]));
+        assert_eq!(parse_legacy_projects("not json"), (true, vec![]));
+    }
+
+    #[tokio::test]
+    async fn legacy_users_keep_their_access_after_migration() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let auth = crate::auth::Auth::new(db.clone(), 3600);
+        auth.ensure_admin().await;
+
+        let insert = |name: &'static str, perms: &'static str, projects: &'static str| {
+            let db = db.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO users(username, password_hash, permissions, allowed_projects, created_at)
+                     VALUES($1, 'hash', $2, $3, 0) RETURNING id",
+                )
+                .bind(name)
+                .bind(perms)
+                .bind(projects)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        let everyone = insert("all_dev", r#"["deploy","logs"]"#, r#"["*"]"#).await;
+        let scoped = insert("scoped_dev", r#"["files"]"#, "[10]").await;
+
+        assert_eq!(migrate_legacy_once(&db).await.unwrap(), 2);
+        // Second run is a no-op even if the user list changes.
+        assert_eq!(migrate_legacy_once(&db).await.unwrap(), 0);
+
+        let all_dev = auth.get_user_by_id(everyone).await.unwrap();
+        assert!(all_dev.can_access_project(12345), "all-projects user reaches future projects");
+        assert!(all_dev.has_project_power(12345, &["deploy"]));
+        assert!(!all_dev.has_project_power(12345, &["env"]));
+        assert!(all_dev.has_power("logs"));
+
+        let scoped_dev = auth.get_user_by_id(scoped).await.unwrap();
+        assert!(scoped_dev.can_access_project(10));
+        assert!(scoped_dev.has_project_power(10, &["files"]));
+        assert!(!scoped_dev.can_access_project(11));
+        assert!(!scoped_dev.has_database_power(1, None, &["databases"]));
+
+        let admin = auth.get_user_by_id(1).await.unwrap();
+        assert!(admin.has_project_power(999, &["anything"]));
+    }
+}

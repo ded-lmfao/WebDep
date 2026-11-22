@@ -1034,3 +1034,279 @@ mod tests {
         assert!(res[0].message.contains("Unknown"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Custom modules: defined by an admin in the panel and stored on Web-Core
+// (`settings.custom_modules`). The definitions travel with each status/install/
+// uninstall request, so worker nodes need no local configuration. Nothing runs
+// through a shell: the check is a single binary with fixed arguments and installs
+// pass package names straight to the package manager.
+// ---------------------------------------------------------------------------
+
+/// Prefix that marks custom module ids (built-in ids never use it).
+pub const CUSTOM_MODULE_PREFIX: &str = "x-";
+/// Package-manager keys a custom module can map packages for.
+pub const CUSTOM_PACKAGE_KEYS: &[&str] = &["apt", "dnf", "apk", "pacman", "winget"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomModule {
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Binary that proves the module is installed (looked up on PATH).
+    pub command: String,
+    /// Arguments that print a version line, e.g. `["--version"]`.
+    #[serde(default)]
+    pub version_args: Vec<String>,
+    /// Package names per package manager key (see `CUSTOM_PACKAGE_KEYS`).
+    #[serde(default)]
+    pub packages: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+fn valid_token(s: &str, max: usize, extra: &[char]) -> bool {
+    !s.is_empty()
+        && s.len() <= max
+        && !s.starts_with('-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
+}
+
+fn last_lines(text: &str, n: usize) -> String {
+    let tail: Vec<&str> = text.lines().rev().take(n).collect();
+    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
+impl CustomModule {
+    /// Normalises and checks a definition coming from the panel.
+    pub fn validate(&mut self) -> Result<(), String> {
+        self.name = self.name.trim().to_string();
+        self.description = self.description.trim().chars().take(200).collect();
+        self.command = self.command.trim().to_string();
+        if self.name.is_empty() || self.name.chars().count() > 40 || self.name.chars().any(char::is_control) {
+            return Err("Name must be 1-40 characters.".into());
+        }
+        if !valid_token(&self.command, 64, &['.', '_', '-', '+']) {
+            return Err("Check command must be a single program name, like ffmpeg or redis-server.".into());
+        }
+        self.version_args = self
+            .version_args
+            .iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect();
+        let arg_ok = |a: &String| a.len() <= 32 && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_.=+:".contains(c));
+        if self.version_args.len() > 4 || !self.version_args.iter().all(arg_ok) {
+            return Err("Version arguments: up to 4 simple flags, like --version or -v.".into());
+        }
+        let mut cleaned = std::collections::BTreeMap::new();
+        for (key, pkgs) in &self.packages {
+            let key = key.trim().to_ascii_lowercase();
+            if !CUSTOM_PACKAGE_KEYS.contains(&key.as_str()) {
+                return Err(format!("Unknown package manager '{key}'."));
+            }
+            let pkgs: Vec<String> = pkgs.iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+            if pkgs.len() > 10 || !pkgs.iter().all(|p| valid_token(p, 100, &['.', '_', '-', '+', ':', '@'])) {
+                return Err(format!("Package names for {key} contain characters that aren't allowed."));
+            }
+            if !pkgs.is_empty() {
+                cleaned.insert(key, pkgs);
+            }
+        }
+        if cleaned.is_empty() {
+            return Err("Add package names for at least one package manager.".into());
+        }
+        self.packages = cleaned;
+        if self.id.is_empty() {
+            let slug = self
+                .name
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+            let base = if slug.is_empty() { self.command.to_ascii_lowercase() } else { slug };
+            self.id = format!("{CUSTOM_MODULE_PREFIX}{base}");
+        }
+        if !self.id.starts_with(CUSTOM_MODULE_PREFIX) || !valid_token(&self.id, 48, &['-']) {
+            return Err("Invalid module id.".into());
+        }
+        Ok(())
+    }
+
+    pub fn catalog_entry(&self) -> ModuleCatalogEntry {
+        ModuleCatalogEntry {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            category: "custom".into(),
+            required: false,
+            description: if self.description.is_empty() {
+                format!("Custom module (checks `{}`)", self.command)
+            } else {
+                self.description.clone()
+            },
+            languages: vec!["Custom".into()],
+        }
+    }
+
+    fn packages_for(&self, pm: &str) -> Option<&Vec<String>> {
+        let key = match pm {
+            "apt-get" => "apt",
+            "dnf" | "yum" => "dnf",
+            other => other,
+        };
+        self.packages.get(key)
+    }
+}
+
+pub fn check_custom_module(m: &CustomModule) -> NodeModuleStatus {
+    match find_command_path(&m.command) {
+        Some(p) => {
+            let args: Vec<&str> = m.version_args.iter().map(String::as_str).collect();
+            let version = if args.is_empty() { String::new() } else { run_version_line(&p, &args).unwrap_or_default() };
+            NodeModuleStatus::at(&m.id, true, &p, version, format!("{} found", m.command))
+        }
+        None => NodeModuleStatus::missing(&m.id, format!("{} not found", m.command)),
+    }
+}
+
+/// Replaces the custom-module entries in `modules` with fresh checks for `defs`.
+pub fn merge_custom_statuses(modules: &mut Vec<NodeModuleStatus>, defs: &[CustomModule]) {
+    modules.retain(|m| !m.id.starts_with(CUSTOM_MODULE_PREFIX));
+    modules.extend(defs.iter().map(check_custom_module));
+}
+
+/// Custom module definitions sent along with a node RPC; invalid entries are dropped.
+pub fn custom_modules_from_params(params: &serde_json::Value) -> Vec<CustomModule> {
+    serde_json::from_value::<Vec<CustomModule>>(params["customModules"].clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|mut m| m.validate().ok().map(|_| m))
+        .collect()
+}
+
+fn run_winget(op: &str, ids: &[String]) -> Result<String, String> {
+    let mut last = String::new();
+    for id in ids {
+        let mut args = vec![op, "--id", id.as_str(), "-e", "--silent", "--disable-interactivity", "--accept-source-agreements"];
+        if op == "install" {
+            args.push("--accept-package-agreements");
+        }
+        let out = Command::new("winget")
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("Failed executing winget: {e}"))?;
+        last = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        if !out.status.success() {
+            return Err(last_lines(&last, 20));
+        }
+    }
+    Ok(last_lines(&last, 20))
+}
+
+#[cfg(unix)]
+fn run_custom_pkg(pm: &str, pkgs: &[String], install: bool) -> Result<String, String> {
+    let use_sudo = !is_effective_root();
+    let refs: Vec<&str> = pkgs.iter().map(String::as_str).collect();
+    if install && pm == "apt-get" {
+        let _ = run_pkg_cmd(
+            use_sudo,
+            "apt-get",
+            &["-o", "DPkg::Lock::Timeout=120", "update", "-y"],
+            &[("DEBIAN_FRONTEND", "noninteractive")],
+        );
+    }
+    run_pkg_manager(use_sudo, pm, if install { PkgOp::Install } else { PkgOp::Remove }, &refs)
+}
+
+#[cfg(not(unix))]
+fn run_custom_pkg(pm: &str, _pkgs: &[String], _install: bool) -> Result<String, String> {
+    Err(format!("Package manager '{pm}' isn't supported here."))
+}
+
+/// Installs (`install = true`) or removes the given custom modules on this machine.
+pub fn apply_custom_modules_sync(defs: &[CustomModule], ids: &[String], install: bool) -> Vec<ModuleInstallResult> {
+    let pm = detect_package_manager();
+    let mut results = Vec::new();
+    for raw in ids {
+        let id = raw.trim().to_ascii_lowercase();
+        let Some(def) = defs.iter().find(|d| d.id == id) else {
+            results.push(ModuleInstallResult::new(id, false, false, "Unknown custom module", String::new()));
+            continue;
+        };
+        let before = check_custom_module(def);
+        if install && before.installed {
+            results.push(ModuleInstallResult::new(id, true, true, format!("Already installed {}", before.version), String::new()));
+            continue;
+        }
+        let Some(pkgs) = def.packages_for(&pm) else {
+            results.push(ModuleInstallResult::new(
+                id,
+                false,
+                false,
+                format!("No package names set for this server's package manager ({pm})."),
+                String::new(),
+            ));
+            continue;
+        };
+        let outcome = if pm == "winget" {
+            run_winget(if install { "install" } else { "uninstall" }, pkgs)
+        } else {
+            run_custom_pkg(&pm, pkgs, install)
+        };
+        let after = check_custom_module(def);
+        let (success, message) = match (&outcome, install) {
+            (Ok(_), true) if after.installed => (true, format!("Installed {}", after.version)),
+            (Ok(_), true) => (false, format!("Packages installed, but `{}` still isn't found on PATH.", def.command)),
+            (Ok(_), false) if after.installed => (false, "Removed packages, but the command is still found.".to_string()),
+            (Ok(_), false) => (true, "Removed".to_string()),
+            (Err(_), _) => (false, format!("{} failed via {pm}", if install { "Install" } else { "Removal" })),
+        };
+        let output = match outcome {
+            Ok(o) | Err(o) => o,
+        };
+        results.push(ModuleInstallResult::new(id, success, false, message, output));
+    }
+    results
+}
+
+#[cfg(test)]
+mod custom_module_tests {
+    use super::*;
+
+    fn def(command: &str, pkgs: &[(&str, &[&str])]) -> CustomModule {
+        CustomModule {
+            name: "FFmpeg Tools".into(),
+            command: command.into(),
+            version_args: vec!["-version".into()],
+            packages: pkgs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validates_and_slugs_custom_modules() {
+        let mut m = def("ffmpeg", &[("apt", &["ffmpeg"]), ("winget", &["Gyan.FFmpeg"])]);
+        m.validate().unwrap();
+        assert_eq!(m.id, "x-ffmpeg-tools");
+        assert_eq!(m.packages_for("apt-get").unwrap(), &vec!["ffmpeg".to_string()]);
+        assert!(m.packages_for("dnf").is_none());
+    }
+
+    #[test]
+    fn rejects_shell_tricks() {
+        assert!(def("ffmpeg; rm -rf /", &[("apt", &["ffmpeg"])]).validate().is_err());
+        assert!(def("ffmpeg", &[("apt", &["ffmpeg && reboot"])]).validate().is_err());
+        assert!(def("ffmpeg", &[("apt", &["--allow-unauthenticated"])]).validate().is_err());
+        assert!(def("ffmpeg", &[("brew", &["ffmpeg"])]).validate().is_err());
+        assert!(def("ffmpeg", &[]).validate().is_err());
+    }
+}

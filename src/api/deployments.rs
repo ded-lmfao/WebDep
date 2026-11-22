@@ -21,6 +21,12 @@ pub(crate) async fn deploy_project_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let (actor, p) = get_authorized_project(&state, &headers, "deploy", id).await?;
 
+    if crate::backups::is_restoring(state.cluster.data_dir(), p.id) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("'{}' is being restored from a backup. Wait for the restore to finish.", p.name),
+        ));
+    }
     if state.deployer.has_active_deployment(p.id).await {
         return Err((
             StatusCode::CONFLICT,
@@ -349,7 +355,7 @@ pub(crate) async fn get_deployment_handler(
             "Access denied: You are not assigned to this website.".to_string(),
         ));
     }
-    let logs = if user.has_power("logs") {
+    let logs = if user.has_project_power(dep.project_id, &["logs"]) {
         state.logs.list(None, Some(id), None, None, 1000).await
     } else {
         Vec::new()

@@ -82,42 +82,21 @@ pub struct EvacuateNodeResult {
     pub failed: Vec<(i64, String)>,
 }
 
-/// Enforces cross-node shift RBAC: caller must hold project deploy/manage powers AND
-/// have access to the destination node (`target_node_id`).
+/// Moving an app to another node (live shift, cutover, or restoring a backup onto a
+/// different node) is an infrastructure action: only admins and the main admin may do it.
 pub async fn verify_cross_node_shift_rbac(
-    state: &AppState,
+    _state: &AppState,
     user: &User,
-    project_id: i64,
-    target_node_id: i64,
+    _project_id: i64,
+    _target_node_id: i64,
 ) -> Result<(), (StatusCode, String)> {
-    let has_project_power = state
-        .auth
-        .has_any_power_for_scope(
-            user,
-            &["deploy", "projects_manage", "services_manage"],
-            "project",
-            Some(project_id),
-        )
-        .await;
-    if !has_project_power {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Insufficient project permission to shift workload".to_string(),
-        ));
-    }
-    if user.is_main_admin {
+    if user.is_admin && !user.disabled {
         return Ok(());
     }
-    let _ = target_node_id;
-    let has_target_node = !user.disabled
-        && user.has_any_power(&["nodes_manage", "projects_manage", "deploy", "*"]);
-    if !has_target_node {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Cross-node shift denied: missing deploy/manage permission".to_string(),
-        ));
-    }
-    Ok(())
+    Err((
+        StatusCode::FORBIDDEN,
+        "Only an admin can move apps between nodes.".to_string(),
+    ))
 }
 
 pub async fn list_project_migrations(
@@ -322,6 +301,11 @@ pub async fn start_project_shift(
 
     // STEP 1: Target Preflight & Port Allocation
     let used_ports = state.cluster.used_ports_on_node(target_node_id).await;
+    // A target with a port range gets its next open free port; otherwise keep the app's port.
+    let preferred_port = match crate::cluster::ports::next_free_port(&state.db, target_node_id, &[]).await {
+        Ok(Some(p)) if crate::cluster::ports::has_pool(&state.db, target_node_id).await => Some(p),
+        _ => proj.assigned_port.or(proj.port),
+    };
     let (target_port, target_deploy_dir) = if !to_node.is_local {
         let res = match state
             .cluster
@@ -330,7 +314,7 @@ pub async fn start_project_shift(
                 "shift.preflight",
                 json!({
                     "project": &proj,
-                    "preferredPort": proj.assigned_port.or(proj.port),
+                    "preferredPort": preferred_port,
                     "usedPorts": &used_ports,
                 }),
                 Duration::from_secs(20),
@@ -355,7 +339,7 @@ pub async fn start_project_shift(
             });
         (port, dir)
     } else {
-        let port = match allocate_free_port_on_node(proj.assigned_port.or(proj.port), &used_ports) {
+        let port = match allocate_free_port_on_node(preferred_port, &used_ports) {
             Ok(p) => p,
             Err(e) => {
                 fail_migration(state, migration_id, &e).await;
@@ -854,6 +838,7 @@ pub async fn complete_migration_cutover(
     sqlx::query(
         "UPDATE projects
          SET node_id = $2,
+             bind_ip = '',
              port = $3,
              assigned_port = $3,
              deploy_dir = $4,
@@ -1310,6 +1295,11 @@ mod tests {
             node_id: Some(node_id),
             placement_version: 1,
             assigned_port: Some(port),
+            bind_ip: String::new(),
+            cpu_limit: 0,
+            memory_limit_mb: 0,
+            disk_limit_mb: 0,
+            backup_limit: 0,
         }
     }
 
@@ -1526,34 +1516,37 @@ mod tests {
         .fetch_one(&state.db)
         .await
         .unwrap();
-        let dev_user = state
-            .auth
-            .list_users()
+        crate::auth::grants::replace_from_legacy_json(&state.db, dev_id, r#"["deploy","projects_manage"]"#, "[]", None)
             .await
-            .unwrap()
-            .into_iter()
-            .find(|u| u.id == dev_id)
             .unwrap();
+        let dev_user = state.auth.get_user_by_id(dev_id).await.unwrap();
         let rbac_err = verify_cross_node_shift_rbac(&state, &dev_user, proj.id, good_target_id)
             .await
             .unwrap_err();
         assert_eq!(rbac_err.0, StatusCode::FORBIDDEN);
 
-        // Assigning project access on user allows cross-node shift
-        sqlx::query("UPDATE users SET allowed_projects = $1 WHERE id = $2")
-            .bind(format!("[{}]", proj.id))
+        // Even with project access and deploy/manage powers, only admins may move apps
+        crate::auth::grants::replace_from_legacy_json(
+            &state.db,
+            dev_id,
+            r#"["deploy","projects_manage"]"#,
+            &format!("[{}]", proj.id),
+            None,
+        )
+        .await
+        .unwrap();
+        let dev_user_scoped = state.auth.get_user_by_id(dev_id).await.unwrap();
+        let scoped_err = verify_cross_node_shift_rbac(&state, &dev_user_scoped, proj.id, good_target_id)
+            .await
+            .unwrap_err();
+        assert_eq!(scoped_err.0, StatusCode::FORBIDDEN);
+
+        sqlx::query("UPDATE users SET role = 'admin' WHERE id = $1")
             .bind(dev_id)
             .execute(&state.db)
             .await
             .unwrap();
-        let dev_user_allowed = state
-            .auth
-            .list_users()
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|u| u.id == dev_id)
-            .unwrap();
+        let dev_user_allowed = state.auth.get_user_by_id(dev_id).await.unwrap();
         verify_cross_node_shift_rbac(&state, &dev_user_allowed, proj.id, good_target_id)
             .await
             .unwrap();
@@ -1747,5 +1740,109 @@ mod tests {
         target_p2p.abort();
         target_rpc.abort();
         let _ = std::fs::remove_dir_all(&target_data);
+    }
+
+    async fn backup_api(
+        router: &axum::Router,
+        sess: &crate::auth::session::Session,
+        method: Method,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Cookie", format!("nd_session={}", sess.id))
+            .header("X-CSRF-Token", &sess.csrf_token)
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = router.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn backups_of_an_app_on_another_vps_are_built_and_restored_on_that_vps() {
+        let state = crate::api::common::tests_state_helper().await;
+        let _local = state
+            .cluster
+            .pair_local_node("http://127.0.0.1:8080", "ws://127.0.0.1:8080/api/cluster/node-ws", "core-node")
+            .await
+            .unwrap();
+        let (nid, node_data, p2p, rpc) = enroll_and_wire_remote_node(&state, "bk-node", false).await;
+        let admin = state.auth.list_users().await.unwrap().into_iter().find(|u| u.is_main_admin).unwrap();
+        let sess = state.auth.create_session(admin.id).await.unwrap();
+
+        let site = node_data.join("sites/bk-remote");
+        let proj_id = state
+            .projects
+            .create(&sample_shift_project("BK Remote", "bk-remote", &site.to_string_lossy(), 43301, nid, vec![], ""))
+            .await
+            .unwrap();
+        let app = site.join("app");
+        std::fs::create_dir_all(app.join("sub")).unwrap();
+        std::fs::write(app.join("a.txt"), "v1").unwrap();
+        std::fs::write(app.join("sub/b.txt"), "inner").unwrap();
+        state.projects.set_env_var(proj_id, "FOO", "1", true).await.unwrap();
+        let router = crate::api::create_router(state.clone());
+
+        // The backup is built on the node, not on Core.
+        let (st, started) = backup_api(&router, &sess, Method::POST, &format!("/api/projects/{proj_id}/backup"), json!({"note": "remote"})).await;
+        assert_eq!(st, StatusCode::OK, "{started}");
+        assert_eq!(started["status"], "running");
+        let bid = started["backupId"].as_i64().unwrap();
+        let mut item = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, list) = backup_api(&router, &sess, Method::GET, &format!("/api/projects/{proj_id}/backups"), json!({})).await;
+            item = list.as_array().unwrap().iter().find(|b| b["id"] == bid).cloned().unwrap_or_default();
+            if item["status"] == "complete" || item["status"] == "failed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(item["status"], "complete", "{item}");
+        assert_eq!(item["format"], "archive");
+        assert_eq!(item["fileCount"], 2);
+        assert_eq!(item["checksumSha256"].as_str().unwrap().len(), 64);
+        let archive = PathBuf::from(item["path"].as_str().unwrap());
+        assert!(archive.is_file() && archive.starts_with(&node_data), "the archive is on the node: {archive:?}");
+        assert!(!crate::backups::archive_path(state.cluster.data_dir(), proj_id, bid).exists(), "nothing was written on Core");
+
+        // A backup stored on another VPS can't be downloaded from Core.
+        let (st, _) = backup_api(&router, &sess, Method::GET, &format!("/api/projects/{proj_id}/backups/{bid}/download"), json!({})).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        // The app changes; restoring replaces its files on the node and Core's env variables.
+        std::fs::write(app.join("a.txt"), "v2").unwrap();
+        std::fs::write(app.join("extra.txt"), "added later").unwrap();
+        state.projects.set_env_var(proj_id, "BAR", "2", true).await.unwrap();
+        let (st, res) = backup_api(&router, &sess, Method::POST, &format!("/api/projects/{proj_id}/backups/restore"), json!({"backupId": bid})).await;
+        assert_eq!(st, StatusCode::OK, "{res}");
+        let mut status = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, s) = backup_api(&router, &sess, Method::GET, &format!("/api/projects/{proj_id}/backups/restore-status"), json!({})).await;
+            if s["state"] == "done" || s["state"] == "failed" {
+                status = s;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(status["state"], "done", "{status}");
+        assert_eq!(std::fs::read_to_string(app.join("a.txt")).unwrap(), "v1");
+        assert!(!app.join("extra.txt").exists(), "files not in the backup are removed on the node");
+        assert!(site.join(".pre-restore").is_dir(), "the node keeps the undo copy");
+        let env = state.projects.get_env_map(proj_id).await;
+        assert!(env.contains_key("FOO") && !env.contains_key("BAR"), "env is replaced on Core");
+
+        // Deleting the backup removes the archive on the node.
+        let (st, _) = backup_api(&router, &sess, Method::DELETE, &format!("/api/projects/{proj_id}/backups/{bid}"), json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(!archive.exists());
+
+        p2p.abort();
+        rpc.abort();
+        let _ = std::fs::remove_dir_all(&node_data);
     }
 }

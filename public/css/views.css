@@ -90,7 +90,6 @@
   border-top: 1px solid var(--border-subtle);
 }
 
-
 /* ---------- Logs ---------- */
 .log-console-wrapper {
   display: flex;
@@ -165,7 +164,6 @@
   color: var(--danger-light);
   font-weight: 500;
 }
-
 
 /* ---------- Audit ---------- */
 .audit-actor-pill {
@@ -432,6 +430,49 @@
   grid-column: 1 / -1;
 }
 
+/* Group headings that split the settings into Platform / Deploy / Access / Appearance. */
+.settings-section-label {
+  grid-column: 1 / -1;
+  margin: 10px 2px -4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.settings-cards-grid > .settings-section-label:first-child { margin-top: 0; }
+
+/* Accounts card sits in the top row beside Platform Update and Server Controls, so its fields stack.
+   When the page has two columns the card takes the full row and splits into two. */
+.settings-accounts-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+.settings-accounts-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.settings-accounts-actions {
+  margin-top: auto;
+  display: flex;
+  justify-content: flex-end;
+}
+@media (min-width: 901px) and (max-width: 1280px) {
+  .settings-card-accounts { grid-column: 1 / -1; }
+  .settings-accounts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .settings-accounts-col + .settings-accounts-col {
+    padding-left: 24px;
+    border-left: 1px solid var(--border-subtle);
+  }
+}
+@media (min-width: 681px) and (max-width: 900px) {
+  .settings-card-accounts { grid-column: 1 / -1; }
+}
+}
+
 .settings-card-inset {
   background: var(--bg-alt);
   border: 1px solid var(--border-subtle);
@@ -509,24 +550,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-.tbl-users th,
-.tbl-users td {
-  padding: 12px 16px;
-  vertical-align: middle;
-}
-
-.tbl-users th {
-  font-size: 12px;
-}
-
-.settings-users-pagination {
-  padding: 4px 0 0 !important;
-  border-top: none !important;
-  font-size: 12px;
-  gap: 8px;
-}
-
 
 /* ============================================================================
    Overview Live Resource Telemetry Breakdown
@@ -673,8 +696,6 @@
   border-radius: var(--radius-xs);
   color: var(--text-muted);
 }
-
-
 
 /* ---------- App Overview Usage Cards (CPU, RAM, Network Line Graph, Disk) ---------- */
 .app-usage-grid {
@@ -1455,194 +1476,9 @@
   background: var(--danger-bg);
 }
 /* ===== Add / edit user dialog ===== */
-.user-access-modal .ua-section {
-  margin-top: 20px;
-}
-.user-access-modal .ua-section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-main);
-  margin-bottom: 10px;
-}
-.user-access-modal .ua-roles {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-.user-access-modal .ua-role {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 10px 12px;
-  text-align: left;
-  background: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  color: var(--text-normal);
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-.user-access-modal .ua-role:hover {
-  border-color: var(--border-medium);
-}
-.user-access-modal .ua-role.active {
-  border-color: var(--accent);
-  background: var(--accent-glow);
-}
-.user-access-modal .ua-role-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-.user-access-modal .ua-role-desc {
-  font-size: 11.5px;
-  line-height: 1.35;
-  color: var(--text-dim);
-}
-.user-access-modal .ua-perms {
-  margin-top: 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--bg-input);
-}
-.user-access-modal .ua-perms > summary {
-  padding: 10px 12px;
-  font-size: 12.5px;
-  color: var(--text-muted);
-  cursor: pointer;
-  list-style: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.user-access-modal .ua-perms > summary::-webkit-details-marker {
-  display: none;
-}
-.user-access-modal .ua-perms > summary::after {
-  content: "Show";
-  font-size: 12px;
-  color: var(--accent);
-}
-.user-access-modal .ua-perms[open] > summary::after {
-  content: "Hide";
-}
-.user-access-modal .ua-perms-body {
-  max-height: 300px;
-  overflow-y: auto;
-  padding: 2px 12px 12px;
-  border-top: 1px solid var(--border-subtle);
-}
-.user-access-modal .ua-perm-group-title {
-  margin: 12px 0 6px;
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-}
-.user-access-modal .ua-perm-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 16px;
-}
-.user-access-modal .ua-perm {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 5px 0;
-  cursor: pointer;
-}
-.user-access-modal .ua-perm input {
-  margin-top: 2px;
-  flex-shrink: 0;
-}
-.user-access-modal .ua-perm > span {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.user-access-modal .ua-perm-name {
-  font-size: 13px;
-  color: var(--text-main);
-}
-.user-access-modal .ua-perm-hint {
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-.user-access-modal .ua-scope {
-  display: flex;
-  gap: 8px;
-}
-.user-access-modal .ua-scope-option {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  font-size: 13px;
-  color: var(--text-main);
-  background: var(--bg-input);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-}
-.user-access-modal .ua-scope-option:has(input:checked) {
-  border-color: var(--accent);
-  background: var(--accent-glow);
-}
-.user-access-modal .ua-project-list {
-  margin-top: 8px;
-  max-height: 180px;
-  overflow-y: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: var(--bg-input);
-}
-.user-access-modal .ua-project-list[hidden] {
-  display: none;
-}
-.user-access-modal .ua-project {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 9px 12px;
-  font-size: 13px;
-  cursor: pointer;
-  border-bottom: 1px solid var(--border-subtle);
-}
-.user-access-modal .ua-project:last-child {
-  border-bottom: none;
-}
-.user-access-modal .ua-project-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-main);
-}
-.user-access-modal .ua-project-kind {
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-.user-access-modal .ua-project-empty {
-  padding: 12px;
-  font-size: 12.5px;
-  color: var(--text-dim);
-}
+
 @media (max-width: 680px) {
-  .user-access-modal .ua-roles {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .user-access-modal .ua-perm-grid {
-    grid-template-columns: 1fr;
-  }
-  .user-access-modal .ua-scope {
-    flex-direction: column;
-  }
+
   /* One scroll area on phones: the dialog itself, not a box inside it. */
-  .user-access-modal .ua-perms-body {
-    max-height: none;
-  }
+  
 }

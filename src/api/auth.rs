@@ -33,16 +33,38 @@ pub(crate) async fn login_handler(
     // Sync Main Admin login ID & password from .env (supports live editing .env without server restart)
     state.auth.ensure_admin().await;
 
-    let uname_key = format!("login:{}", payload.username.trim().to_lowercase());
-    if let Some(rem) = state.auth.check_lockout(&uname_key) {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            format!("Too many failed sign-in attempts. Account temporarily locked for {} seconds.", rem),
-        ));
+    // Failures are counted per username AND address, so someone else cannot lock an account out by
+    // failing sign-ins from their own address. A per-address limit covers guessing across many
+    // usernames, and a high per-username limit only slows down guessing spread over many addresses.
+    let ip = client_ip(&headers);
+    let name = payload.username.trim().to_lowercase();
+    let uname_key = format!("login:{name}|{ip}");
+    let ip_key = format!("loginip:{ip}");
+    let user_key = format!("loginuser:{name}");
+    for key in [&uname_key, &ip_key, &user_key] {
+        if let Some(rem) = state.auth.check_lockout(key) {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("Too many failed sign-in attempts. Try again in {rem} seconds."),
+            ));
+        }
     }
+    let note_failure = |state: &AppState| {
+        state.auth.record_failure_limit(&ip_key, 30, 600);
+        state.auth.record_failure_limit(&user_key, 100, 60);
+        state.auth.record_failure_limit(&uname_key, 5, 600)
+    };
 
     let Some((user, hash)) = state.auth.get_user_by_username(payload.username.trim()).await else {
-        state.auth.record_failure(&uname_key);
+        note_failure(&state);
+        // Explain only to someone who knows the request's password.
+        match super::accounts::request_status_for_login(&state, &payload.username, &payload.password).await.as_deref() {
+            Some("pending") => {
+                return Err((StatusCode::FORBIDDEN, "Your account request is waiting for admin approval.".to_string()))
+            }
+            Some("rejected") => return Err((StatusCode::FORBIDDEN, "Your account request was declined.".to_string())),
+            _ => {}
+        }
         return Err((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()));
     };
 
@@ -54,22 +76,23 @@ pub(crate) async fn login_handler(
         ));
     }
 
-    if user.disabled {
-        return Err((StatusCode::FORBIDDEN, "Account is disabled by administrator".to_string()));
-    }
-
     if !verify_password(&payload.password, &hash) {
-        if let Some(lock_s) = state.auth.record_failure(&uname_key) {
-            log_audit(&state, &user.username, "auth.lockout", Some(&user.username), Some("Account locked after repeated failed password attempts")).await;
+        if let Some(lock_s) = note_failure(&state) {
+            log_audit(&state, &user.username, "auth.lockout", Some(&user.username), Some(&format!("Sign-ins from {ip} blocked after repeated failed password attempts"))).await;
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
-                format!("Too many failed sign-in attempts. Account locked for {} seconds.", lock_s),
+                format!("Too many failed sign-in attempts. Try again in {} seconds.", lock_s),
             ));
         }
         return Err((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()));
     }
 
     state.auth.clear_failures(&uname_key);
+
+    // Only someone who knows the password learns the account is disabled.
+    if user.disabled {
+        return Err((StatusCode::FORBIDDEN, "Account is disabled by administrator".to_string()));
+    }
 
     // If 2FA is enabled on this account, require 2FA challenge verification before creating a session
     if user.totp_enabled {
@@ -205,6 +228,7 @@ pub(crate) async fn me_handler(
     let active_sessions = state.auth.count_active_sessions(user.id).await;
     let passkey_count = state.auth.count_user_passkeys(user.id).await;
     Ok(Json(LoginResponse {
+        two_factor_required: crate::auth::policy::needs_two_factor_setup(&user),
         user,
         csrf: session.csrf_token,
         active_sessions,
@@ -306,7 +330,7 @@ pub(crate) async fn change_password_handler(
     let next_hash = hash_password(&payload.next)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to hash password".to_string()))?;
 
-    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+    sqlx::query("UPDATE users SET password_hash = $1, must_change_password = FALSE WHERE id = $2")
         .bind(&next_hash)
         .bind(user.id)
         .execute(&state.db)

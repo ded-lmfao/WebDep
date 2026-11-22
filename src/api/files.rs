@@ -745,7 +745,12 @@ mod tests {
     use crate::auth::User;
 
     fn make_user(perms: &str) -> User {
-        User::from_db(2, "dev".into(), 0, perms.into(), "[\"*\"]".into(), 0, 1_700_000_000)
+        let grants = crate::auth::grants::Grants::from_legacy(
+            &crate::auth::grants::parse_legacy_permissions(perms),
+            true,
+            &[],
+        );
+        User::from_db(2, "dev".into(), 0, perms.into(), "[\"*\"]".into(), 0, 1_700_000_000).with_grants(grants)
     }
 
     #[test]

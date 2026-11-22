@@ -9,6 +9,12 @@ pub mod logs;
 pub mod system;
 pub mod databases;
 pub mod users;
+pub mod access;
+pub mod accounts;
+pub mod ports;
+pub mod limits;
+pub mod limit_watch;
+pub mod db_backups;
 
 pub use common::AppState;
 
@@ -19,7 +25,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::StatusCode,
     middleware,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use tower_http::compression::CompressionLayer;
@@ -57,6 +63,10 @@ use self::logs::*;
 use self::system::*;
 use self::databases::*;
 use self::users::*;
+use self::access::*;
+use self::accounts::*;
+use self::ports::*;
+use self::limits::*;
 use self::common::{axum_static_fallback, security_middleware};
 
 pub fn create_router(state: AppState) -> Router {
@@ -96,7 +106,19 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/projects/:id/backups", get(list_backups_handler))
         .route("/api/projects/:id/backup", post(create_backup_handler))
         .route("/api/projects/:id/backups/restore", post(restore_backup_handler))
+        .route("/api/projects/:id/backups/restore-status", get(restore_status_handler))
         .route("/api/projects/:id/backups/:backup_id", delete(delete_backup_handler))
+        .route("/api/projects/:id/backups/:backup_id/lock", put(lock_backup_handler))
+        .route("/api/projects/:id/backups/:backup_id/download", get(download_backup_handler))
+        .route("/api/limit-events", get(limit_watch::limit_events_handler))
+        // Database backups
+        .route("/api/databases/:id/backups", get(db_backups::list_db_backups_handler))
+        .route("/api/databases/:id/backup", post(db_backups::create_db_backup_handler))
+        .route("/api/databases/:id/backups/restore", post(db_backups::restore_db_backup_handler))
+        .route("/api/databases/:id/backups/restore-status", get(db_backups::db_restore_status_handler))
+        .route("/api/databases/:id/backups/:backup_id", delete(db_backups::delete_db_backup_handler))
+        .route("/api/databases/:id/backups/:backup_id/lock", put(db_backups::lock_db_backup_handler))
+        .route("/api/databases/:id/backups/:backup_id/download", get(db_backups::download_db_backup_handler))
         // Project Env
         .route("/api/projects/:id/env", get(get_env_handler).put(set_env_handler).post(set_env_handler))
         .route("/api/projects/:id/env/bulk", post(bulk_set_env_handler))
@@ -148,6 +170,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/projects/:id/usage", get(project_usage_handler))
         .route("/api/monitor", get(monitor_handler))
         .route("/api/audit", get(audit_handler))
+        .route("/api/audit/export", get(audit_export_handler))
+        .route("/api/system/backups", get(list_db_backups_handler).post(create_db_backup_handler))
+        .route("/api/system/backups/:name", get(download_db_backup_handler))
+        .route("/api/system/notify-test", post(test_webhook_handler))
         .route("/api/cache/stats", get(cache_stats_handler))
         .route("/api/cache/clear", post(cache_clear_handler))
         .route("/api/system/restart", post(restart_panel_handler))
@@ -160,6 +186,23 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/users", get(list_users_handler).post(create_user_handler))
         .route("/api/users/:id", put(update_user_handler).patch(update_user_handler).delete(delete_user_handler))
         .route("/api/users/:id/reset-2fa", post(admin_reset_user_2fa_handler))
+        // Account requests and per-app access
+        .route("/api/auth/registration", get(registration_status_handler))
+        .route("/api/auth/register", post(register_handler))
+        .route("/api/auth/register/challenge", get(registration_challenge_handler))
+        .route("/api/auth/reset", post(reset_password_handler))
+        .route("/api/auth/sessions", get(my_sessions_handler))
+        .route("/api/auth/sessions/:ref", delete(revoke_my_session_handler))
+        .route("/api/users/:id/reset-link", post(create_reset_link_handler))
+        .route("/api/users/:id/sessions", get(user_sessions_handler).delete(revoke_user_sessions_handler))
+        .route("/api/users/:id/sessions/:ref", delete(revoke_user_session_handler))
+        .route("/api/auth/profile", patch(update_profile_handler).put(update_profile_handler))
+        .route("/api/requests", get(list_requests_handler))
+        .route("/api/requests/:id", delete(delete_request_handler))
+        .route("/api/requests/:id/approve", post(approve_request_handler))
+        .route("/api/requests/:id/reject", post(reject_request_handler))
+        .route("/api/access/:scope/:id", get(get_app_access_handler))
+        .route("/api/access/:scope/:id/:user_id", put(set_app_access_handler).delete(remove_app_access_handler))
         // Multi-Node Cluster Mesh & Enrollment
         .route("/api/cluster/enroll", post(enroll_node_handler))
         .route("/api/cluster/node-ws", get(node_ws_handler))
@@ -174,6 +217,21 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/cluster/nodes/:id/evacuate", post(evacuate_cluster_node_handler))
         .route("/api/cluster/nodes/:id", delete(delete_cluster_node_handler).patch(update_cluster_node_handler))
         .route("/api/cluster/modules", get(list_cluster_modules_handler))
+        .route("/api/cluster/custom-modules", get(list_custom_modules_handler).post(save_custom_module_handler))
+        .route("/api/cluster/custom-modules/:id", delete(delete_custom_module_handler))
+        .route("/api/cluster/nodes/:id/ports", get(get_node_ports_handler).post(add_node_ports_handler).patch(set_node_ports_open_handler))
+        .route("/api/cluster/nodes/:id/ports/remove", post(remove_node_ports_handler))
+        .route("/api/cluster/nodes/:id/ports/:port", delete(remove_node_port_handler))
+        .route("/api/cluster/nodes/:id/port-range", put(set_port_range_handler))
+        .route("/api/cluster/nodes/:id/firewall-sync", post(sync_node_firewall_handler))
+        .route("/api/projects/:id/port", put(set_app_port_handler))
+        .route("/api/projects/:id/extra-ports", put(set_extra_ports_handler))
+        .route("/api/projects/:id/ip", put(set_app_ip_handler))
+        .route("/api/limits", get(list_limits_handler))
+        .route("/api/projects/:id/limits", put(set_project_limits_handler))
+        .route("/api/databases/:id/limits", put(set_database_limits_handler))
+        .route("/api/cluster/nodes/:id/ips", get(list_node_ips_handler).post(add_node_ip_handler))
+        .route("/api/cluster/nodes/:id/ips/:ip_id", delete(remove_node_ip_handler))
         .route(
             "/api/cluster/modules/install-fleet",
             post(install_fleet_modules_handler),

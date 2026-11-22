@@ -4,6 +4,7 @@
  */
 
 import { state, escapeHtml, openModal, closeModal } from './state.js';
+import { readLimitFields, setLimitFieldsVisible, resetLimitFields } from './limits_fields.js';
 import { api, toast } from './api.js';
 
 export function setServiceSourceMode(mode) {
@@ -44,6 +45,8 @@ export function setServiceSourceMode(mode) {
 export function openAddServiceModal() {
   const form = document.getElementById('service-form');
   if (form) form.reset();
+  resetLimitFields('service');
+  setLimitFieldsVisible('service', true);
   const idEl = document.getElementById('service-form-id');
   if (idEl) idEl.value = '';
   const titleEl = document.getElementById('modal-service-title');
@@ -165,6 +168,7 @@ export function applyServicePreset(preset) {
 export function openEditServiceModal(id) {
   const p = state.projects.find((x) => x.id === id);
   if (!p) return;
+  setLimitFieldsVisible('service', false);
 
   const idEl = document.getElementById('service-form-id');
   if (idEl) idEl.value = p.id;
@@ -339,6 +343,10 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
   if (!id && selectedNodeVal) {
     payload.node_id = Number(selectedNodeVal);
   }
+  if (!id) {
+    const l = readLimitFields('service');
+    Object.assign(payload, { cpu_limit: l.cpu, memory_limit_mb: l.memoryMb, disk_limit_mb: l.diskMb, backup_limit: l.backups });
+  }
 
   try {
     let targetId = id;
@@ -360,6 +368,7 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
       if (window.navigateTo) window.navigateTo('services');
     }
   } catch (err) {
+    if (window.handleNoFreePort?.(err)) return;
     toast(`Save failed: ${err.message}`, 'error');
   } finally {
     if (submitBtn) {

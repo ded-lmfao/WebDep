@@ -68,6 +68,7 @@ pub(crate) async fn apply_caddy_handler(
                     .filter(|d| !d.is_empty())
                     .collect();
 
+                super::projects::ensure_domains_free(&state, id, &cleaned).await?;
                 p.domains = cleaned;
                 let domains_json = serde_json::to_string(&p.domains).unwrap_or_else(|_| "[]".to_string());
                 let ts = crate::db::now();
