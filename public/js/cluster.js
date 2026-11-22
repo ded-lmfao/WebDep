@@ -1636,7 +1636,7 @@ export async function loadMovesView() {
       <td><div class="acct-actions">${busy
         ? `<span class="acct-muted">${escapeHtml(dbMoves.get(Number(d.id)))}</span>`
         : targets.length
-          ? `<select class="form-control ipx-move" data-db-move="${d.id}" aria-label="Move ${escapeHtml(d.name)} to another node"><option value="">Move to node</option>${targets.map((t) => `<option value="${t.id}">${escapeHtml(nodeLabel(t))}</option>`).join('')}</select>`
+          ? `<button class="btn btn-secondary btn-sm" onclick="openMoveDatabaseModal(${d.id})">Move</button>`
           : '<span class="acct-muted" title="Add or bring another node online to move databases">No other node</span>'}</div></td>
     </tr>`;
   });
@@ -1647,16 +1647,24 @@ export async function loadMovesView() {
 /** databaseId -> what the move is doing right now. */
 const dbMoves = new Map();
 
+let movingDbId = null;
+
+function openMoveDatabaseModal(dbId) {
+  const db = (state.databases || []).find((d) => Number(d.id) === Number(dbId));
+  if (!db) return;
+  movingDbId = Number(dbId);
+  const targets = (state.nodes || []).filter((n) => n.status === 'online' && Number(n.id) !== appNodeId(db));
+  document.getElementById('move-db-title').textContent = `Move "${db.name}" to Node`;
+  document.getElementById('move-db-node').innerHTML = targets.length
+    ? targets.map((n) => `<option value="${n.id}">${escapeHtml(nodeLabel(n))} (${escapeHtml(n.region || 'default')})</option>`).join('')
+    : '<option value="">No other healthy online nodes available</option>';
+  openModal('modal-move-database');
+}
+
 async function moveDatabase(dbId, nodeId) {
   const db = (state.databases || []).find((d) => Number(d.id) === Number(dbId));
   const target = (state.nodes || []).find((n) => Number(n.id) === Number(nodeId));
   if (!db || !target) return;
-  const ok = await showConfirmDialog({
-    title: `Move ${db.name}`,
-    message: `Move "${db.name}" to ${nodeLabel(target)}? The data is copied while the database keeps running. The app linked to it (if any) is stopped during the copy, then started again with the new connection settings. If anything fails, the database stays where it is. The node needs the PostgreSQL module installed (Admin Panel > VPS Modules).`,
-    confirmText: 'Move database',
-  });
-  if (!ok) return void loadMovesView();
   try {
     await api(`/api/databases/${dbId}/move`, { method: 'POST', body: { nodeId: Number(nodeId) } });
   } catch (err) {
@@ -1686,10 +1694,13 @@ async function moveDatabase(dbId, nodeId) {
   setTimeout(poll, 1500);
 }
 
-document.getElementById('moves-list-body')?.addEventListener('change', (e) => {
-  const sel = e.target.closest('[data-db-move]');
-  if (sel && sel.value) void moveDatabase(sel.dataset.dbMove, sel.value);
+document.getElementById('move-db-confirm')?.addEventListener('click', () => {
+  const nodeId = Number(document.getElementById('move-db-node')?.value || 0);
+  if (!movingDbId || !nodeId) return toast('Select an online destination node first.', 'warning');
+  closeModal('modal-move-database');
+  void moveDatabase(movingDbId, nodeId);
 });
+window.openMoveDatabaseModal = openMoveDatabaseModal;
 
 // loadMovesView refetches infra data, so wait for typing to pause instead of fetching per keystroke.
 document.getElementById('moves-search')?.addEventListener('input', debounce(() => void loadMovesView(), 250));

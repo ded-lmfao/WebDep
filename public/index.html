@@ -3762,6 +3762,26 @@
   </div>
 
   <!-- MODAL: MOVE TO NODE & LIVE P2P SHIFT -->
+  <div class="modal-overlay" id="modal-move-database">
+    <div class="modal-container" style="max-width: 520px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="move-db-title">Move Database</h3>
+        <button class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="form-group" style="margin-bottom: 0;">
+          <label class="form-label" for="move-db-node">Destination node</label>
+          <select id="move-db-node" class="form-control"></select>
+          <span class="form-hint">The data is copied while the database keeps running. The app linked to it is stopped during the copy, then started again with the new connection settings. If anything fails, the database stays where it is. The node needs the PostgreSQL module (VPS Modules).</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-close-modal>Cancel</button>
+        <button type="button" class="btn btn-primary" id="move-db-confirm">Move</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="modal-move-project-node">
     <div class="modal-container" style="max-width: 620px;">
       <div class="modal-header">
