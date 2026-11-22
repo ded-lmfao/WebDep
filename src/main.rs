@@ -98,6 +98,12 @@ fn parse_cli_options() -> Result<CliOptions, String> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Isolated apps own their folders (including the git clone), while the panel runs git as another
+    // user; without this git refuses with "detected dubious ownership" and every fetch fails.
+    std::env::set_var("GIT_CONFIG_COUNT", "1");
+    std::env::set_var("GIT_CONFIG_KEY_0", "safe.directory");
+    std::env::set_var("GIT_CONFIG_VALUE_0", "*");
+
     if std::env::args()
         .nth(1)
         .map(|arg| arg == "--version" || arg == "-V")
