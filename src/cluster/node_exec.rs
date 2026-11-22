@@ -2208,9 +2208,8 @@ pub async fn execute_rpc(
                 return err_resp(req_id, 400, "Missing database id");
             };
             let dir = node_db_dir(&exec.data_dir, id);
-            let read_tail = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
-            let mut text = read_tail("postgresql.log");
-            let extra = read_tail("webdep-node.log");
+            let mut text = tokio::fs::read_to_string(dir.join("postgresql.log")).await.unwrap_or_default();
+            let extra = tokio::fs::read_to_string(dir.join("webdep-node.log")).await.unwrap_or_default();
             if !extra.is_empty() {
                 text.push_str("
 ");
