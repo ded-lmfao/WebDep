@@ -270,7 +270,7 @@ pub(crate) fn attach_security_headers(res: &mut Response, is_api: bool, is_https
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+                "default-src 'self'; script-src 'self' 'unsafe-hashes' 'sha256-97l24HYIWEdSIQ8PoMHzpxiGCZuyBDXtN19RPKFsOgk='; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
             ),
         );
     }

@@ -255,10 +255,12 @@ Move a website or backend service from one VPS to another directly from its work
 - **Resource limits** (set at creation, changed by admins in **App Limits**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root) and Job Objects on Windows; a disk limit (checked every minute) stops the app when it grows past it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
 - **Move Apps** moves a website or service to another node (admins only).
 
-#### Backups and restore (Releases › Backups)
+#### Backups and restore (the **Backups** tab of every website, service and database)
 - **Create backup** saves every file in the app's Files folder plus its environment variables as one archive, built in the background, with its size, file count, creator, status and checksum. Optionally leave out names such as `cache` or `*.log`. A backup limit per app (App Limits) caps how many it can hold.
 - **Restore** replaces the app's files with the backup (nothing is merged), stops and restarts the app, restores the environment variables, and keeps the replaced files for 24 hours so it can be undone. It checks the checksum first and swaps folders with rollback, so a bad backup or a failure never leaves the app half restored. You confirm by typing the app's name.
 - **Download**, **lock** (a locked backup can't be deleted) and **delete** are on each row. Apps on other VPSes are backed up and restored on that VPS.
+- **Databases** are backed up as a PostgreSQL dump while they keep running (no downtime). **Restore** replaces everything in the database inside a single transaction: if anything fails, the database is left exactly as it was. The database must be running. Databases on other VPSes are not supported yet.
+- Backups are always manual. Releases are a separate list (the newest 5 are kept).
 
 #### Maintenance
 - The control database is backed up automatically once a day (seven kept) and before upgrades; files are in `data/backups/control-db/`.
@@ -274,9 +276,17 @@ Opening any website or service exposes its workspace toolbar (**Start / Stop / R
 - **Logs** — Real-time stdout/stderr and build log streaming over SSE/WebSocket.
 - **Files** — In-browser remote file explorer, upload/download, and syntax-highlighted editor scoped strictly to the project root.
 - **Environment** — AES-256-GCM encrypted `.env` Vault secrets and linked database bindings.
-- **Releases** — Build archives, local snapshots, **Save Off-Node on Web-Core**, and **Restore to Node**.
+- **Releases** — The newest five releases and rollback to any of them.
+- **Backups** — Manual backups you can restore, download, lock and delete (also on every database).
 - **Activity** — Workload audit trail and placement/shift events (visible with the app's *View activity* permission).
 - **Permissions** — Who can use this app and what they can do (admins, and users with *Manage access* on it).
+
+### Isolating apps (Linux)
+By default an app runs as the same server user as the panel, so code a user deploys could read the panel's data folder and other apps' files. On a Linux server where the panel runs as root, set `WEBDEP_ISOLATE_APPS=1` (needs util-linux: `unshare`, `setpriv`, `mount`) and every app and build is started:
+- in its own **PID, mount, IPC and UTS namespaces** (`unshare`): it cannot see or signal other processes;
+- with the panel's data folder and working folder **covered by an empty tmpfs**, only the app's own folder bound back in, and a private `/tmp`: other apps and the panel's secrets do not exist for it;
+- as an **unprivileged user** (`setpriv --no-new-privs`, uid/gid `WEBDEP_APP_UID`/`WEBDEP_APP_GID`, default 65534) that cannot undo any of this.
+The app's folder is handed to that user on start. Runtimes must be installed where that user can run them (not under `/root`). CPU and memory limits (cgroups) apply on top. The network stays shared because the reverse proxy reaches apps on their ports. The App Limits page says whether isolation is active. Turn it on for a test app first: it has not been exercised on a real Linux server yet.
 
 ### Data Layout
 
@@ -361,6 +371,8 @@ WebDep loads configuration from `.env` in the process's current working director
 | `WEBDEP_NODE_P2P_PORT` | `0` *(ephemeral)* | TCP port for Web-Node's direct P2P HTTP receiver (`0` picks a free port). |
 | `WEBDEP_SKIP_DB_BACKUP` | `false` | Set to `1` to skip the automatic control-database backup taken before an upgrade applies new migrations. Only if you back up yourself. |
 | `WEBDEP_MANAGE_FIREWALL` | `true` | Set to `false` to stop WebDep from editing UFW/iptables (panel, app, database and WireGuard mesh rules). Use it when the host firewall is managed elsewhere. |
+| `WEBDEP_ISOLATE_APPS` | `false` | Linux, panel running as root: set to `1` to run every app and build isolated (see *Isolating apps*). |
+| `WEBDEP_APP_UID` / `WEBDEP_APP_GID` | `65534` | The unprivileged user and group isolated apps run as. |
 | `RUST_LOG` | `webdep=info` | Tracing log filter (`debug`, `info`, `warn`, `error`). |
 
 ---

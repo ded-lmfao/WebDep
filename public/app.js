@@ -21,7 +21,7 @@ import { loadProjects, renderProjectsList, openAddWebsiteModal } from './js/webs
 import { renderServicesList } from './js/services.js';
 import { navigateTo, renderCurrentView, renderWebsiteWorkspaceHeader } from './js/workspace.js';
 import { loadDatabases, renderDatabasesList } from './js/databases.js';
-import { loadDeploymentsView, loadReleasesView, loadRollbacksView, waterPipelines } from './js/deployments.js';
+import { loadDeploymentsView, loadReleasesView, loadBackupsView, loadRollbacksView, waterPipelines } from './js/deployments.js';
 import { loadMonitorView } from './js/settings.js';
 
 // Explorer & Logs Subsystems (Initialize listeners & exports)
@@ -72,6 +72,9 @@ async function pollTick() {
     } else if (state.currentView === 'releases') {
       renderWebsiteWorkspaceHeader();
       await loadReleasesView();
+    } else if (state.currentView === 'backups') {
+      renderWebsiteWorkspaceHeader();
+      await loadBackupsView();
     } else if (state.currentView === 'rollbacks') {
       renderWebsiteWorkspaceHeader();
       await loadRollbacksView();

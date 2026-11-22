@@ -313,6 +313,7 @@ pub(crate) async fn delete_database_handler(
     // Deleting a database is for admins and its owner (the per-app `app_delete` power).
     let user = verify_db_access(&state, &headers, &["app_delete"], &db).await?;
     state.databases.delete(id).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::db_backups::remove_database_backups(state.cluster.data_dir(), id);
     let _ = crate::auth::grants::remove_for_app(&state.db, crate::auth::grants::SCOPE_DATABASE, id).await;
     state.auth.invalidate_sessions();
     state.cache.invalidate_prefix("databases:");

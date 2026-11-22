@@ -16,5 +16,7 @@
 - Backups API: src/api/projects/backups.rs:835 create_archive_backup, :1013 start_restore, :1097 restore_in_place, :1214 undo_housekeeping, :1243 lock_backup_handler, :1274 download_backup_handler, :1360 run_remote_archive_backup; node ops src/cluster/node_exec.rs:1278 project.backup_archive, :1335 project.backup_restore, project.backup_delete
 - Limits: src/app_limits.rs:19 AppLimits; src/api/limits.rs:161 enforce_disk_limits (every 60 s from main.rs); src/runtime/limits.rs:135 apply_to_process (Windows job objects; Linux cgroups in prepare)
 - Frontend: public/js/releases.js:165 loadProjectBackupsTable (status, icons, restore dialog with typed name); public/js/app_limits.js:54 loadLimitsView; public/js/limits_fields.js
+- DB backups: src/db_backups.rs (dump/restore engine), src/api/db_backups.rs (handlers), migrations/0014; UI public/js/backups.js (shared by websites, services, databases; tab 'backups' in state.js WEBSITE/DATABASE_WORKSPACE_TABS)
+- Security: sessions hashed src/auth/manager.rs session_key; lockout keys login:<user>|<ip>, loginip:<ip>, loginuser:<user> in src/api/auth.rs; CSP in src/api/common.rs attach_security_headers; domain validation src/api/projects.rs normalize_domain/ensure_domains_free; git URL rules src/git.rs validate_git_url; isolation src/runtime/isolation.rs
 Propagation (new Project column): migration -> models.rs SELECT/pg_row_to_project -> 4 test literals -> api handler -> UI.
 Propagation (new panel power): grants.rs PANEL_ACCOUNT_POWERS -> permissions.js PANEL_ACCOUNT_POWERS + LABELS.

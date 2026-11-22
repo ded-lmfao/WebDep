@@ -22,13 +22,7 @@
     }
   </style>
   <meta name="color-scheme" content="dark light">
-  <script>
-    try {
-      var savedTheme = localStorage.getItem('webdep.theme');
-      if (savedTheme) document.documentElement.dataset.theme = savedTheme;
-      if (localStorage.getItem('webdep.sidebarCollapsed') === '1') document.documentElement.classList.add('sidebar-collapsed');
-    } catch (_) {}
-  </script>
+  <script src="/js/boot.js"></script>
   <link rel="stylesheet" href="/style.css?v=3.28.0">
   <link rel="modulepreload" href="/vendor/framer-motion/dom.js">
   <link rel="modulepreload" href="/js/login_motion.js">
@@ -546,6 +540,14 @@
                 <line x1="7" y1="7" x2="7.01" y2="7"></line>
               </svg>
               <span>Releases</span>
+            </button>
+            <button class="ws-tab-item" data-ws-tab="backups" onclick="switchWebsiteTab('backups')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <polyline points="21 8 21 21 3 21 3 8"></polyline>
+                <rect x="1" y="3" width="22" height="5"></rect>
+                <line x1="10" y1="12" x2="14" y2="12"></line>
+              </svg>
+              <span>Backups</span>
             </button>
             <button class="ws-tab-item" data-ws-tab="rollbacks" onclick="switchWebsiteTab('rollbacks')"
               style="display: none;">
@@ -1095,8 +1097,18 @@
               <div class="pagination-bar" id="releases-pagination"></div>
             </div>
           </div>
+        </section>
 
-          <div class="card" style="margin-top: 16px;">
+        <!-- ==================== BACKUPS VIEW ==================== -->
+        <section id="view-backups" class="view-section">
+          <div class="view-header">
+            <div class="view-title-group">
+              <h1>Backups</h1>
+              <p id="backups-view-subtitle">Manual backups of this app. Restoring replaces its files and settings with the backup.</p>
+            </div>
+          </div>
+
+          <div class="card">
             <div class="card-header bk-header">
               <div>
                 <span class="card-title">Backups</span>
@@ -2254,6 +2266,7 @@
             </div>
           </div>
           <div id="limits-banner" class="acct-callout" hidden></div>
+          <div id="isolation-banner" class="acct-callout" hidden></div>
           <div class="table-responsive acct-table-wrap">
             <table class="table acct-table lim-table">
               <thead>
@@ -3656,7 +3669,7 @@
       <div class="modal-header">
         <div>
           <h3 class="modal-title">Create backup</h3>
-          <div style="font-size: 11.5px; color: var(--text-dim); margin-top: 2px;">Saves every file in the app's Files folder and its environment variables.</div>
+          <div id="backup-modal-subtitle" style="font-size: 11.5px; color: var(--text-dim); margin-top: 2px;">Saves every file in the app's Files folder and its environment variables.</div>
         </div>
         <button class="modal-close" data-close-modal>&times;</button>
       </div>
@@ -3665,7 +3678,7 @@
           <label class="form-label" for="backup-note">Note</label>
           <input type="text" id="backup-note" class="form-control" maxlength="200" placeholder="What this backup is for" autocomplete="off">
         </div>
-        <div class="form-group" style="margin:0">
+        <div class="form-group" id="backup-ignore-wrap" style="margin:0">
           <label class="form-label" for="backup-ignore">Leave out (optional)</label>
           <textarea id="backup-ignore" class="form-control" rows="3" placeholder="File or folder names, one per line"></textarea>
           <span class="form-hint">Matches names at any depth. A name, <code>*.ext</code>, or <code>prefix*</code>. Nothing is left out by default.</span>

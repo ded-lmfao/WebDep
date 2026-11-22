@@ -13,6 +13,7 @@ pub mod access;
 pub mod accounts;
 pub mod ports;
 pub mod limits;
+pub mod db_backups;
 
 pub use common::AppState;
 
@@ -108,6 +109,14 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/projects/:id/backups/:backup_id", delete(delete_backup_handler))
         .route("/api/projects/:id/backups/:backup_id/lock", put(lock_backup_handler))
         .route("/api/projects/:id/backups/:backup_id/download", get(download_backup_handler))
+        // Database backups
+        .route("/api/databases/:id/backups", get(db_backups::list_db_backups_handler))
+        .route("/api/databases/:id/backup", post(db_backups::create_db_backup_handler))
+        .route("/api/databases/:id/backups/restore", post(db_backups::restore_db_backup_handler))
+        .route("/api/databases/:id/backups/restore-status", get(db_backups::db_restore_status_handler))
+        .route("/api/databases/:id/backups/:backup_id", delete(db_backups::delete_db_backup_handler))
+        .route("/api/databases/:id/backups/:backup_id/lock", put(db_backups::lock_db_backup_handler))
+        .route("/api/databases/:id/backups/:backup_id/download", get(db_backups::download_db_backup_handler))
         // Project Env
         .route("/api/projects/:id/env", get(get_env_handler).put(set_env_handler).post(set_env_handler))
         .route("/api/projects/:id/env/bulk", post(bulk_set_env_handler))

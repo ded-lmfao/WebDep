@@ -128,6 +128,22 @@ pub async fn spawn_project_process_pure(
         }
     }
 
+    // Optional isolation (Linux, WEBDEP_ISOLATE_APPS=1): own namespaces, only its own folder visible,
+    // unprivileged user. See runtime/isolation.rs.
+    #[allow(unused_mut)]
+    let mut isolated = false;
+    #[cfg(target_os = "linux")]
+    {
+        let (own, work, inner, key) = (base_dir.clone(), work_dir.clone(), final_cmd.clone(), format!("app-{}", p.id));
+        if let Ok(prep) = tokio::task::spawn_blocking(move || super::isolation::prepare(&inner, &own, &work, &key)).await {
+            if let Some(w) = prep.warning {
+                log_cb("system", "warn", &w);
+            }
+            final_cmd = prep.command;
+            isolated = prep.isolated;
+        }
+    }
+
     let java_info = detect_java_exe();
 
     #[cfg(windows)]
@@ -226,6 +242,10 @@ pub async fn spawn_project_process_pure(
 
     for (k, v) in &isolated_env {
         cmd.env(k, v);
+    }
+    if isolated {
+        // The unprivileged user has no home folder of its own; /tmp is private to the app.
+        cmd.env("HOME", "/tmp");
     }
 
     let mut child = cmd.spawn().map_err(|e| {

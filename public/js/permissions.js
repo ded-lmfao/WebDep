@@ -16,7 +16,7 @@ export const PANEL_ACCOUNT_POWERS = [
 export const APP_POWER_CATALOG = {
   website: ['logs', 'files', 'files_write', 'deploy', 'process', 'backups', 'env', 'domains', 'projects_manage', 'activity', 'access_manage', 'app_delete'],
   service: ['logs', 'files', 'files_write', 'deploy', 'process', 'backups', 'env', 'services_manage', 'activity', 'access_manage', 'app_delete'],
-  database: ['databases', 'env', 'databases_manage', 'activity', 'access_manage', 'app_delete'],
+  database: ['databases', 'env', 'databases_manage', 'backups', 'activity', 'access_manage', 'app_delete'],
 };
 APP_POWER_CATALOG['all-projects'] = Array.from(new Set([...APP_POWER_CATALOG.website, ...APP_POWER_CATALOG.service]));
 APP_POWER_CATALOG['all-databases'] = APP_POWER_CATALOG.database;

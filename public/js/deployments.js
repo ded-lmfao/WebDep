@@ -29,6 +29,7 @@ import { loadProjects, renderProjectsList } from './websites.js';
 // Re-export Modular Subsystems
 export * from './pipeline_engine.js';
 export * from './releases.js';
+export * from './backups.js';
 export * from './env_vars.js';
 
 import { waterPipelines, renderPipelineStages, resetWaterPipeline } from './pipeline_engine.js';

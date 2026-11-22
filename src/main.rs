@@ -11,6 +11,7 @@ mod git;
 mod logs;
 mod app_limits;
 mod backups;
+mod db_backups;
 mod maintenance;
 mod monitor;
 mod monitor_net;
@@ -406,7 +407,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Enforce max-5 deployment retention cleanup across existing projects at startup.
     crate::deployer::retention::prune_all_projects(&db, crate::deployer::MAX_DEPLOYMENT_RECORDS).await;
 
-    let interrupted = crate::backups::recover_interrupted(&db, &config.data_dir).await;
+    let interrupted = crate::backups::recover_interrupted(&db, &config.data_dir).await
+        + crate::db_backups::recover_interrupted(&db, &config.data_dir).await;
     if interrupted > 0 {
         tracing::warn!("{interrupted} backup(s) were interrupted by the last shutdown and marked failed");
     }

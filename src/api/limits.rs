@@ -43,7 +43,7 @@ pub(crate) async fn list_limits_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     verify_admin(&state, &headers).await?;
     let rows = app_limits::list_all(&state.db).await.map_err(internal)?;
-    Ok(Json(serde_json::json!({ "limits": rows, "enforcement": crate::runtime::limits::enforcement_status() })))
+    Ok(Json(serde_json::json!({ "limits": rows, "enforcement": crate::runtime::limits::enforcement_status(), "isolation": crate::runtime::isolation::status() })))
 }
 
 /// Sets a website or service's limits. A running app restarts when its CPU or memory limit

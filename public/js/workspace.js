@@ -103,7 +103,6 @@ function navigateTo(viewName, entityParam = null) {
     showLogin();
     return;
   }
-  if (viewName === 'backups') viewName = 'releases';
   state.currentView = viewName;
 
   if (viewName === 'overview') {
@@ -176,7 +175,6 @@ function handleHashRoute() {
 
   const parts = (rawPath || 'overview').split('/').filter(Boolean);
   let view = parts[0] || 'overview';
-  if (view === 'backups') view = 'releases';
 
   let routeParam = parts[1] || null;
   if (view === 'overview') {
@@ -234,6 +232,7 @@ function updateBreadcrumbs() {
     env: 'Environment (.env)',
     files: 'Files',
     releases: 'Releases',
+    backups: 'Backups',
     rollbacks: 'Rollbacks',
     monitor: 'Monitoring',
     audit: 'Activity',
@@ -436,6 +435,7 @@ function renderDatabaseWorkspaceHeader(banner) {
     logs: ['databases', 'databases_manage', 'logs'],
     files: ['databases', 'databases_manage', 'files', 'files_write'],
     audit: ['databases', 'databases_manage', 'audit', 'activity'],
+    backups: ['databases_manage', 'backups'],
     access: ['access_manage'],
   };
 
@@ -707,6 +707,7 @@ function renderWebsiteWorkspaceHeader() {
     logs: ['logs'],
     files: ['files', 'files_write'],
     env: ['env'],
+    backups: ['backups'],
     audit: ['audit', 'activity'],
     monitor: ['monitor'],
     access: ['access_manage'],
@@ -851,6 +852,7 @@ function renderCurrentView() {
     case 'github': void loadGithubView(); break;
     case 'deployments': void loadDeploymentsView(); break;
     case 'releases': void loadReleasesView(); break;
+    case 'backups': void loadBackupsView(); break;
     case 'rollbacks': void loadRollbacksView(); break;
     case 'logs': void loadLogsView(); break;
     case 'env': void loadEnvView(); break;

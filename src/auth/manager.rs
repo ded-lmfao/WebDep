@@ -25,6 +25,13 @@ pub struct SessionInfo {
     pub user_agent: String,
 }
 
+/// What the database stores for a session: the SHA-256 of the id in the browser's cookie. A
+/// copy of the database (or a backup of it) therefore holds nothing that can be used to sign in.
+pub fn session_key(session_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(session_id.as_bytes()))
+}
+
 /// Short, non-reversible reference for a session id.
 pub fn session_ref(session_id: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -195,6 +202,13 @@ impl Auth {
     }
 
     pub fn record_failure(&self, key: &str) -> Option<u64> {
+        let max_attempts = if key.starts_with("2fa:") || key.starts_with("2fa_user:") { 3 } else { 5 };
+        self.record_failure_limit(key, max_attempts, 600)
+    }
+
+    /// Counts a failure under `key` (failures older than 10 minutes are forgotten) and locks the
+    /// key for `lock_s` seconds once `max_attempts` is reached. Returns the lock time when it locks.
+    pub fn record_failure_limit(&self, key: &str, max_attempts: u32, lock_s: u64) -> Option<u64> {
         let now = Self::now_secs();
         let mut map = self.failures.lock().unwrap();
         let entry = map.entry(key.to_string()).or_insert(FailureRecord {
@@ -208,14 +222,9 @@ impl Auth {
             entry.locked_until_s = 0;
         }
         entry.count += 1;
-        let max_attempts = if key.starts_with("2fa:") || key.starts_with("2fa_user:") {
-            3
-        } else {
-            5
-        };
         if entry.count >= max_attempts {
-            entry.locked_until_s = now + 600;
-            return Some(600);
+            entry.locked_until_s = now + lock_s;
+            return Some(lock_s);
         }
         None
     }
@@ -471,7 +480,7 @@ impl Auth {
             "INSERT INTO sessions(id, user_id, expires_at, last_active_at, csrf_token, created_at, ip, user_agent)
              VALUES($1, $2, $3, $4, $5, $4, $6, $7)",
         )
-        .bind(&session_id)
+        .bind(session_key(&session_id))
         .bind(user_id)
         .bind(expires_at)
         .bind(last_active_at)
@@ -504,7 +513,7 @@ impl Auth {
         }
         let _ = sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
             .bind(now_i64)
-            .bind(session_id)
+            .bind(session_key(session_id))
             .execute(&self.db)
             .await;
     }
@@ -565,7 +574,7 @@ impl Auth {
         let row = sqlx::query(
             "SELECT id, user_id, expires_at, last_active_at, csrf_token FROM sessions WHERE id = $1 AND expires_at > $2",
         )
-        .bind(session_id)
+        .bind(session_key(session_id))
         .bind(now_s as i64)
         .fetch_optional(&self.db)
         .await
@@ -573,7 +582,7 @@ impl Auth {
         .flatten()?;
 
         let session = Session {
-            id: row.try_get(0).ok()?,
+            id: session_id.to_string(),
             user_id: row.try_get(1).ok()?,
             expires_at: row.try_get(2).ok()?,
             last_active_at: row.try_get(3).ok()?,
@@ -611,7 +620,7 @@ impl Auth {
             map.remove(session_id);
         }
         let _ = sqlx::query("DELETE FROM sessions WHERE id = $1")
-            .bind(session_id)
+            .bind(session_key(session_id))
             .execute(&self.db)
             .await;
     }
@@ -647,9 +656,14 @@ impl Auth {
             .fetch_all(&self.db)
             .await
             .unwrap_or_default();
-        match ids.into_iter().find(|id| session_ref(id) == reference) {
-            Some(id) => {
-                self.delete_session(&id).await;
+        // The table holds keys (hashes), so remove the row by key and drop every cached session.
+        match ids.into_iter().find(|key| session_ref(key) == reference) {
+            Some(key) => {
+                self.invalidate_sessions();
+                let _ = sqlx::query("DELETE FROM sessions WHERE id = $1")
+                    .bind(&key)
+                    .execute(&self.db)
+                    .await;
                 true
             }
             None => false,
@@ -663,7 +677,7 @@ impl Auth {
         }
         sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id != $2")
             .bind(user_id)
-            .bind(keep_session_id)
+            .bind(session_key(keep_session_id))
             .execute(&self.db)
             .await
             .map(|r| r.rows_affected() as usize)
@@ -912,7 +926,7 @@ mod tests {
         let now_i64 = Auth::now_secs() as i64;
         sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
             .bind(now_i64 - 60)
-            .bind(&sess.id)
+            .bind(session_key(&sess.id))
             .execute(&db)
             .await
             .unwrap();
@@ -925,11 +939,62 @@ mod tests {
 
         sqlx::query("UPDATE sessions SET last_active_at = $1 WHERE id = $2")
             .bind(now_i64 - 200)
-            .bind(&sess.id)
+            .bind(session_key(&sess.id))
             .execute(&db)
             .await
             .unwrap();
         auth.invalidate_sessions();
         assert!(auth.get_session(&sess.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sessions_are_stored_hashed_and_still_work() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let auth = Auth::with_timeouts(db.clone(), 3600, 0);
+        auth.ensure_admin().await;
+        let sess = auth.create_session(1).await.unwrap();
+
+        let stored: Vec<String> = sqlx::query_scalar("SELECT id FROM sessions WHERE user_id = 1")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert!(!stored.contains(&sess.id), "the cookie value must not be in the database");
+        assert_eq!(stored, vec![session_key(&sess.id)]);
+
+        // Signing in with the cookie value works; the hash itself is not a valid cookie value.
+        assert!(auth.get_session(&sess.id).await.is_some());
+        auth.invalidate_sessions();
+        assert!(auth.get_session(&session_key(&sess.id)).await.is_none());
+
+        // Listing and revoking by reference still work.
+        let listed = auth.list_user_sessions(1).await;
+        assert_eq!(listed.len(), 1);
+        assert!(auth.revoke_session_by_ref(1, &listed[0].session_ref).await);
+        assert!(auth.get_session(&sess.id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn failures_lock_only_the_key_they_were_counted_under() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let auth = Auth::with_timeouts(db, 3600, 0);
+        // The attacker's own (user, address) pair locks after 5 failures...
+        for _ in 0..4 {
+            assert_eq!(auth.record_failure_limit("login:admin|203.0.113.9", 5, 600), None);
+        }
+        assert_eq!(auth.record_failure_limit("login:admin|203.0.113.9", 5, 600), Some(600));
+        assert!(auth.check_lockout("login:admin|203.0.113.9").is_some());
+        // ...while the real admin on another address is unaffected.
+        assert!(auth.check_lockout("login:admin|198.51.100.4").is_none());
+        // The per-address key trips on guessing across usernames; a per-username key only slows down.
+        for _ in 0..29 {
+            auth.record_failure_limit("loginip:203.0.113.9", 30, 600);
+        }
+        assert_eq!(auth.record_failure_limit("loginip:203.0.113.9", 30, 600), Some(600));
+        for _ in 0..99 {
+            auth.record_failure_limit("loginuser:admin", 100, 60);
+        }
+        assert_eq!(auth.record_failure_limit("loginuser:admin", 100, 60), Some(60));
+        auth.clear_failures("login:admin|203.0.113.9");
+        assert!(auth.check_lockout("login:admin|203.0.113.9").is_none());
     }
 }

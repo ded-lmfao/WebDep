@@ -366,6 +366,7 @@ const WEBSITE_WORKSPACE_TABS = new Set([
   'env',
   'files',
   'releases',
+  'backups',
   'rollbacks',
   'monitor',
   'audit',
@@ -376,6 +377,7 @@ const DATABASE_WORKSPACE_TABS = new Set([
   'deployments',
   'logs',
   'files',
+  'backups',
   'audit',
   'access',
 ]);

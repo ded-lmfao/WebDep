@@ -44,7 +44,7 @@ pub const PROJECT_POWERS: &[&str] = &[
     "projects_manage", "services_manage", "activity", "access_manage", "app_delete",
 ];
 /// Powers a database grant may hold.
-pub const DATABASE_POWERS: &[&str] = &["databases", "env", "databases_manage", "activity", "access_manage", "app_delete"];
+pub const DATABASE_POWERS: &[&str] = &["databases", "env", "databases_manage", "backups", "activity", "access_manage", "app_delete"];
 
 /// Checklist shown for one kind of app, in display order.
 pub fn kind_catalog(kind: &str) -> &'static [&'static str] {
