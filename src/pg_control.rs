@@ -29,134 +29,15 @@ fn build_migrator() -> sqlx::migrate::Migrator {
     use std::borrow::Cow;
 
     Migrator {
-        migrations: Cow::Owned(vec![
-            Migration::new(
-                1,
-                Cow::Borrowed("initial"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0001_initial.sql")),
-                false,
-            ),
-            Migration::new(
-                2,
-                Cow::Borrowed("access_grants"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0002_access_grants.sql")),
-                false,
-            ),
-            Migration::new(
-                3,
-                Cow::Borrowed("cluster_nodes"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0003_cluster_nodes.sql")),
-                false,
-            ),
-            Migration::new(
-                4,
-                Cow::Borrowed("migrations_and_backups"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0004_migrations_and_backups.sql")),
-                false,
-            ),
-            Migration::new(
-                5,
-                Cow::Borrowed("node_display_name"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0005_node_display_name.sql")),
-                false,
-            ),
-            Migration::new(
-                6,
-                Cow::Borrowed("user_management"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0006_user_management.sql")),
-                false,
-            ),
-            Migration::new(
-                7,
-                Cow::Borrowed("node_ports"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0007_node_ports.sql")),
-                false,
-            ),
-            Migration::new(
-                8,
-                Cow::Borrowed("port_exposure"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0008_port_exposure.sql")),
-                false,
-            ),
-            Migration::new(
-                9,
-                Cow::Borrowed("account_security"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0009_account_security.sql")),
-                false,
-            ),
-            Migration::new(
-                10,
-                Cow::Borrowed("app_placement"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0010_app_placement.sql")),
-                false,
-            ),
-            Migration::new(
-                11,
-                Cow::Borrowed("audit_cap"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0011_audit_cap.sql")),
-                false,
-            ),
-            Migration::new(
-                12,
-                Cow::Borrowed("app_limits"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0012_app_limits.sql")),
-                false,
-            ),
-            Migration::new(
-                13,
-                Cow::Borrowed("backup_archives"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0013_backup_archives.sql")),
-                false,
-            ),
-            Migration::new(
-                14,
-                Cow::Borrowed("database_backups"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0014_database_backups.sql")),
-                false,
-            ),
-            Migration::new(
-                15,
-                Cow::Borrowed("hash_session_ids"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0015_hash_session_ids.sql")),
-                false,
-            ),
-            Migration::new(
-                16,
-                Cow::Borrowed("limit_events"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0016_limit_events.sql")),
-                false,
-            ),
-            Migration::new(
-                17,
-                Cow::Borrowed("audit_cap_100"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0017_audit_cap_100.sql")),
-                false,
-            ),
-            Migration::new(
-                18,
-                Cow::Borrowed("database_extra_ports"),
-                MigrationType::Simple,
-                lf(include_str!("../migrations/0018_database_extra_ports.sql")),
-                false,
-            ),
-        ]),
+        // One idempotent script holds the whole schema. Databases that ran the earlier migrations
+        // 1 to 18 keep those rows (tolerated as unknown below) and find nothing left to change.
+        migrations: Cow::Owned(vec![Migration::new(
+            20,
+            Cow::Borrowed("baseline"),
+            MigrationType::Simple,
+            lf(include_str!("../migrations/0020_baseline.sql")),
+            false,
+        )]),
         // A database already migrated by a newer WebDep keeps working when an older build is
         // started on it (rollback): unknown newer migrations are tolerated, not fatal.
         ignore_missing: true,
@@ -327,41 +208,8 @@ async fn backup_before_migrate(
 /// Ensure migrations run on any connected PostgreSQL pool.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let migrator = build_migrator();
-    accept_reworded_migrations(pool, &migrator).await;
     migrator.run(pool).await?;
     Ok(())
-}
-
-/// Migrations whose text was reworded after release without changing what they do. A database that
-/// already applied the earlier wording keeps working: its recorded checksum is brought up to date
-/// instead of failing with "migration was modified".
-/// - 15: `UPDATE sessions ...` gained `WHERE id IS NOT NULL` (same rows, no new behaviour).
-const REWORDED_MIGRATIONS: &[i64] = &[15];
-
-/// Brings checksums recorded by older builds in line with this build:
-/// - reworded migrations (above) take the current checksum;
-/// - a migration applied from a CRLF checkout (Windows) is recorded under its CRLF text; this build
-///   checksums the LF text, so that old value is replaced by the LF one.
-async fn accept_reworded_migrations(pool: &PgPool, migrator: &sqlx::migrate::Migrator) {
-    use sha2::{Digest, Sha384};
-    for m in migrator.migrations.iter() {
-        // The table does not exist on a brand-new database; there is nothing to repair then.
-        if REWORDED_MIGRATIONS.contains(&m.version) {
-            let _ = sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = $2 AND checksum <> $1")
-                .bind(m.checksum.as_ref())
-                .bind(m.version)
-                .execute(pool)
-                .await;
-            continue;
-        }
-        let crlf_sum = Sha384::digest(m.sql.replace('\n', "\r\n").as_bytes()).to_vec();
-        let _ = sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = $2 AND checksum = $3")
-            .bind(m.checksum.as_ref())
-            .bind(m.version)
-            .bind(crlf_sum)
-            .execute(pool)
-            .await;
-    }
 }
 
 /// Zero-config control-plane PostgreSQL initialization:
@@ -694,26 +542,6 @@ pub mod test_db {
 
 #[cfg(test)]
 mod upgrade_backup_tests {
-    #[tokio::test]
-    async fn a_database_migrated_from_a_crlf_checkout_still_starts() {
-        use sha2::{Digest, Sha384};
-        let pool = test_db::isolated_pool().await;
-        let migrator = build_migrator();
-        let m = migrator.migrations.iter().find(|m| m.version == 6).unwrap();
-        let crlf_sum = Sha384::digest(m.sql.replace('\n', "\r\n").as_bytes()).to_vec();
-        sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = 6")
-            .bind(crlf_sum)
-            .execute(&pool)
-            .await
-            .unwrap();
-        run_migrations(&pool).await.expect("a CRLF-recorded checksum is accepted");
-        let stored: Vec<u8> = sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 6")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(stored, m.checksum.to_vec());
-    }
-
     #[test]
     fn migration_checksums_do_not_depend_on_line_endings() {
         assert_eq!(lf("a\r\nb\r\n"), "a\nb\n");
@@ -721,21 +549,56 @@ mod upgrade_backup_tests {
     }
 
     #[tokio::test]
-    async fn a_database_that_applied_the_earlier_wording_of_a_migration_still_starts() {
+    async fn a_database_that_ran_the_earlier_migrations_upgrades_cleanly() {
         let pool = test_db::isolated_pool().await;
-        // Simulate a database migrated by the build that had the first wording of migration 15.
-        sqlx::query("UPDATE _sqlx_migrations SET checksum = $1 WHERE version = 15")
+        // Make it look like a production database from before the baseline: versions 1 to 18
+        // recorded, the baseline not yet run.
+        for v in 1..=18i64 {
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations(version, description, success, checksum, execution_time) VALUES($1, 'old', TRUE, $2, 0)",
+            )
+            .bind(v)
             .bind(vec![0u8; 48])
             .execute(&pool)
             .await
             .unwrap();
-        run_migrations(&pool).await.expect("an old checksum for a reworded migration is accepted");
-        let stored: Vec<u8> = sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 15")
+        }
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20").execute(&pool).await.unwrap();
+        assert_eq!(applied_migration_version(&pool).await, Some(18));
+        run_migrations(&pool).await.expect("old versions are tolerated and the baseline changes nothing");
+        let applied: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(applied, (1..=18).chain([20]).collect::<Vec<i64>>());
+        // And it is safe to start again.
+        run_migrations(&pool).await.expect("running the baseline again changes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_new_database_has_the_whole_schema() {
+        let pool = test_db::isolated_pool().await;
+        for (table, column) in [
+            ("projects", "disk_limit_mb"),
+            ("projects", "backup_limit"),
+            ("databases", "cpu_limit"),
+            ("databases", "backup_limit"),
+            ("backups", "archive_path"),
+            ("backups", "checksum_sha256"),
+            ("database_backups", "archive_path"),
+            ("limit_events", "limit_kind"),
+            ("node_ports", "database_id"),
+        ] {
+            let found: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2)",
+            )
+            .bind(table)
+            .bind(column)
             .fetch_one(&pool)
             .await
             .unwrap();
-        let current = build_migrator().migrations.iter().find(|m| m.version == 15).unwrap().checksum.to_vec();
-        assert_eq!(stored, current);
+            assert!(found, "{table}.{column} is missing");
+        }
     }
 
     use super::*;
