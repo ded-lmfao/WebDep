@@ -146,17 +146,25 @@ pub struct AppLimitRow {
     pub id: i64,
     pub name: String,
     pub node_id: Option<i64>,
+    /// The app's own port.
+    pub port: Option<i32>,
+    /// Extra ports reserved for it.
+    pub extra_ports: Vec<i32>,
     #[serde(flatten)]
     pub limits: AppLimits,
 }
 
-/// Every app with its limits, for the admin App Limits tab.
+/// Every app with its limits, for the admin App Configs tab.
 pub async fn list_all(db: &DbPool) -> Result<Vec<AppLimitRow>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT CASE WHEN project_kind = 'service' THEN 'service' ELSE 'website' END, id, name, node_id,
-                cpu_limit, memory_limit_mb, disk_limit_mb, backup_limit FROM projects
+                cpu_limit, memory_limit_mb, disk_limit_mb, backup_limit, COALESCE(assigned_port, port),
+                COALESCE((SELECT array_agg(np.port ORDER BY np.port) FROM node_ports np WHERE np.project_id = projects.id), '{}')
+           FROM projects
          UNION ALL
-         SELECT 'database', id, name, node_id, cpu_limit, memory_limit_mb, disk_limit_mb, backup_limit FROM databases
+         SELECT 'database', id, name, node_id, cpu_limit, memory_limit_mb, disk_limit_mb, backup_limit, port,
+                COALESCE((SELECT array_agg(np.port ORDER BY np.port) FROM node_ports np WHERE np.database_id = databases.id), '{}')
+           FROM databases
          ORDER BY 1, 3",
     )
     .fetch_all(db)
@@ -168,6 +176,8 @@ pub async fn list_all(db: &DbPool) -> Result<Vec<AppLimitRow>, sqlx::Error> {
             id: r.get(1),
             name: r.get(2),
             node_id: r.get(3),
+            port: r.get(8),
+            extra_ports: r.get(9),
             limits: AppLimits { cpu: r.get(4), memory_mb: r.get(5), disk_mb: r.get(6), backups: r.get(7) },
         })
         .collect())

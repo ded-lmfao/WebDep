@@ -542,27 +542,27 @@ const LIMIT_DIALOG_INFO = {
   disk: {
     title: 'Disk limit reached',
     why: 'This app uses more disk space than its limit allows, so it is stopped and cannot be started until space is freed.',
-    fix: 'Delete files or old releases, or ask an admin to raise the limit in Admin Panel > App Limits.',
+    fix: 'Delete files or old releases, or ask an admin to raise the limit in Admin Panel > App Configs.',
   },
   ram_start: {
     title: 'Memory limit too low to start',
     why: 'The app stopped right after it started while a memory limit is set. A limit smaller than the app needs to start makes it crash straight away.',
-    fix: 'Raise the memory limit (admins: Admin Panel > App Limits) and start the app again. Check its Logs to confirm.',
+    fix: 'Raise the memory limit (admins: Admin Panel > App Configs) and start the app again. Check its Logs to confirm.',
   },
   ram: {
     title: 'Memory limit reached',
     why: 'This app is using almost all of the memory its limit allows. Past the limit it is slowed down, its memory requests fail and it may crash.',
-    fix: 'Reduce what the app keeps in memory, or ask an admin to raise the limit in Admin Panel > App Limits.',
+    fix: 'Reduce what the app keeps in memory, or ask an admin to raise the limit in Admin Panel > App Configs.',
   },
   cpu: {
     title: 'CPU limit reached',
     why: 'This app is using as much CPU as its limit allows, so it is being slowed down to stay at the limit.',
-    fix: 'Reduce its workload, or ask an admin to raise the limit in Admin Panel > App Limits.',
+    fix: 'Reduce its workload, or ask an admin to raise the limit in Admin Panel > App Configs.',
   },
   backups: {
     title: 'Backup limit reached',
     why: 'This app already holds the maximum number of backups its limit allows, so no new backup was made.',
-    fix: 'Delete an old backup (locked backups count too), or ask an admin to raise the limit in Admin Panel > App Limits.',
+    fix: 'Delete an old backup (locked backups count too), or ask an admin to raise the limit in Admin Panel > App Configs.',
   },
 };
 

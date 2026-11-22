@@ -191,6 +191,23 @@ async fn usage_on_node(db: &DbPool, node_id: i64, local_node: bool) -> Result<Ha
             );
         }
     }
+    let db_extras = sqlx::query(
+        "SELECT np.port, d.id, d.name, d.status FROM node_ports np
+         JOIN databases d ON d.id = np.database_id WHERE np.node_id = $1",
+    )
+    .bind(node_id)
+    .fetch_all(db)
+    .await?;
+    for r in db_extras {
+        let port: i32 = r.try_get(0)?;
+        if let Ok(port) = u16::try_from(port) {
+            let status: String = r.try_get(3)?;
+            used.insert(
+                port,
+                PortUser { kind: "database".into(), id: r.try_get(1)?, name: r.try_get(2)?, role: "extra".into(), running: status == "running", access: None },
+            );
+        }
+    }
     Ok(used)
 }
 
@@ -199,7 +216,7 @@ async fn used_anywhere(db: &DbPool) -> Result<BTreeSet<u16>, sqlx::Error> {
     let mut set: BTreeSet<u16> = RESERVED.iter().copied().collect();
     let rows: Vec<Option<i32>> = sqlx::query_scalar(
         "SELECT port FROM projects UNION ALL SELECT assigned_port FROM projects
-         UNION ALL SELECT port FROM databases UNION ALL SELECT port FROM node_ports WHERE project_id IS NOT NULL",
+         UNION ALL SELECT port FROM databases UNION ALL SELECT port FROM node_ports WHERE project_id IS NOT NULL OR database_id IS NOT NULL",
     )
     .fetch_all(db)
     .await?;
@@ -289,7 +306,7 @@ pub async fn set_range(db: &DbPool, node_id: i64, min: u16, max: u16) -> Result<
     }
     let usage = usage_on_node(db, node_id, is_local(db, node_id).await).await.map_err(err)?;
     let removed: Vec<i32> = sqlx::query_scalar(
-        "DELETE FROM node_ports WHERE node_id = $1 AND manual = FALSE AND project_id IS NULL
+        "DELETE FROM node_ports WHERE node_id = $1 AND manual = FALSE AND project_id IS NULL AND database_id IS NULL
          AND (port < $2 OR port > $3) AND NOT (port = ANY($4)) RETURNING port",
     )
     .bind(node_id)
@@ -371,7 +388,7 @@ pub async fn remove_ports(db: &DbPool, node_id: i64, ports: &[u16]) -> Result<Ve
         return Err(format!("Port {port} is used by {}. Move it to another port first.", user.name));
     }
     let removed: Vec<i32> = sqlx::query_scalar(
-        "DELETE FROM node_ports WHERE node_id = $1 AND port = ANY($2) AND project_id IS NULL RETURNING port",
+        "DELETE FROM node_ports WHERE node_id = $1 AND port = ANY($2) AND project_id IS NULL AND database_id IS NULL RETURNING port",
     )
     .bind(node_id)
     .bind(ports.iter().map(|p| i32::from(*p)).collect::<Vec<i32>>())
@@ -405,9 +422,22 @@ pub async fn next_free_port(db: &DbPool, node_id: i64, exclude: &[u16]) -> Resul
         .find(|p| !used.contains(p) && !exclude.contains(p)))
 }
 
+/// Who may keep a port it already holds.
+#[derive(Debug, Clone, Copy)]
+pub enum Owner {
+    Nobody,
+    Project(i64),
+    Database(i64),
+}
+
 /// Checks that `port` is an open, unused pool port on the node (for a manual choice).
 /// `allow_project` lets an app keep a port it already holds.
 pub async fn check_assignable(db: &DbPool, node_id: i64, port: u16, allow_project: Option<i64>) -> Result<(), String> {
+    check_assignable_for(db, node_id, port, allow_project.map_or(Owner::Nobody, Owner::Project)).await
+}
+
+/// Same as `check_assignable`, for an app or a database that may keep its own port.
+pub async fn check_assignable_for(db: &DbPool, node_id: i64, port: u16, owner: Owner) -> Result<(), String> {
     let open: Option<bool> = sqlx::query_scalar("SELECT is_open FROM node_ports WHERE node_id = $1 AND port = $2")
         .bind(node_id)
         .bind(i32::from(port))
@@ -421,7 +451,11 @@ pub async fn check_assignable(db: &DbPool, node_id: i64, port: u16, allow_projec
     }
     let usage = usage_on_node(db, node_id, is_local(db, node_id).await).await.map_err(|e| e.to_string())?;
     if let Some(user) = usage.get(&port) {
-        let own = allow_project.is_some_and(|pid| user.kind != "database" && user.id == pid);
+        let own = match owner {
+            Owner::Nobody => false,
+            Owner::Project(pid) => user.kind != "database" && user.id == pid,
+            Owner::Database(did) => user.kind == "database" && user.id == did,
+        };
         if !own {
             return Err(format!("Port {port} is already used by {}.", user.name));
         }
@@ -434,27 +468,42 @@ pub async fn check_assignable(db: &DbPool, node_id: i64, port: u16, allow_projec
 
 /// Replaces an app's extra ports. Each must be an open pool port nobody else uses.
 pub async fn set_extra_ports(db: &DbPool, node_id: i64, project_id: i64, ports: &[u16]) -> Result<(), String> {
+    replace_extra_ports(db, node_id, Owner::Project(project_id), ports).await
+}
+
+/// Replaces a database's extra ports.
+pub async fn set_database_extra_ports(db: &DbPool, node_id: i64, database_id: i64, ports: &[u16]) -> Result<(), String> {
+    replace_extra_ports(db, node_id, Owner::Database(database_id), ports).await
+}
+
+async fn replace_extra_ports(db: &DbPool, node_id: i64, owner: Owner, ports: &[u16]) -> Result<(), String> {
+    // The column is picked from this fixed pair, never from input.
+    let (column, id) = match owner {
+        Owner::Project(id) => ("project_id", id),
+        Owner::Database(id) => ("database_id", id),
+        Owner::Nobody => return Err("No owner for these ports.".into()),
+    };
     for &p in ports {
-        let held: Option<Option<i64>> = sqlx::query_scalar("SELECT project_id FROM node_ports WHERE node_id = $1 AND port = $2")
+        let held: Option<Option<i64>> = sqlx::query_scalar(&format!("SELECT {column} FROM node_ports WHERE node_id = $1 AND port = $2"))
             .bind(node_id)
             .bind(i32::from(p))
             .fetch_optional(db)
             .await
             .map_err(|e| e.to_string())?;
-        if held.flatten() != Some(project_id) {
-            check_assignable(db, node_id, p, None).await?;
+        if held.flatten() != Some(id) {
+            check_assignable_for(db, node_id, p, Owner::Nobody).await?;
         }
     }
     let mut tx = db.begin().await.map_err(|e| e.to_string())?;
-    sqlx::query("UPDATE node_ports SET project_id = NULL, updated_at = $2 WHERE project_id = $1")
-        .bind(project_id)
+    sqlx::query(&format!("UPDATE node_ports SET {column} = NULL, updated_at = $2 WHERE {column} = $1"))
+        .bind(id)
         .bind(now_secs())
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-    sqlx::query("UPDATE node_ports SET project_id = $2, updated_at = $4 WHERE node_id = $1 AND port = ANY($3)")
+    sqlx::query(&format!("UPDATE node_ports SET {column} = $2, updated_at = $4 WHERE node_id = $1 AND port = ANY($3)"))
         .bind(node_id)
-        .bind(project_id)
+        .bind(id)
         .bind(ports.iter().map(|p| i32::from(*p)).collect::<Vec<i32>>())
         .bind(now_secs())
         .execute(&mut *tx)
@@ -620,6 +669,46 @@ mod tests {
         assert!(parse_port_list("abc").is_err());
         assert!(parse_port_list("").is_err());
         assert!(parse_port_list("10000-20000").is_err(), "too large");
+    }
+
+    #[tokio::test]
+    async fn a_database_can_hold_extra_ports_and_keeps_them_exclusive() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let node_id: i64 = sqlx::query_scalar(
+            "INSERT INTO nodes(name, region, tags_json, status, is_local, public_ip, mesh_ip, wg_pubkey, wg_endpoint,
+                node_token_hash, node_version, capabilities_json, metrics_json, last_seen_at, created_at, updated_at)
+             VALUES('db-node', 'default', '[]', 'online', FALSE, '', '10.200.0.8', '', '', 'h', 'v', '{}', '{}', 0, 0, 0)
+             RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        set_range(&db, node_id, 9200, 9205).await.unwrap();
+        let db_id: i64 = sqlx::query_scalar(
+            "INSERT INTO databases(name, db_name, db_user, db_password, port, node_id, created_at, updated_at)
+             VALUES('main-db', 'app', 'u', 'p', 9200, $1, 0, 0) RETURNING id",
+        )
+        .bind(node_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+        set_database_extra_ports(&db, node_id, db_id, &[9201, 9202]).await.unwrap();
+        let rows = crate::app_limits::list_all(&db).await.unwrap();
+        let row = rows.iter().find(|r| r.kind == "database" && r.id == db_id).unwrap();
+        assert_eq!(row.port, Some(9200));
+        assert_eq!(row.extra_ports, vec![9201, 9202]);
+
+        // Held ports are no longer free, but the database may keep its own.
+        assert!(check_assignable(&db, node_id, 9201, None).await.is_err());
+        check_assignable_for(&db, node_id, 9201, Owner::Database(db_id)).await.unwrap();
+        assert_eq!(next_free_port(&db, node_id, &[]).await.unwrap(), Some(9203));
+        // Taking the pool away from under a database is refused while it holds ports.
+        let (_, removed) = set_range(&db, node_id, 9203, 9205).await.unwrap();
+        assert!(!removed.contains(&9201), "ports held by a database stay");
+
+        set_database_extra_ports(&db, node_id, db_id, &[]).await.unwrap();
+        assert_eq!(next_free_port(&db, node_id, &[]).await.unwrap(), Some(9201));
     }
 
     #[tokio::test]

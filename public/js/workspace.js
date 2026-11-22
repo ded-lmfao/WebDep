@@ -272,7 +272,7 @@ function updateBreadcrumbs() {
       'admin-audit': 'Admin Panel › Audit',
       ips: 'Admin Panel › IP Addresses',
       moves: 'Admin Panel › Move Apps',
-      limits: 'Admin Panel › App Limits',
+      limits: 'Admin Panel › App Configs',
     };
     secEl.textContent = globalLabels[state.currentView] || state.currentView;
   }

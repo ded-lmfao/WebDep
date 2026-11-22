@@ -1,8 +1,8 @@
-//! Optional isolation of app processes on Linux.
+//! Isolation of app processes on Linux, on by default.
 //!
 //! Without it an app runs as the same server user as the panel, so code a user deploys could read
-//! the panel's data folder, `.env` and every other app's files. Turn it on with
-//! `WEBDEP_ISOLATE_APPS=1` (the panel must run as root). Each app process (and each build) is then
+//! the panel's data folder, `.env` and every other app's files. It is used whenever the panel runs
+//! as root with util-linux installed; `WEBDEP_ISOLATE_APPS=0` turns it off. Each app process (and each build) is then
 //! started like this:
 //!
 //! * `unshare` gives it its own PID, mount, IPC and UTS namespaces: it cannot see or signal other
@@ -32,10 +32,10 @@ pub struct Identity {
     pub gid: u32,
 }
 
-/// `Some` when isolation was asked for (`WEBDEP_ISOLATE_APPS=1|true|yes`).
+/// `Some` unless isolation was turned off (`WEBDEP_ISOLATE_APPS=0|false|no|off`). It is on by default.
 pub fn configured() -> Option<Identity> {
-    let on = std::env::var(ENV_ENABLE).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
-    if !on {
+    let off = std::env::var(ENV_ENABLE).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"));
+    if off {
         return None;
     }
     let read = |key: &str| std::env::var(key).ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(65534);
@@ -128,7 +128,7 @@ pub fn wrap(plan: &Plan, app_cmd: &str) -> String {
     )
 }
 
-/// What the App Limits page shows about isolation.
+/// What the App Configs page shows about isolation.
 #[derive(serde::Serialize)]
 pub struct Status {
     /// Asked for with `WEBDEP_ISOLATE_APPS`.
@@ -164,7 +164,9 @@ pub fn prepare(cmd: &str, own_root: &Path, work_dir: &Path, key: &str) -> Prepar
         return unchanged(None);
     };
     if let Some(why) = unavailable_reason() {
-        return unchanged(Some(format!("App isolation is turned on but {why}, so this ran without it.")));
+        // On by default, so only complain when someone asked for it by name.
+        let asked = std::env::var(ENV_ENABLE).is_ok();
+        return unchanged(asked.then(|| format!("App isolation is turned on but {why}, so this ran without it.")));
     }
     let own = std::fs::canonicalize(own_root).unwrap_or_else(|_| own_root.to_path_buf());
     let work = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
@@ -346,8 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn off_unless_asked_for() {
+    fn on_unless_turned_off() {
         std::env::remove_var(ENV_ENABLE);
-        assert!(configured().is_none());
+        assert!(configured().is_some());
+        for off in ["0", "false", "no", "off", " OFF "] {
+            std::env::set_var(ENV_ENABLE, off);
+            assert!(configured().is_none(), "{off:?} should turn it off");
+        }
+        std::env::set_var(ENV_ENABLE, "1");
+        assert!(configured().is_some());
+        std::env::remove_var(ENV_ENABLE);
     }
 }

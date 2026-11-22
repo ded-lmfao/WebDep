@@ -146,17 +146,24 @@ fn display_asset_name() -> &'static str {
     current_arch_asset_name().unwrap_or("webdep3-linux-x86_64.tar.gz")
 }
 
-/// Resolves the live executable path safely, stripping Linux `(deleted)` suffix if unlinked.
+/// Resolves the live executable path safely.
 fn resolve_active_exe_path() -> PathBuf {
     let exe_name = if cfg!(windows) { "webdep.exe" } else { "webdep" };
     if let Ok(exe) = std::env::current_exe() {
-        let s = exe.to_string_lossy();
-        if let Some(clean) = s.strip_suffix(" (deleted)") {
-            return PathBuf::from(clean);
-        }
-        return exe;
+        return normalize_exe_path(exe);
     }
     Path::new("target").join("release").join(exe_name)
+}
+
+/// The path the service actually launches. After an update the running process keeps its old
+/// binary, which was renamed to `<name>.old` (Linux then reports `<name>.old`, or `<name> (deleted)`
+/// if it was removed). Updating again from such a process must target `<name>`, not the leftover
+/// file, so both suffixes are stripped.
+fn normalize_exe_path(exe: PathBuf) -> PathBuf {
+    let s = exe.to_string_lossy().into_owned();
+    let s = s.strip_suffix(" (deleted)").unwrap_or(&s);
+    let s = s.strip_suffix(".old").unwrap_or(s);
+    PathBuf::from(s)
 }
 
 fn extract_short_sha_from_release(rel: &GhReleaseResponse) -> Option<String> {
@@ -1178,6 +1185,15 @@ pub fn restart_service_delayed(delay_ms: u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_process_running_a_replaced_binary_still_updates_the_real_one() {
+        let n = |s: &str| normalize_exe_path(PathBuf::from(s));
+        assert_eq!(n("/root/Web-Dep/target/release/webdep"), PathBuf::from("/root/Web-Dep/target/release/webdep"));
+        assert_eq!(n("/root/Web-Dep/target/release/webdep.old"), PathBuf::from("/root/Web-Dep/target/release/webdep"));
+        assert_eq!(n("/root/Web-Dep/target/release/webdep (deleted)"), PathBuf::from("/root/Web-Dep/target/release/webdep"));
+        assert_eq!(n("/opt/webdep.old (deleted)"), PathBuf::from("/opt/webdep"));
+    }
+
     use super::*;
 
     #[test]

@@ -34,7 +34,7 @@ Stale risk: LOW
 - Restore never merges: it replaces the app's Files root (api/files.rs service_root; a `current` symlink is swapped through its target). env-only backups must never wipe files (restore_files handles it).
 - CPU/memory limits: Linux cgroups v2 (root) and Windows job objects; disk limit is a soft stop checked each minute on this server only.
 ## Changelog
-- 2026-11-22: backups rebuilt (archives, background build, status, checksum, lock, download, safe restore, remote VPS support, older backups use the safe restore); App Limits tab; Windows CPU/memory limits; icon busy fix.
+- 2026-11-22: backups rebuilt (archives, background build, status, checksum, lock, download, safe restore, remote VPS support, older backups use the safe restore); App Configs tab; Windows CPU/memory limits; icon busy fix.
 - 2026-11-21: 99fe7b1 — phases 1-6: pre-upgrade backup + rollback, private ports + firewall state, reset links/sessions/2FA policy/PoW sign-up, backups/audit paging/webhooks, create perms + owner grant, node IPs + Caddy bind, cgroup limits; migrations 0008-0010.
 - 2026-11-21: feat/user-management at 9031ed4 — accounts/requests/admin panel, per-app grants, port pools, custom modules, icon UI.
 - 2026-11-20: 861d0bd v3.0.4 — settings_users.js permission presets compared as sets; version bump only.

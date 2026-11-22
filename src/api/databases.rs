@@ -360,6 +360,49 @@ fn strip_linked_db_env_lines(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Writes the database's connection settings into the linked app's environment (and a service's
+/// `.env`). Used when linking and when the database's port changes.
+pub(crate) async fn write_link_env(
+    state: &AppState,
+    p: &crate::projects::Project,
+    db: &crate::databases::ManagedDatabase,
+) -> Result<(), (StatusCode, String)> {
+    let raw_pass = db.db_password.clone().unwrap_or_default();
+    let port_str = db.port.to_string();
+    let internal_url = crate::databases::build_postgres_url(&db.db_user, &raw_pass, "127.0.0.1", db.port, &db.db_name, false);
+    let entries: [(&str, &str, bool); 6] = [
+        (LINKED_DB_ENV_KEYS[0], &internal_url, true),
+        (LINKED_DB_ENV_KEYS[1], "127.0.0.1", false),
+        (LINKED_DB_ENV_KEYS[2], &port_str, false),
+        (LINKED_DB_ENV_KEYS[3], &db.db_user, false),
+        (LINKED_DB_ENV_KEYS[4], &raw_pass, true),
+        (LINKED_DB_ENV_KEYS[5], &db.db_name, false),
+    ];
+    for (key, val, is_secret) in entries {
+        state
+            .projects
+            .set_env_var(p.id, key, val, is_secret)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    if p.project_kind == "service" {
+        let dotenv_path = service_dotenv_path(p);
+        if dotenv_path.exists() {
+            if let Ok(content) = tokio::fs::read_to_string(&dotenv_path).await {
+                let mut lines = strip_linked_db_env_lines(&content);
+                for (key, val, _) in entries {
+                    lines.push(format!("{}={}", key, val));
+                }
+                let _ = tokio::fs::write(&dotenv_path, lines.join("
+") + "
+").await;
+            }
+        }
+    }
+    state.cache.invalidate_project(p.id);
+    Ok(())
+}
+
 pub(crate) async fn link_database_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -374,44 +417,12 @@ pub(crate) async fn link_database_handler(
     let _ = verify_db_access(&state, &headers, &["databases_manage"], &db).await?;
     let user = verify_power(&state, &headers, "env", Some(p.id)).await?;
 
-    let raw_pass = db.db_password.unwrap_or_default();
-    let port_str = db.port.to_string();
-    let internal_url = crate::databases::build_postgres_url(&db.db_user, &raw_pass, "127.0.0.1", db.port, &db.db_name, false);
-    let entries: [(&str, &str, bool); 6] = [
-        (LINKED_DB_ENV_KEYS[0], &internal_url, true),
-        (LINKED_DB_ENV_KEYS[1], "127.0.0.1", false),
-        (LINKED_DB_ENV_KEYS[2], &port_str, false),
-        (LINKED_DB_ENV_KEYS[3], &db.db_user, false),
-        (LINKED_DB_ENV_KEYS[4], &raw_pass, true),
-        (LINKED_DB_ENV_KEYS[5], &db.db_name, false),
-    ];
-
-    for (key, val, is_secret) in entries {
-        state.projects.set_env_var(p.id, key, val, is_secret)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
+    write_link_env(&state, &p, &db).await?;
     state.databases.set_linked_project(id, Some(p.id)).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    state.cache.invalidate_project(p.id);
     state.cache.invalidate_prefix("databases:");
     state.cache.invalidate_prefix("overview:");
 
-    let is_service = p.project_kind == "service";
-    let target_noun = if is_service { "service" } else { "website" };
-
-    if is_service {
-        let dotenv_path = service_dotenv_path(&p);
-        if dotenv_path.exists() {
-            if let Ok(content) = tokio::fs::read_to_string(&dotenv_path).await {
-                let mut lines = strip_linked_db_env_lines(&content);
-                for (key, val, _) in entries {
-                    lines.push(format!("{}={}", key, val));
-                }
-                let _ = tokio::fs::write(&dotenv_path, lines.join("\n") + "\n").await;
-            }
-        }
-    }
+    let target_noun = if p.project_kind == "service" { "service" } else { "website" };
 
     log_audit(&state, &user.username, "database.link", Some(&database_tag(db.id)), Some(&format!("Linked database '{}' to {} '{}'", db.name, target_noun, p.name))).await;
     Ok(Json(serde_json::json!({

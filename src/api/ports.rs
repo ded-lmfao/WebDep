@@ -351,6 +351,110 @@ pub(crate) async fn set_extra_ports_handler(
     Ok(Json(serde_json::json!({ "ok": true, "extraPorts": list, "firewallNote": note })))
 }
 
+async fn database_node(state: &AppState, db: &crate::databases::ManagedDatabase) -> Result<crate::cluster::ClusterNode, ApiError> {
+    let node_id = match db.node_id {
+        Some(id) => id,
+        None => state.cluster.default_local_node_id().await.ok_or_else(|| bad("This database has no node."))?,
+    };
+    load_node(state, node_id).await
+}
+
+async fn load_database(state: &AppState, id: i64) -> Result<crate::databases::ManagedDatabase, ApiError> {
+    state
+        .databases
+        .get(id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Database not found".to_string()))
+}
+
+/// Moves a database to another port on its node. A running database restarts on the new port,
+/// and the app it is linked to gets the new connection settings.
+pub(crate) async fn set_database_port_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+    Json(p): Json<AppPortPayload>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let actor = verify_admin(&state, &headers).await?;
+    let db = load_database(&state, id).await?;
+    let node = database_node(&state, &db).await?;
+    let current = db.port;
+    let pooled = ports::has_pool(&state.db, node.id).await;
+    let target = match (p.port, pooled) {
+        (Some(port), true) => {
+            ports::check_assignable_for(&state.db, node.id, port, ports::Owner::Database(id)).await.map_err(bad)?;
+            port
+        }
+        (Some(port), false) => crate::db::allocate_global_unique_port(&state.db, Some(port), port, None, Some(id)).await.map_err(bad)?,
+        (None, true) => ports::next_free_port(&state.db, node.id, &[current])
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| bad(ports::no_free_port_message(&node.name)))?,
+        (None, false) => return Err(bad("Choose a port: this node has no port range yet.")),
+    };
+    if target == current {
+        return Ok(Json(serde_json::json!({ "ok": true, "port": current })));
+    }
+    if target < ports::MIN_POOL_PORT {
+        return Err(bad(format!("Ports below {} are reserved for the system.", ports::MIN_POOL_PORT)));
+    }
+    state.databases.set_port(id, target).await.map_err(internal)?;
+    if pooled {
+        let _ = sync_ports(&state, &node, vec![current]).await;
+    }
+    if let Some(pid) = db.linked_project_id {
+        if let Some(project) = state.projects.get(pid).await.map_err(internal)? {
+            let fresh = load_database(&state, id).await?;
+            super::databases::write_link_env(&state, &project, &fresh).await?;
+        }
+    }
+    log_audit(
+        &state,
+        &actor.username,
+        "database.port",
+        Some(&database_tag(id)),
+        Some(&format!("Moved from port {current} to {target}")),
+    )
+    .await;
+    state.cache.invalidate_all();
+    Ok(Json(serde_json::json!({ "ok": true, "port": target, "linkedAppNeedsRestart": db.linked_project_id.is_some() })))
+}
+
+pub(crate) async fn set_database_extra_ports_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxPath(id): AxPath<i64>,
+    Json(p): Json<PortsPayload>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let actor = verify_admin(&state, &headers).await?;
+    let db = load_database(&state, id).await?;
+    let node = database_node(&state, &db).await?;
+    if !ports::has_pool(&state.db, node.id).await {
+        return Err(bad("Give this node a port range first."));
+    }
+    let list = if p.ports.trim().is_empty() { Vec::new() } else { ports::parse_port_list(&p.ports).map_err(bad)? };
+    if list.len() > 20 {
+        return Err(bad("A database can have up to 20 extra ports."));
+    }
+    if list.contains(&db.port) {
+        return Err(bad("That port is already the database's main port."));
+    }
+    ports::set_database_extra_ports(&state.db, node.id, id, &list).await.map_err(bad)?;
+    let note = sync_ports(&state, &node, list.clone()).await;
+    let value = list.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
+    log_audit(
+        &state,
+        &actor.username,
+        "database.extra_ports",
+        Some(&database_tag(id)),
+        Some(&if value.is_empty() { "Removed extra ports".to_string() } else { format!("Extra ports: {value}") }),
+    )
+    .await;
+    state.cache.invalidate_all();
+    Ok(Json(serde_json::json!({ "ok": true, "extraPorts": list, "firewallNote": note })))
+}
+
 
 // ---------------------------------------------------------------------------
 // Node IP addresses and per-app IP / resource limits
