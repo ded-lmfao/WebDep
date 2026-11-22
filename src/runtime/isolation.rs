@@ -98,7 +98,10 @@ pub fn wrap(plan: &Plan, app_cmd: &str) -> String {
     let stage = q(&plan.staging);
     let covering: Vec<&PathBuf> = plan.hide_roots.iter().filter(|r| plan.own_root.starts_with(r)).collect();
 
-    let mut s = String::from("set -e\n");
+    // The panel starts apps with umask 027, which would make the folders created below root-only
+    // (750) and block the app user from walking to its own files. Set up with a normal umask and
+    // give the app its restrictive one back at the end.
+    let mut s = String::from("set -e\numask 022\n");
     s.push_str(&format!("hostname {}\n", shell_quote(&plan.hostname)));
     s.push_str("mount --make-rprivate /\n");
     if !covering.is_empty() {
@@ -112,6 +115,7 @@ pub fn wrap(plan: &Plan, app_cmd: &str) -> String {
     }
     s.push_str("mount -t tmpfs -o mode=1777 tmpfs /tmp\n");
     s.push_str(&format!("cd {}\n", q(&plan.work_dir)));
+    s.push_str("umask 027\n");
     s.push_str(&format!(
         "exec setpriv --reuid={} --regid={} --clear-groups --no-new-privs -- sh -c {}\n",
         plan.identity.uid,
@@ -299,6 +303,13 @@ mod tests {
         assert!(script.contains("mount -t tmpfs -o mode=0755 tmpfs"));
         assert!(script.contains("/opt/webdep/data/deployments/shop"));
         assert!(script.contains("setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs"));
+        // Folders made while setting up must be walkable by the app user, whatever umask the panel has.
+        let setup_umask = script.find("umask 022").unwrap();
+        let first_mkdir = script.find("mkdir -p").unwrap();
+        let app_umask = script.find("umask 027").unwrap();
+        let exec = script.find("exec setpriv").unwrap();
+        assert!(setup_umask < first_mkdir, "umask 022 before any mkdir");
+        assert!(first_mkdir < app_umask && app_umask < exec, "the app's umask is restored just before it starts");
         assert!(script.contains("node server.js"));
         // The app's folder is carried across the tmpfs before it is covered, and not the other way.
         let carry = script.find("--bind").unwrap();
