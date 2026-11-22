@@ -238,7 +238,7 @@ Move a website or backend service from one VPS to another directly from its work
 | **Services** | 24/7 background daemons (Lavalink/Java, Python workers, Node bots, Go/Rust binaries) with live PID tracking and log streaming. |
 | **Databases** | Isolated native PostgreSQL clusters on any node with SCRAM-SHA-256 auth, local/mesh/CIDR/public rules, and 1-click `DATABASE_URL` linking. |
 | **My Account** | Every user's own profile (name, email), password, passkeys, TOTP 2FA, sessions, and a read-only list of the apps they can access. |
-| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **IP Addresses**, **Move Apps**, **App Limits**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
+| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **IP Addresses**, **Move Apps**, **App Configs**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
 
 #### Accounts & Permissions
 - **Sign-up requests**: people create an account request from the sign-in page; it waits in **Admin Panel › Requests** and an account exists only after approval. Admins can also create accounts directly (with a temporary password the user must change). Self-registration can be switched off in **Platform Settings › Accounts**.
@@ -252,11 +252,11 @@ Move a website or backend service from one VPS to another directly from its work
 #### Ports, IPs, and limits (Admin Panel › IP Addresses)
 - **Port ranges per node**: new apps take the lowest free port in the node's range. Ports stay private (only Caddy and the mesh reach them) until made public, and the firewall follows automatically. If a node has no free port, the app isn't created and the panel says so.
 - **Several IPs per VPS**: add the VPS's public IPs and choose one per website or service; Caddy then serves its domains on that IP only.
-- **Resource limits** (set at creation, changed by admins in **App Limits**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root) and Job Objects on Windows; limits are checked shortly after an app starts or restarts and then every 2 minutes: a disk limit stops the app when it grows past it, and an app that reaches its memory or CPU limit keeps running but is slowed down; either way the people who can see the app get a pop-up explaining it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
+- **Resource limits** (set at creation, changed by admins in **App Configs**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root) and Job Objects on Windows; limits are checked shortly after an app starts or restarts and then every 2 minutes: a disk limit stops the app when it grows past it, and an app that reaches its memory or CPU limit keeps running but is slowed down; either way the people who can see the app get a pop-up explaining it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
 - **Move Apps** moves a website or service to another node (admins only).
 
 #### Backups and restore (the **Backups** tab of every website, service and database)
-- **Create backup** saves every file in the app's Files folder plus its environment variables as one archive, built in the background, with its size, file count, creator, status and checksum. Optionally leave out names such as `cache` or `*.log`. A backup limit per app (App Limits) caps how many it can hold.
+- **Create backup** saves every file in the app's Files folder plus its environment variables as one archive, built in the background, with its size, file count, creator, status and checksum. Optionally leave out names such as `cache` or `*.log`. A backup limit per app (App Configs) caps how many it can hold.
 - **Restore** replaces the app's files with the backup (nothing is merged), stops and restarts the app, restores the environment variables, and keeps the replaced files for 24 hours so it can be undone. It checks the checksum first and swaps folders with rollback, so a bad backup or a failure never leaves the app half restored. You confirm by typing the app's name.
 - **Download**, **lock** (a locked backup can't be deleted) and **delete** are on each row. Apps on other VPSes are backed up and restored on that VPS.
 - **Databases** are backed up as a PostgreSQL dump while they keep running (no downtime). **Restore** replaces everything in the database inside a single transaction: if anything fails, the database is left exactly as it was. The database must be running. Databases on other VPSes are not supported yet.
@@ -286,7 +286,7 @@ Without isolation an app would run as the same server user as the panel, so code
 - in its own **PID, mount, IPC and UTS namespaces** (`unshare`): it cannot see or signal other processes;
 - with the panel's data folder and working folder **covered by an empty tmpfs**, only the app's own folder bound back in, and a private `/tmp`: other apps and the panel's secrets do not exist for it;
 - as an **unprivileged user** (`setpriv --no-new-privs`, uid/gid `WEBDEP_APP_UID`/`WEBDEP_APP_GID`, default 65534) that cannot undo any of this.
-The app's folder is handed to that user on start. Runtimes must be installed where that user can run them (not under `/root`). CPU and memory limits (cgroups) apply on top. The network stays shared because the reverse proxy reaches apps on their ports. The App Limits page says whether isolation is active. Turn it on for a test app first: it has not been exercised on a real Linux server yet.
+The app's folder is handed to that user on start. Runtimes must be installed where that user can run them (not under `/root`). CPU and memory limits (cgroups) apply on top. The network stays shared because the reverse proxy reaches apps on their ports. The App Configs page says whether isolation is active. Turn it on for a test app first: it has not been exercised on a real Linux server yet.
 
 ### Data Layout
 

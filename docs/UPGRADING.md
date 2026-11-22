@@ -72,11 +72,11 @@ doesn't read.
   without a choice are served on every IP, as before. Moving an app to another VPS clears the
   choice. An IP can only be removed once no app uses it.
 - **Resource limits** (set when creating a website, service, or database; changed later by
-  admins in **Admin Panel › App Limits**): CPU (100% = one core), memory, disk, and number of
+  admins in **Admin Panel › App Configs**): CPU (100% = one core), memory, disk, and number of
   backups. Empty or 0 means no limit. CPU and memory are enforced with cgroups v2 on Linux
   (WebDep must run as root, or have write access to `/sys/fs/cgroup`) and with Job Objects on
   Windows (a hard CPU cap and a memory limit for the app and everything it starts). Where limits
-  can't be enforced, the App Limits page says why and the app's log notes it. Disk is a soft
+  can't be enforced, the App Configs page says why and the app's log notes it. Disk is a soft
   limit checked every minute on this server: an app over
   it is stopped and can't be started until it is under the limit or an admin raises it (apps on
   other nodes are not measured yet). The backup limit refuses a new backup once the app holds

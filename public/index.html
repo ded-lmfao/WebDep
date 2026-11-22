@@ -376,7 +376,7 @@
             <path d="M9 8h6"></path>
             <path d="M17 16h6"></path>
           </svg>
-          <span>App Limits</span>
+          <span>App Configs</span>
         </a>
         <a class="nav-item" data-view="settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -2324,8 +2324,8 @@
         <section id="view-limits" class="view-section">
           <div class="view-header">
             <div class="view-title-group">
-              <h1>App Limits</h1>
-              <p>CPU, memory, disk, and backup limits for every website, service, and database. Empty or 0 means no limit.</p>
+              <h1>App Configs</h1>
+              <p>Every setting of a website, service, or database in one place: ports, CPU, memory, disk, and backups. Empty or 0 means no limit.</p>
             </div>
             <div class="view-actions">
               <input type="text" id="limits-search" class="form-control" placeholder="Search apps, types, or nodes" aria-label="Search apps, types, or nodes" style="width: 240px;" autocomplete="off">
@@ -2336,7 +2336,7 @@
           <div class="table-responsive acct-table-wrap">
             <table class="table acct-table lim-table">
               <thead>
-                <tr><th>App</th><th>Type</th><th>Node</th><th>CPU (% of a core)</th><th>Memory (MB)</th><th>Disk</th><th>Backups</th><th style="text-align: right;">Action</th></tr>
+                <tr><th>App</th><th>Type</th><th>Node</th><th>Port</th><th>Extra ports</th><th>CPU (% of a core)</th><th>Memory (MB)</th><th>Disk</th><th>Backups</th><th style="text-align: right;">Action</th></tr>
               </thead>
               <tbody id="limits-list-body"></tbody>
             </table>

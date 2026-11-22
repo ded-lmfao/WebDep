@@ -895,7 +895,7 @@ mod tests {
         assert_eq!((site["cpu_limit"].as_i64(), site["memory_limit_mb"].as_i64(), site["disk_limit_mb"].as_i64(), site["backup_limit"].as_i64()),
             (Some(50), Some(256), Some(1), Some(2)));
 
-        // Only admins change limits afterwards, and only admins see the App Limits list.
+        // Only admins change limits afterwards, and only admins see the App Configs list.
         let (st, _) = call(&router, Method::PUT, &format!("/api/projects/{id}/limits"), s, json!({"cpu": 1})).await;
         assert_eq!(st, StatusCode::FORBIDDEN);
         let (st, _) = call(&router, Method::GET, "/api/limits", s, json!({})).await;

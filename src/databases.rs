@@ -583,6 +583,32 @@ impl Databases {
         self.start(id).await
     }
 
+    /// Moves a database to another port: a running one is stopped, its firewall rules follow the
+    /// port, and it is started again on the new one.
+    pub async fn set_port(&self, id: i64, port: u16) -> Result<(), String> {
+        let rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
+        if rec.port == port {
+            return Ok(());
+        }
+        let was_running = rec.status == "running";
+        if was_running {
+            self.stop(id).await?;
+        }
+        Self::remove_firewall_rules(rec.port, &rec.allowed_ips).await;
+        sqlx::query("UPDATE databases SET port = $1, updated_at = $2 WHERE id = $3")
+            .bind(i32::from(port))
+            .bind(now())
+            .bind(id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| e.to_string())?;
+        Self::sync_firewall_rules(port, &rec.access_mode, &rec.allowed_ips).await;
+        if was_running {
+            self.start(id).await?;
+        }
+        Ok(())
+    }
+
     pub async fn delete(&self, id: i64) -> Result<(), String> {
         let db_rec = self.get(id).await?.ok_or_else(|| "Database not found".to_string())?;
 

@@ -1,4 +1,4 @@
-//! Admin Panel > App Limits: CPU, memory, disk, and backup limits per website, service, and database.
+//! Admin Panel > App Configs: CPU, memory, disk, and backup limits per website, service, and database.
 //!
 //! Routes (admins only; creators set limits once, when they create the app):
 //! - `GET /api/limits`                 every app with its limits

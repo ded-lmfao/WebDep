@@ -1239,9 +1239,7 @@ function renderPortMap(ports) {
 }
 
 function appActionButtons(appId, running, others) {
-  return `<button class="btn btn-secondary btn-sm" data-ipx-act="app-port" data-app="${appId}">Change port</button>
-    <button class="btn btn-secondary btn-sm" data-ipx-act="app-extra" data-app="${appId}">Extra ports</button>
-    <button class="btn btn-sm ${running ? 'ipx-btn-stop' : 'ipx-btn-start'}" data-ipx-act="${running ? 'app-stop' : 'app-start'}" data-app="${appId}">${running ? 'Stop' : 'Start'}</button>
+  return `<button class="btn btn-sm ${running ? 'ipx-btn-stop' : 'ipx-btn-start'}" data-ipx-act="${running ? 'app-stop' : 'app-start'}" data-app="${appId}">${running ? 'Stop' : 'Start'}</button>
     ${others.length ? `<select class="form-control ipx-move" data-app="${appId}" aria-label="Move to another node">
       <option value="">Move to node</option>${others.map((t) => `<option value="${t.id}">${escapeHtml(nodeLabel(t))}</option>`).join('')}
     </select>` : ''}`;
@@ -1287,7 +1285,8 @@ function renderDetail(ports, others) {
       ${u.role === 'main' && u.access ? `<p class="ipx-access"><strong>${escapeHtml((ACCESS_TEXT[u.access] || u.access).split(':')[0])}</strong>: ${escapeHtml((ACCESS_TEXT[u.access] || '').split(': ')[1] || '')}. Change it in the app's settings.</p>` : ''}
       ${u.role === 'main' && u.kind !== 'database'
         ? `<div class="ipx-detail-actions">${appActionButtons(u.id, u.running, others)}</div>`
-        : `<p class="acct-muted">${u.kind === 'database' ? 'Databases keep their port.' : 'Change extra ports from the app\'s main port.'}</p>`}`;
+        : '<p class="acct-muted">Change ports in Admin Panel &rsaquo; App Configs.</p>'}
+      ${u.role === 'main' && u.kind !== 'database' ? '<p class="acct-muted">Change its port or extra ports in Admin Panel &rsaquo; App Configs.</p>' : ''}`;
   } else {
     body = `<div class="ipx-detail-actions">
         ${p.open ? '<button class="btn btn-secondary btn-sm" data-ipx-act="close-one">Close port</button>' : '<button class="btn btn-secondary btn-sm" data-ipx-act="open-one">Open port</button>'}
@@ -1327,7 +1326,7 @@ function renderAppsTable(ports, others) {
         <td>${a.kind !== 'database' ? appIpSelect(a.id, Number(ipsUi.nodeId)) : '<span class="acct-muted">-</span>'}</td>
         <td>${a.extra.length ? a.extra.map((x) => `<button type="button" class="ipx-port-link" data-ipx-jump="${x}">${x}</button>`).join(' ') : '<span class="acct-muted">None</span>'}</td>
         <td>${a.running ? '<span class="badge badge-success">Running</span>' : '<span class="badge badge-neutral">Stopped</span>'}</td>
-        <td><div class="acct-actions">${a.kind !== 'database' ? appActionButtons(a.id, a.running, others) : '<span class="acct-muted">Fixed port</span>'}</div></td>
+        <td><div class="acct-actions">${a.kind !== 'database' ? appActionButtons(a.id, a.running, others) : '<span class="acct-muted">Ports: App Configs</span>'}</div></td>
       </tr>`).join('')}</tbody>
     </table></div>
   </div>`;
@@ -1512,35 +1511,6 @@ async function runIpxAction(act, el) {
       if (!targets.length) return undefined;
       await portRequest(nid, 'PATCH', '/ports', { ports: targets.join(','), open });
       return toast(`${targets.length} port${targets.length === 1 ? '' : 's'} ${open ? 'opened' : 'closed'}.`, 'success');
-    }
-    case 'app-port': {
-      const typed = await showPromptDialog({
-        title: 'Change port',
-        message: 'Enter a new port from this node, or leave it empty to use the next free port. Caddy and the firewall update automatically and a running app restarts.',
-        placeholder: 'New port',
-        confirmText: 'Change port',
-      });
-      if (typed === null) return undefined;
-      const value = String(typed).trim();
-      const updated = await api(`/api/projects/${appId}/port`, { method: 'PUT', body: { port: value ? Number(value) : null } });
-      ipsUi.selected = new Set([updated.assigned_port || updated.port].filter(Boolean));
-      toast(`Now on port ${updated.assigned_port || updated.port}.`, 'success');
-      return loadIpsView(true);
-    }
-    case 'app-extra': {
-      const current = ports.filter((p) => p.usedBy && p.usedBy.role === 'extra' && p.usedBy.id === appId).map((p) => p.port);
-      const typed = await showPromptDialog({
-        title: 'Extra ports',
-        message: 'Ports this app may also listen on, from this node\'s open ports. The app gets them in EXTRA_PORTS after a restart. Leave empty to remove them.',
-        placeholder: 'Ports or ranges',
-        defaultValue: current.join(', '),
-        confirmText: 'Save',
-      });
-      if (typed === null) return undefined;
-      const res = await api(`/api/projects/${appId}/extra-ports`, { method: 'PUT', body: { ports: String(typed).trim() } });
-      if (res.firewallNote) toast(res.firewallNote, 'warning');
-      toast('Extra ports saved. Restart the app to use them.', 'success');
-      return loadIpsView(true);
     }
     case 'ip-add': {
       const ip = (document.getElementById(`ip-add-${nid}`)?.value || '').trim();

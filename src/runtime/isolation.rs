@@ -128,7 +128,7 @@ pub fn wrap(plan: &Plan, app_cmd: &str) -> String {
     )
 }
 
-/// What the App Limits page shows about isolation.
+/// What the App Configs page shows about isolation.
 #[derive(serde::Serialize)]
 pub struct Status {
     /// Asked for with `WEBDEP_ISOLATE_APPS`.

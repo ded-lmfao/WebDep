@@ -83,7 +83,7 @@ pub fn prepare(_name: &str, cpu_percent: i32, memory_mb: i32) -> Result<Option<s
     }
 }
 
-/// Whether CPU and memory limits are enforced on this server, for the App Limits page.
+/// Whether CPU and memory limits are enforced on this server, for the App Configs page.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Enforcement {
     pub works: bool,

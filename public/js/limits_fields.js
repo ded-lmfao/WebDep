@@ -1,6 +1,6 @@
 /**
  * Resource limit fields (CPU, memory, disk, backups) shared by the create forms and the
- * admin App Limits tab. Every field uses 0 or empty for "no limit".
+ * admin App Configs tab. Every field uses 0 or empty for "no limit".
  */
 
 const MB_PER_GB = 1024;
@@ -72,7 +72,7 @@ export function resetLimitFields(prefix) {
   if (unit) unit.value = 'MB';
 }
 
-/** The fields only make sense when creating; editing happens in Admin Panel > App Limits. */
+/** The fields only make sense when creating; editing happens in Admin Panel > App Configs. */
 export function setLimitFieldsVisible(prefix, visible) {
   const slot = document.getElementById(`${prefix}-limits-slot`);
   if (slot) slot.hidden = !visible;
