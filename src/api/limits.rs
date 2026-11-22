@@ -115,8 +115,9 @@ const MB: u64 = 1024 * 1024;
 /// strips the tag). Kinds: `disk`, `backups`.
 pub(crate) const DISK_LIMIT_TAG: &str = "[app-limit:disk] ";
 pub(crate) const BACKUP_LIMIT_TAG: &str = "[app-limit:backups] ";
+pub(crate) const RAM_START_TAG: &str = "[app-limit:ram_start] ";
 
-fn over_message(name: &str, used: u64, limit: u64) -> String {
+pub(crate) fn over_message(name: &str, used: u64, limit: u64) -> String {
     format!(
         "'{name}' is over its disk limit ({:.1} MB used of {:.1} MB). Free space or ask an admin to raise the limit.",
         used as f64 / MB as f64,
@@ -125,28 +126,30 @@ fn over_message(name: &str, used: u64, limit: u64) -> String {
 }
 
 /// `Some((used, limit))` in bytes when a website or service on this server is over its disk limit.
-fn project_over_disk(p: &crate::projects::Project) -> Option<(u64, u64)> {
+pub(crate) fn project_over_disk(p: &crate::projects::Project) -> Option<(u64, u64)> {
     if p.disk_limit_mb <= 0 {
         return None;
     }
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (used, _) = crate::api::system::compute_project_disk_formatted(p, &cwd);
+    // Measured now, not from the 2-minute cache: an old figure would let an app over its limit start.
+    let used = crate::api::system::compute_project_disk_bytes_fresh(p, &cwd);
     let limit = p.disk_limit_mb as u64 * MB;
     (used > limit).then_some((used, limit))
 }
 
-fn database_over_disk(data_dir: &str, disk_limit_mb: i64) -> Option<(u64, u64)> {
+pub(crate) fn database_over_disk(data_dir: &str, disk_limit_mb: i64) -> Option<(u64, u64)> {
     if disk_limit_mb <= 0 {
         return None;
     }
-    let used = crate::monitor::get_path_disk_size(std::path::Path::new(data_dir));
+    let used = crate::monitor::get_path_disk_size_fresh(std::path::Path::new(data_dir));
     let limit = disk_limit_mb as u64 * MB;
     (used > limit).then_some((used, limit))
 }
 
 /// Refuses to start a local website or service that is over its disk limit.
-pub(crate) fn ensure_project_under_disk_limit(p: &crate::projects::Project) -> Result<(), ApiError> {
-    match project_over_disk(p) {
+pub(crate) async fn ensure_project_under_disk_limit(p: &crate::projects::Project) -> Result<(), ApiError> {
+    let probe = p.clone();
+    match tokio::task::spawn_blocking(move || project_over_disk(&probe)).await.ok().flatten() {
         Some((used, limit)) => Err((StatusCode::CONFLICT, format!("{DISK_LIMIT_TAG}{}", over_message(&p.name, used, limit)))),
         None => Ok(()),
     }
@@ -156,53 +159,9 @@ pub(crate) fn ensure_project_under_disk_limit(p: &crate::projects::Project) -> R
 pub(crate) async fn ensure_database_under_disk_limit(state: &AppState, id: i64) -> Result<(), ApiError> {
     let Some(db) = state.databases.get(id).await.map_err(internal)? else { return Ok(()) };
     let limit = app_limits::get(&state.db, Kind::Database, id).await.map_err(internal)?.map_or(0, |l| l.disk_mb);
-    match database_over_disk(&db.data_dir, limit) {
+    let dir = db.data_dir.clone();
+    match tokio::task::spawn_blocking(move || database_over_disk(&dir, limit)).await.ok().flatten() {
         Some((used, limit)) => Err((StatusCode::CONFLICT, format!("{DISK_LIMIT_TAG}{}", over_message(&db.name, used, limit)))),
         None => Ok(()),
-    }
-}
-
-/// Stops every local app that is over its disk limit. Runs on a timer.
-pub(crate) async fn enforce_disk_limits(state: &AppState) {
-    let local = state.cluster.default_local_node_id().await;
-    let on_this_server = |node: Option<i64>| node.is_none() || node == local;
-
-    if let Ok(projects) = state.projects.list().await {
-        for p in projects.into_iter().filter(|p| p.disk_limit_mb > 0 && on_this_server(p.node_id)) {
-            if p.app_status != "running" && p.app_status != "maintenance" {
-                continue;
-            }
-            let probe = p.clone();
-            let Some((used, limit)) = tokio::task::spawn_blocking(move || project_over_disk(&probe)).await.ok().flatten() else {
-                continue;
-            };
-            if state.runtime.stop_project(&p).await.is_ok() {
-                let msg = over_message(&p.name, used, limit);
-                log_audit_project(state, Some(p.id), "system", "app.disk_stop", Some(&p.name), Some(&format!("Stopped: {msg}"))).await;
-                crate::maintenance::notify(&state.db, "app.disk", format!("WebDep: stopped {}", msg)).await;
-                state.cache.invalidate_all();
-            }
-        }
-    }
-
-    let rows: Vec<(i64, String, String, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT id, name, data_dir, disk_limit_mb, node_id FROM databases WHERE disk_limit_mb > 0 AND status = 'running'",
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-    for (id, name, data_dir, limit_mb, node) in rows {
-        if !on_this_server(node) {
-            continue;
-        }
-        let Some((used, limit)) = tokio::task::spawn_blocking(move || database_over_disk(&data_dir, limit_mb)).await.ok().flatten() else {
-            continue;
-        };
-        if state.databases.stop(id).await.is_ok() {
-            let msg = over_message(&name, used, limit);
-            log_audit(state, "system", "database.disk_stop", Some(&name), Some(&format!("Stopped: {msg}"))).await;
-            crate::maintenance::notify(&state.db, "app.disk", format!("WebDep: stopped {}", msg)).await;
-            state.cache.invalidate_all();
-        }
     }
 }

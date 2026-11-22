@@ -637,7 +637,7 @@ pub(crate) async fn start_project_with_audit(
         .await;
         Ok(pid)
     } else {
-        super::limits::ensure_project_under_disk_limit(p)?;
+        super::limits::ensure_project_under_disk_limit(p).await?;
         let env = state.projects.get_env_map(p.id).await;
         state.runtime.start_project(p, env, None).await.map_err(|e| {
             if e == "NOT_DEPLOYED_YET" {

@@ -202,6 +202,12 @@ pub async fn spawn_project_process_pure(
     cmd.env("WEBDEP_PROJECT_ID", p.id.to_string());
     cmd.env("WEBDEP_PROJECT_SLUG", &p.slug);
     cmd.env("WEBDEP_CONTAINER_ID", &container.container_id);
+    // Under a memory limit, make Java and Node size their heap by the limit, not by the machine's RAM.
+    for (key, value) in crate::runtime::limits::memory_hints(&final_cmd, p.memory_limit_mb) {
+        if !isolated_env.contains_key(key) && std::env::var_os(key).is_none() {
+            cmd.env(key, value);
+        }
+    }
 
     if let Some((_, ref java_home)) = java_info {
         let bin_dir = java_home.join("bin");
@@ -320,8 +326,18 @@ pub async fn spawn_project_process_pure(
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     if let Ok(Some(status)) = child.try_wait() {
-        let err_msg = format!("Process exited immediately with code {}", status);
+        let mut err_msg = format!("Process exited immediately with code {}", status);
         log_cb("system", "warn", &err_msg);
+        if p.memory_limit_mb > 0 {
+            // A memory limit smaller than the app needs makes it crash right away: say so.
+            err_msg = format!(
+                "{}'{}' stopped right after starting ({}) while a memory limit of {} MB is set. A limit smaller than the app needs to start makes it crash right away.",
+                crate::api::limits::RAM_START_TAG,
+                p.name,
+                status,
+                p.memory_limit_mb
+            );
+        }
         return Err(err_msg);
     }
 

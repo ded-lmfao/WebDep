@@ -435,19 +435,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             crate::api::projects::backups::undo_housekeeping(&startup_state, true).await;
         });
 
-        // Disk limits are soft: every minute, stop local apps that grew past theirs. Expired
-        // restore undo copies are cleaned up every fifth minute.
+        // Apps are checked against their CPU, memory and disk limits shortly after they start and
+        // then every 2 minutes; going over disk stops the app (see api/limit_watch.rs).
+        tokio::spawn(crate::api::limit_watch::run(state.clone()));
+
+        // Expired restore undo copies are cleaned up every 5 minutes.
         let state = state.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            let mut tick = 0u64;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
                 interval.tick().await;
-                tick += 1;
-                crate::api::limits::enforce_disk_limits(&state).await;
-                if tick % 5 == 0 {
-                    crate::api::projects::backups::undo_housekeeping(&state, false).await;
-                }
+                crate::api::projects::backups::undo_housekeeping(&state, false).await;
             }
         });
     }

@@ -252,7 +252,7 @@ Move a website or backend service from one VPS to another directly from its work
 #### Ports, IPs, and limits (Admin Panel › IP Addresses)
 - **Port ranges per node**: new apps take the lowest free port in the node's range. Ports stay private (only Caddy and the mesh reach them) until made public, and the firewall follows automatically. If a node has no free port, the app isn't created and the panel says so.
 - **Several IPs per VPS**: add the VPS's public IPs and choose one per website or service; Caddy then serves its domains on that IP only.
-- **Resource limits** (set at creation, changed by admins in **App Limits**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root) and Job Objects on Windows; a disk limit (checked every minute) stops the app when it grows past it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
+- **Resource limits** (set at creation, changed by admins in **App Limits**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root) and Job Objects on Windows; limits are checked shortly after an app starts or restarts and then every 2 minutes: a disk limit stops the app when it grows past it, and an app that reaches its memory or CPU limit keeps running but is slowed down; either way the people who can see the app get a pop-up explaining it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
 - **Move Apps** moves a website or service to another node (admins only).
 
 #### Backups and restore (the **Backups** tab of every website, service and database)

@@ -211,6 +211,19 @@ pub(crate) fn compute_project_disk_formatted(p: &Project, cwd: &std::path::Path)
     (bytes, format_resource_bytes(bytes))
 }
 
+/// Same total as `compute_project_disk_formatted`, but measured now instead of from the cache.
+pub(crate) fn compute_project_disk_bytes_fresh(p: &Project, cwd: &std::path::Path) -> u64 {
+    let deploy_dir = resolve_workspace_path(&p.deploy_dir, cwd);
+    let deploy_size = deploy_dir.as_deref().map(crate::monitor::get_path_disk_size_fresh).unwrap_or(0);
+    let container_dir = cwd.join("data").join("containers").join(&p.slug);
+    let container_size = if deploy_dir.as_ref() != Some(&container_dir) {
+        crate::monitor::get_path_disk_size_fresh(&container_dir)
+    } else {
+        0
+    };
+    deploy_size.saturating_add(container_size)
+}
+
 static CACHED_CWD: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 static CACHED_EXE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
 

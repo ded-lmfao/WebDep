@@ -13,6 +13,7 @@ pub mod access;
 pub mod accounts;
 pub mod ports;
 pub mod limits;
+pub mod limit_watch;
 pub mod db_backups;
 
 pub use common::AppState;
@@ -109,6 +110,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/projects/:id/backups/:backup_id", delete(delete_backup_handler))
         .route("/api/projects/:id/backups/:backup_id/lock", put(lock_backup_handler))
         .route("/api/projects/:id/backups/:backup_id/download", get(download_backup_handler))
+        .route("/api/limit-events", get(limit_watch::limit_events_handler))
         // Database backups
         .route("/api/databases/:id/backups", get(db_backups::list_db_backups_handler))
         .route("/api/databases/:id/backup", post(db_backups::create_db_backup_handler))

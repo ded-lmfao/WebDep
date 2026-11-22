@@ -118,6 +118,31 @@ pub fn enforcement_status() -> Enforcement {
     Enforcement { works: false, method: "none", reason: "limits are only enforced on Linux and Windows servers".into() }
 }
 
+/// Settings that make a runtime size its own memory by the app's limit instead of by the machine's
+/// RAM. Java and Node pick their heap from the host's memory, so under a smaller limit they ask for
+/// more than they may have and die at startup (Java: "The paging file is too small"). The caller
+/// applies these only where the app has not set the variable itself.
+pub fn memory_hints(start_cmd: &str, limit_mb: i32) -> Vec<(&'static str, String)> {
+    let mut hints = Vec::new();
+    if limit_mb <= 0 {
+        return hints;
+    }
+    let words: Vec<String> = start_cmd
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '_')
+        .map(|w| w.to_ascii_lowercase())
+        .collect();
+    let has = |name: &str| words.iter().any(|w| w == name || w == &format!("{name}.exe"));
+    if has("java") {
+        // The JVM then treats the limit as the machine's RAM: a 60% heap, a small initial heap.
+        hints.push(("JAVA_TOOL_OPTIONS", format!("-XX:MaxRAM={limit_mb}m -XX:MaxRAMPercentage=60")));
+    }
+    if ["node", "npm", "npx", "yarn", "pnpm"].iter().any(|n| has(n)) {
+        let heap = (i64::from(limit_mb) * 70 / 100).max(32);
+        hints.push(("NODE_OPTIONS", format!("--max-old-space-size={heap}")));
+    }
+    hints
+}
+
 /// CPU cap as hundredths of a percent of the whole machine (Windows job objects), for a limit
 /// given as a percentage of one core. `None` when the limit is 0 or covers every core anyway.
 pub fn cpu_rate_hundredths(cpu_percent: i32, cores: usize) -> Option<u32> {
@@ -214,6 +239,18 @@ pub fn join_in_child(procs: &std::ffi::CStr) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn java_and_node_are_told_the_limit() {
+        assert!(memory_hints("java -jar Lavalink.jar", 0).is_empty(), "no limit, no hints");
+        assert!(memory_hints("python app.py", 256).is_empty());
+        let java = memory_hints("java -Xmx1g -jar Lavalink.jar", 256);
+        assert_eq!(java, vec![("JAVA_TOOL_OPTIONS", "-XX:MaxRAM=256m -XX:MaxRAMPercentage=60".to_string())]);
+        let node = memory_hints("npm run start", 512);
+        assert_eq!(node, vec![("NODE_OPTIONS", "--max-old-space-size=358".to_string())]);
+        assert!(memory_hints(r"C:\Java\bin\java.exe -jar x.jar", 128).iter().any(|(k, _)| *k == "JAVA_TOOL_OPTIONS"));
+        assert!(memory_hints("javascript-thing", 128).is_empty(), "only the java command, not words containing it");
+    }
+
     use super::*;
 
     #[test]

@@ -541,8 +541,23 @@ function showPromptDialog({ title = 'Input Required', message = '', placeholder 
 const LIMIT_DIALOG_INFO = {
   disk: {
     title: 'Disk limit reached',
-    why: 'This app uses more disk space than its limit allows, so it cannot be started until space is freed.',
+    why: 'This app uses more disk space than its limit allows, so it is stopped and cannot be started until space is freed.',
     fix: 'Delete files or old releases, or ask an admin to raise the limit in Admin Panel > App Limits.',
+  },
+  ram_start: {
+    title: 'Memory limit too low to start',
+    why: 'The app stopped right after it started while a memory limit is set. A limit smaller than the app needs to start makes it crash straight away.',
+    fix: 'Raise the memory limit (admins: Admin Panel > App Limits) and start the app again. Check its Logs to confirm.',
+  },
+  ram: {
+    title: 'Memory limit reached',
+    why: 'This app is using almost all of the memory its limit allows. Past the limit it is slowed down, its memory requests fail and it may crash.',
+    fix: 'Reduce what the app keeps in memory, or ask an admin to raise the limit in Admin Panel > App Limits.',
+  },
+  cpu: {
+    title: 'CPU limit reached',
+    why: 'This app is using as much CPU as its limit allows, so it is being slowed down to stay at the limit.',
+    fix: 'Reduce its workload, or ask an admin to raise the limit in Admin Panel > App Limits.',
   },
   backups: {
     title: 'Backup limit reached',

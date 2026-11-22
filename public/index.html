@@ -2275,7 +2275,7 @@
               <tbody id="limits-list-body"></tbody>
             </table>
           </div>
-          <p class="acct-muted" style="margin-top:10px">CPU and memory are enforced on Linux servers (as root) and on Windows. A disk limit is checked every minute: an app that grows past it is stopped and can't be started until it is under the limit. Backups is the most an app can hold at a time.</p>
+          <p class="acct-muted" style="margin-top:10px">CPU and memory are enforced on Linux servers (as root) and on Windows. Limits are checked shortly after an app starts or restarts and then every 2 minutes. An app that grows past its disk limit is stopped and can't be started until it is under the limit; an app at its memory or CPU limit keeps running but is slowed down. In each case the people who can see the app get a pop-up explaining it. Backups is the most an app can hold at a time.</p>
         </section>
 
         <section id="view-moves" class="view-section">

@@ -30,6 +30,7 @@ import './js/logs.js';
 import './js/cluster.js';
 import './js/modules.js';
 import './js/app_limits.js';
+import { startLimitAlerts } from './js/limit_alerts.js';
 import './js/sidebar.js';
 import './js/table_cards.js';
 import './js/accounts.js';
@@ -94,6 +95,7 @@ async function pollTick() {
 function startPolling() {
   if (state.overviewTimer) clearInterval(state.overviewTimer);
   state.overviewTimer = setInterval(pollTick, 4500);
+  startLimitAlerts();
 }
 window.startPolling = startPolling;
 
