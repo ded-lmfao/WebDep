@@ -286,6 +286,7 @@ Without isolation an app would run as the same server user as the panel, so code
 - in its own **PID, mount, IPC and UTS namespaces** (`unshare`): it cannot see or signal other processes;
 - with the panel's data folder and working folder **covered by an empty tmpfs**, only the app's own folder bound back in, and a private `/tmp`: other apps and the panel's secrets do not exist for it;
 - as an **unprivileged user** (`setpriv --no-new-privs`, uid/gid `WEBDEP_APP_UID`/`WEBDEP_APP_GID`, default 65534) that cannot undo any of this.
+Managed **databases** are isolated too: the PostgreSQL engine runs in its own mount, IPC and UTS namespaces (no PID namespace, so `pg_ctl` and `postmaster.pid` keep working), sees only its own folder (the panel's data folder, its database and every other database are hidden) and runs as the system `postgres` user without extra privileges. It needs a `postgres` user on the server (installing PostgreSQL creates one).
 The app's folder is handed to that user on start. Runtimes must be installed where that user can run them (not under `/root`). CPU and memory limits (cgroups) apply on top. The network stays shared because the reverse proxy reaches apps on their ports. The App Configs page says whether isolation is active. Turn it on for a test app first: it has not been exercised on a real Linux server yet.
 
 ### Data Layout

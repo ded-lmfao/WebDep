@@ -169,6 +169,39 @@ pub fn make_pg_server_command(prog: &Path, args: &[&str]) -> Command {
     cmd
 }
 
+/// Like `make_pg_server_command`, but for a managed database in `db_dir`: on Linux, when isolation
+/// is on and the panel runs as root, the command runs in its own mount/IPC/UTS namespaces where
+/// only `db_dir` is visible (the panel's data folder and every other database are hidden), as the
+/// `postgres` user. Everywhere else it is the same as `make_pg_server_command`.
+pub fn make_isolated_pg_command(prog: &Path, args: &[&str], db_dir: &Path) -> Command {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::runtime::isolation as iso;
+        if iso::configured().is_some() && iso::unavailable_reason().is_none() {
+            if let Some(identity) = iso::postgres_identity() {
+                let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                let own = canon(db_dir);
+                let cwd = std::env::current_dir().map(|d| canon(&d)).unwrap_or_default();
+                let data = std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+                let data = canon(&cwd.join(data.trim_start_matches("./")));
+                let key = format!("db-{}", own.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                let plan = iso::Plan::new(&own, &own, &data, &cwd, &key, identity);
+                let mut line = iso::shell_quote(&prog.to_string_lossy());
+                for a in args {
+                    line.push(' ');
+                    line.push_str(&iso::shell_quote(a));
+                }
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(iso::wrap_database(&plan, &line));
+                return cmd;
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = db_dir;
+    make_pg_server_command(prog, args)
+}
+
 pub fn ensure_pg_permissions(_db_dir: &Path, _data_dir: Option<&Path>) {
     #[cfg(unix)]
     {

@@ -834,7 +834,7 @@ pub async fn start_engine(spec: &EngineSpec, log: &(dyn Fn(&str, &str) + Send + 
         log("info", &format!("[DB #{}] Initializing PostgreSQL data cluster via initdb (SCRAM-SHA-256)...", id));
 
         ensure_pg_permissions(db_dir, Some(&data_dir));
-        let mut init_cmd = make_pg_server_command(
+        let mut init_cmd = make_isolated_pg_command(
             &pg_bins.initdb,
             &[
                 "-D",
@@ -849,6 +849,7 @@ pub async fn start_engine(spec: &EngineSpec, log: &(dyn Fn(&str, &str) + Send + 
                 "UTF8",
                 "--no-locale",
             ],
+            db_dir,
         );
 
         let out = init_cmd.output().await.map_err(|e| {
@@ -914,7 +915,7 @@ pub async fn start_engine(spec: &EngineSpec, log: &(dyn Fn(&str, &str) + Send + 
     crate::databases::security::ensure_tcp_only_pg_conf(&data_dir).await;
     ensure_pg_permissions(db_dir, Some(&data_dir));
     rotate_pg_log(&log_file).await;
-    let mut start_cmd = make_pg_server_command(
+    let mut start_cmd = make_isolated_pg_command(
         &pg_bins.pg_ctl,
         &[
             "-D",
@@ -924,6 +925,7 @@ pub async fn start_engine(spec: &EngineSpec, log: &(dyn Fn(&str, &str) + Send + 
             "-W",
             "start",
         ],
+        db_dir,
     );
     start_cmd.stdin(std::process::Stdio::null());
     start_cmd.stdout(std::process::Stdio::null());
@@ -1015,7 +1017,7 @@ pub async fn stop_engine(db_dir: &Path, port: u16) {
     let data_dir = db_dir.join("data");
     if let Ok(pg_bins) = PgBinaries::detect() {
         let data_str = to_clean_path_str(&data_dir);
-        let mut stop_cmd = make_pg_server_command(&pg_bins.pg_ctl, &["-D", &data_str, "-m", "fast", "stop"]);
+        let mut stop_cmd = make_isolated_pg_command(&pg_bins.pg_ctl, &["-D", &data_str, "-m", "fast", "stop"], db_dir);
         stop_cmd.stdin(std::process::Stdio::null());
         stop_cmd.stdout(std::process::Stdio::null());
         stop_cmd.stderr(std::process::Stdio::null());

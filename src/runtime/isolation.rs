@@ -93,6 +93,17 @@ impl Plan {
 
 /// The full command line (for `sh -c`) that runs `app_cmd` isolated.
 pub fn wrap(plan: &Plan, app_cmd: &str) -> String {
+    wrap_with(plan, app_cmd, true)
+}
+
+/// Same, for a database engine: no PID namespace, because PostgreSQL's `postmaster.pid` and
+/// `pg_ctl stop` must see real process ids. It still gets its own mount, IPC and UTS namespaces,
+/// sees only its own folder, and runs as an unprivileged user.
+pub fn wrap_database(plan: &Plan, cmd: &str) -> String {
+    wrap_with(plan, cmd, false)
+}
+
+fn wrap_with(plan: &Plan, app_cmd: &str, pid_namespace: bool) -> String {
     let q = |p: &Path| shell_quote(&p.to_string_lossy());
     let own = q(&plan.own_root);
     let stage = q(&plan.staging);
@@ -122,10 +133,19 @@ pub fn wrap(plan: &Plan, app_cmd: &str) -> String {
         plan.identity.gid,
         shell_quote(app_cmd)
     ));
-    format!(
-        "exec unshare --pid --fork --kill-child --mount-proc --mount --ipc --uts -- sh -c {}",
-        shell_quote(&s)
-    )
+    let flags = if pid_namespace { "--pid --fork --kill-child --mount-proc --mount --ipc --uts" } else { "--mount --ipc --uts" };
+    format!("exec unshare {flags} -- sh -c {}", shell_quote(&s))
+}
+
+/// The uid and gid of the system `postgres` user (PostgreSQL refuses to run as root and needs a
+/// user that exists), or `None` when there is none.
+#[cfg(target_os = "linux")]
+pub fn postgres_identity() -> Option<Identity> {
+    let read = |flag: &str| -> Option<u32> {
+        let out = std::process::Command::new("id").args([flag, "postgres"]).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().parse().ok()).flatten()
+    };
+    Some(Identity { uid: read("-u")?, gid: read("-g")? })
 }
 
 /// What the App Configs page shows about isolation.
@@ -345,6 +365,24 @@ mod tests {
         let last = script.lines().last().unwrap();
         let word = last.splitn(2, "-- sh -c ").nth(1).unwrap();
         assert_eq!(unquote(word), app);
+    }
+
+    #[test]
+    fn a_database_engine_keeps_real_process_ids_but_sees_only_its_folder() {
+        let plan = Plan::new(
+            Path::new("/srv/webdep/data/databases/db-3"),
+            Path::new("/srv/webdep/data/databases/db-3"),
+            Path::new("/srv/webdep/data"),
+            Path::new("/srv/webdep"),
+            "db-3",
+            Identity { uid: 26, gid: 26 },
+        );
+        let cmd = wrap_database(&plan, "'pg_ctl' '-D' 'x' 'start'");
+        assert!(cmd.starts_with("exec unshare --mount --ipc --uts -- sh -c "), "no PID namespace: postmaster.pid must hold real ids");
+        assert!(!cmd.contains("--pid"));
+        let script = unquote(cmd.splitn(2, "-- sh -c ").nth(1).unwrap());
+        assert!(script.contains("mount -t tmpfs -o mode=0755 tmpfs '/srv/webdep'"), "the panel's folders are hidden");
+        assert!(script.contains("--reuid=26 --regid=26") && script.contains("--no-new-privs"));
     }
 
     #[test]
