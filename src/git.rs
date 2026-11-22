@@ -298,10 +298,21 @@ impl Git {
         let u = repo_url.trim();
         if u.is_empty()
             || u.starts_with('-')
-            || u.starts_with("ext::")
+            || u.contains("::")
             || u.chars().any(|c| c.is_control() || c == '\0')
         {
             return Err("Invalid repository URL".to_string());
+        }
+        // Only remote repositories: a local path or file:// URL would let a user copy another app's
+        // folder (or any git repository on this server) into their own app.
+        let lower = u.to_ascii_lowercase();
+        let remote_scheme = ["https://", "http://", "ssh://", "git://"].iter().any(|s| lower.starts_with(s));
+        let scp_like = !lower.contains("://")
+            && lower.split_once(':').is_some_and(|(host, path)| {
+                host.len() > 1 && !host.contains('/') && !host.contains('\\') && !path.is_empty()
+            });
+        if !remote_scheme && !scp_like {
+            return Err("Repository URL must be https://, http://, ssh://, git:// or user@host:path".to_string());
         }
         Ok(())
     }
@@ -610,6 +621,31 @@ impl Git {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_urls_must_be_remote() {
+        for ok in [
+            "https://github.com/acme/app.git",
+            "http://git.example.com/acme/app",
+            "ssh://git@host/acme/app.git",
+            "git://host/acme/app.git",
+            "git@github.com:acme/app.git",
+        ] {
+            assert!(Git::validate_git_url(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in [
+            "/var/lib/webdep/data/deployments/other-app",
+            "../other-app",
+            "file:///var/lib/webdep",
+            "C:\\apps\\other",
+            "ext::sh -c id",
+            "fd::3",
+            "--upload-pack=id",
+            "",
+        ] {
+            assert!(Git::validate_git_url(bad).is_err(), "{bad:?} should be refused");
+        }
+    }
 
     #[test]
     fn test_extract_github_slug_and_pull_advances_head() {

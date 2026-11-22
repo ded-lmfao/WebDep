@@ -536,6 +536,47 @@ function showPromptDialog({ title = 'Input Required', message = '', placeholder 
   });
 }
 
+const LIMIT_DIALOG_INFO = {
+  disk: {
+    title: 'Disk limit reached',
+    why: 'This app uses more disk space than its limit allows, so it cannot be started until space is freed.',
+    fix: 'Delete files or old releases, or ask an admin to raise the limit in Admin Panel > App Limits.',
+  },
+  backups: {
+    title: 'Backup limit reached',
+    why: 'This app already holds the maximum number of backups its limit allows, so no new backup was made.',
+    fix: 'Delete an old backup (locked backups count too), or ask an admin to raise the limit in Admin Panel > App Limits.',
+  },
+};
+
+/** Explains why an action was refused because of an app limit. Resolves when dismissed. */
+function showLimitDialog(kind, detail) {
+  const info = LIMIT_DIALOG_INFO[kind] || { title: 'Limit reached', why: 'An app limit blocked this action.', fix: 'Ask an admin to review the limits.' };
+  return new Promise((resolve) => {
+    const { modal, inputWrap, msgEl, confirmBtn, cancelBtn, closeBtn } = prepareDialogModal({
+      title: info.title,
+      message: `${detail}
+
+Why: ${info.why}
+What to do: ${info.fix}`,
+      confirmText: 'OK',
+    });
+    inputWrap.style.display = 'none';
+    cancelBtn.style.display = 'none';
+    msgEl.style.whiteSpace = 'pre-line';
+    const cleanup = () => {
+      animateModalClose(modal);
+      msgEl.style.whiteSpace = '';
+      confirmBtn.onclick = null;
+      closeBtn.onclick = null;
+      resolve();
+    };
+    confirmBtn.onclick = cleanup;
+    closeBtn.onclick = cleanup;
+    animateModalOpen(modal);
+  });
+}
+
 function showCopyDialog({ title = 'Copy Value', message = '', value = '' } = {}) {
   return new Promise((resolve) => {
     const { modal, titleEl, msgEl, inputWrap, inputEl, confirmBtn, cancelBtn, closeBtn } = getDialogElements();
@@ -717,6 +758,7 @@ window.closeModal = closeModal;
 window.showConfirmDialog = showConfirmDialog;
 window.showPromptDialog = showPromptDialog;
 window.showCopyDialog = showCopyDialog;
+window.showLimitDialog = showLimitDialog;
 window.escapeHtml = escapeHtml;
 window.formatDate = formatDate;
 window.formatRelativeTime = formatRelativeTime;
@@ -866,6 +908,7 @@ export {
   showConfirmDialog,
   showPromptDialog,
   showCopyDialog,
+  showLimitDialog,
   escapeHtml,
   formatDate,
   formatRelativeTime,

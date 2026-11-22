@@ -3,7 +3,7 @@
  * High-performance network requests, stale-while-revalidate client caching, and toasts
  */
 
-import { state, clientCache, inflightGets, persistCacheToSession, getCacheTtlMs, getCacheEpoch, invalidateClientCache } from './state.js';
+import { state, clientCache, inflightGets, persistCacheToSession, getCacheTtlMs, getCacheEpoch, invalidateClientCache, showLimitDialog } from './state.js';
 import { animateToastEnter, animateToastExit } from './motion_ui.js';
 
 
@@ -63,7 +63,13 @@ async function networkFetch(path, options = {}) {
   }
 
   if (!res.ok) {
-    const errorMsg = (typeof data === 'object' && data.error) ? data.error : (data || res.statusText);
+    let errorMsg = (typeof data === 'object' && data.error) ? data.error : (data || res.statusText);
+    // Refusals caused by an app limit carry a tag; explain them in a dialog and show the clean text.
+    const limit = /^\[app-limit:(\w+)\]\s*/.exec(errorMsg);
+    if (limit) {
+      errorMsg = errorMsg.slice(limit[0].length);
+      void showLimitDialog(limit[1], errorMsg);
+    }
     throw new Error(errorMsg);
   }
 

@@ -111,6 +111,11 @@ pub(crate) async fn set_database_limits_handler(
 
 const MB: u64 = 1024 * 1024;
 
+/// Marks an error as an app-limit refusal so the panel can show a dialog explaining it (the UI
+/// strips the tag). Kinds: `disk`, `backups`.
+pub(crate) const DISK_LIMIT_TAG: &str = "[app-limit:disk] ";
+pub(crate) const BACKUP_LIMIT_TAG: &str = "[app-limit:backups] ";
+
 fn over_message(name: &str, used: u64, limit: u64) -> String {
     format!(
         "'{name}' is over its disk limit ({:.1} MB used of {:.1} MB). Free space or ask an admin to raise the limit.",
@@ -142,7 +147,7 @@ fn database_over_disk(data_dir: &str, disk_limit_mb: i64) -> Option<(u64, u64)> 
 /// Refuses to start a local website or service that is over its disk limit.
 pub(crate) fn ensure_project_under_disk_limit(p: &crate::projects::Project) -> Result<(), ApiError> {
     match project_over_disk(p) {
-        Some((used, limit)) => Err((StatusCode::CONFLICT, over_message(&p.name, used, limit))),
+        Some((used, limit)) => Err((StatusCode::CONFLICT, format!("{DISK_LIMIT_TAG}{}", over_message(&p.name, used, limit)))),
         None => Ok(()),
     }
 }
@@ -152,7 +157,7 @@ pub(crate) async fn ensure_database_under_disk_limit(state: &AppState, id: i64) 
     let Some(db) = state.databases.get(id).await.map_err(internal)? else { return Ok(()) };
     let limit = app_limits::get(&state.db, Kind::Database, id).await.map_err(internal)?.map_or(0, |l| l.disk_mb);
     match database_over_disk(&db.data_dir, limit) {
-        Some((used, limit)) => Err((StatusCode::CONFLICT, over_message(&db.name, used, limit))),
+        Some((used, limit)) => Err((StatusCode::CONFLICT, format!("{DISK_LIMIT_TAG}{}", over_message(&db.name, used, limit)))),
         None => Ok(()),
     }
 }

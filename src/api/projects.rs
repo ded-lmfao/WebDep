@@ -332,6 +332,32 @@ pub(crate) async fn create_project_handler(
     Ok(Json(created))
 }
 
+/// `true` for a host a site address can safely use: a hostname (optionally `*.` wildcard), an IPv4
+/// address or a bracketed IPv6 address, with an optional `:port`. Anything else (commas, slashes,
+/// `@`, a bare `:443`, ...) could change what Caddy serves, so it is refused.
+fn is_valid_site_host(raw: &str) -> bool {
+    let (host, port) = match raw.rsplit_once(':') {
+        Some((h, p)) if !raw.starts_with('[') || h.ends_with(']') => (h, Some(p)),
+        _ => (raw, None),
+    };
+    if let Some(p) = port {
+        if p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()) || p.parse::<u32>().map_or(true, |n| n == 0 || n > 65535) {
+            return false;
+        }
+    }
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return inner.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    let name = host.strip_prefix("*.").unwrap_or(host);
+    !name.is_empty()
+        && name.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
 pub(crate) fn normalize_domain(d: &str) -> String {
     let cleaned = d
         .trim()
@@ -340,17 +366,34 @@ pub(crate) fn normalize_domain(d: &str) -> String {
         .trim_end_matches('/')
         .trim()
         .to_lowercase();
-    if cleaned.is_empty()
-        || cleaned.len() > 253
-        || cleaned.chars().any(|c| {
-            c.is_whitespace()
-                || c.is_control()
-                || matches!(c, '{' | '}' | ';' | '#' | '"' | '\'' | '`' | '\\')
-        })
-    {
+    if cleaned.is_empty() || cleaned.len() > 253 || !is_valid_site_host(&cleaned) {
         return String::new();
     }
     cleaned
+}
+
+/// Two apps must never claim the same site address: the generated Caddyfile would be ambiguous and
+/// a reload would fail for every site. Returns a 409 naming the app that already uses it.
+pub(crate) async fn ensure_domains_free(
+    state: &AppState,
+    project_id: i64,
+    domains: &[String],
+) -> Result<(), (StatusCode, String)> {
+    if domains.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT name, domains FROM projects WHERE id <> $1")
+        .bind(project_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    for (name, raw) in rows {
+        let theirs: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        if let Some(clash) = domains.iter().find(|d| theirs.iter().any(|t| t.eq_ignore_ascii_case(d))) {
+            return Err((StatusCode::CONFLICT, format!("The domain '{clash}' is already used by '{name}'.")));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn sanitize_domains<I: IntoIterator<Item = String>>(domains: I) -> Vec<String> {
@@ -377,6 +420,7 @@ pub(crate) async fn update_project_handler(
         let _ = verify_power(&state, &headers, manage_power_for_kind(&p.project_kind), Some(id)).await?;
     }
     p.domains = sanitize_domains(p.domains);
+    ensure_domains_free(&state, id, &p.domains).await?;
 
     // Ensure non-conflicting, valid port allocation across all workloads
     if let Some(port) = p.port {
@@ -889,3 +933,28 @@ pub(crate) async fn toggle_maintenance_handler(
     }
 }
 
+#[cfg(test)]
+mod domain_tests {
+    use super::normalize_domain;
+
+    #[test]
+    fn accepts_normal_site_addresses() {
+        assert_eq!(normalize_domain("  https://Shop.Example.com/ "), "shop.example.com");
+        assert_eq!(normalize_domain("*.example.com"), "*.example.com");
+        assert_eq!(normalize_domain("localhost:8080"), "localhost:8080");
+        assert_eq!(normalize_domain("203.0.113.7"), "203.0.113.7");
+        assert_eq!(normalize_domain("[::1]:8443"), "[::1]:8443");
+        assert_eq!(normalize_domain("my_app-1.example.org"), "my_app-1.example.org");
+    }
+
+    #[test]
+    fn refuses_values_that_could_change_what_caddy_serves() {
+        for bad in [
+            ":443", ":80", "a.com, b.com", "a.com/path", "user@a.com", "a.com:0", "a.com:70000", "a.com:", "-a.com",
+            "a-.com", "a..com", ".com", "a.com
+import /etc/passwd", "a b.com", "*", "{env.X}", "a.com;b.com", "[zzz]",
+        ] {
+            assert_eq!(normalize_domain(bad), "", "{bad:?} must be refused");
+        }
+    }
+}

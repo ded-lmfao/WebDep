@@ -186,7 +186,7 @@ pub(crate) async fn create_backup_handler(
         if held >= i64::from(backup_limit) {
             return Err((
                 StatusCode::CONFLICT,
-                format!("This app already holds its limit of {backup_limit} backup(s). Delete one first or ask an admin to raise the limit."),
+                format!("{}This app already holds its limit of {backup_limit} backup(s). Delete one first or ask an admin to raise the limit.", crate::api::limits::BACKUP_LIMIT_TAG),
             ));
         }
     }
