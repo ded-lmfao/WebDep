@@ -2180,7 +2180,7 @@
               <p>Accounts that can sign in to this panel</p>
             </div>
             <div class="view-actions">
-              <input type="text" id="users-search-input" class="form-control" placeholder="Search users" style="width: 220px;" autocomplete="off">
+              <input type="text" id="users-search-input" class="form-control" placeholder="Search users" aria-label="Search users" style="width: 220px;" autocomplete="off">
               <button class="btn btn-primary" id="users-create-btn" hidden>Create account</button>
             </div>
           </div>
@@ -2264,7 +2264,7 @@
               <p>Each node's ports: open or close them, set the range, and move apps between ports or nodes.</p>
             </div>
             <div class="view-actions">
-              <input type="text" id="ips-search" class="form-control" placeholder="Search a port or app" style="width: 220px;" autocomplete="off">
+              <input type="text" id="ips-search" class="form-control" placeholder="Search a port or app" aria-label="Search a port or app" style="width: 220px;" autocomplete="off">
               <button class="btn btn-secondary btn-sm" onclick="window.loadIpsView && window.loadIpsView()">Refresh</button>
             </div>
           </div>
@@ -2280,7 +2280,7 @@
               <p>CPU, memory, disk, and backup limits for every website, service, and database. Empty or 0 means no limit.</p>
             </div>
             <div class="view-actions">
-              <input type="text" id="limits-search" class="form-control" placeholder="Search apps, types, or nodes" style="width: 240px;" autocomplete="off">
+              <input type="text" id="limits-search" class="form-control" placeholder="Search apps, types, or nodes" aria-label="Search apps, types, or nodes" style="width: 240px;" autocomplete="off">
             </div>
           </div>
           <div id="limits-banner" class="acct-callout" hidden></div>
@@ -2303,7 +2303,7 @@
               <p>Move a website or service to another node. Only admins can do this.</p>
             </div>
             <div class="view-actions">
-              <input type="text" id="moves-search" class="form-control" placeholder="Search apps, nodes, or IPs" style="width: 240px;" autocomplete="off">
+              <input type="text" id="moves-search" class="form-control" placeholder="Search apps, nodes, or IPs" aria-label="Search apps, nodes, or IPs" style="width: 240px;" autocomplete="off">
             </div>
           </div>
           <div class="table-responsive acct-table-wrap">

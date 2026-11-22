@@ -245,7 +245,7 @@ pub async fn recover_interrupted(db: &crate::db::DbPool, data_dir: &Path) -> u64
     let mut n = 0;
     for r in rows {
         let (id, dbid): (i64, i64) = (r.get(0), r.get(1));
-        let _ = std::fs::remove_file(crate::backups::part_path(&dump_path(data_dir, dbid, id)));
+        let _ = tokio::fs::remove_file(crate::backups::part_path(&dump_path(data_dir, dbid, id))).await;
         let _ = sqlx::query(
             "UPDATE database_backups SET status = 'failed', error = 'The panel restarted while this backup was running.' WHERE id = $1",
         )

@@ -51,7 +51,8 @@ function formatUptimeShort(secs) {
 export { matchesNodeFilter, getNodeDisplayName };
 
 function versionParts(v) {
-  const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(v || ''));
+  // Bounded digit runs keep the match linear on odd input.
+  const m = /(\d{1,9})\.(\d{1,9})\.(\d{1,9})/.exec(String(v || ''));
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 }
 
