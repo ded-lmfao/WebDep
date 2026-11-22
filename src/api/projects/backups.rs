@@ -93,14 +93,14 @@ pub(crate) async fn list_backups_handler(
 
     let rows = sqlx::query(
         "SELECT id, COALESCE(created_at, 0), COALESCE(size_bytes, 0), COALESCE(note, ''), COALESCE(kind, 'full-snapshot'), COALESCE(path, ''), release_id, COALESCE(storage_mode, 'local'), COALESCE(core_backup_path, ''), source_node_id, status, error, checksum_sha256, file_count, locked, created_by, completed_at, archive_path \
-         FROM backups WHERE project_id = $1 ORDER BY id DESC",
+         FROM backups WHERE project_id = $1 AND COALESCE(kind, '') <> 'release-snapshot' ORDER BY id DESC",
     )
     .bind(id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
-    let mut backups: Vec<BackupItem> = rows
+    let backups: Vec<BackupItem> = rows
         .iter()
         .map(|r| {
             let archive_path: String = r.get(17);
@@ -126,33 +126,6 @@ pub(crate) async fn list_backups_handler(
             }
         })
         .collect();
-
-    if backups.is_empty() {
-        let releases = state.deployer.list_releases(id).await;
-        backups = releases
-            .into_iter()
-            .map(|r| BackupItem {
-                id: r.id,
-                ts: r.created_at,
-                kind: "release-snapshot".to_string(),
-                size: 5 * 1024 * 1024,
-                note: format!("Automated Release Snapshot #{} ({})", r.id, r.short_sha),
-                path: r.dir,
-                release_id: Some(r.id),
-                storage_mode: "local".to_string(),
-                core_backup_path: String::new(),
-                source_node_id: None,
-                status: "complete".to_string(),
-                error: String::new(),
-                checksum: String::new(),
-                file_count: 0,
-                locked: false,
-                created_by: String::new(),
-                completed_at: r.created_at,
-                format: "legacy".to_string(),
-            })
-            .collect();
-    }
 
     cached_json_response(&state.cache, cache_key, &backups, std::time::Duration::from_secs(15))
         .map_err(|code| (code, "Serialization error".to_string()))

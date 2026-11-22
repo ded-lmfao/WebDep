@@ -240,19 +240,6 @@ pub(crate) async fn create_release_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        // Also record in backups so it appears in Backups tab
-        let _ = sqlx::query(
-            "INSERT INTO backups(project_id, release_id, kind, path, size_bytes, note, created_at) \
-             VALUES($1, $2, 'release-snapshot', $3, 5242880, $4, $5)",
-        )
-        .bind(id)
-        .bind(rel_id)
-        .bind(&rel_dir_str)
-        .bind(format!("Release #{} ({})", rel_id, note))
-        .bind(ts)
-        .execute(&state.db)
-        .await;
-
         state.cache.invalidate_project(id);
         log_audit_project(&state, Some(id), &actor.username, "release.create", Some(&p.name), Some(&note)).await;
 
