@@ -673,33 +673,6 @@ function restartCurrentProject() {
   }
 }
 
-let activeEnvTab = 'single';
-
-function switchEnvModalTab(tab) {
-  activeEnvTab = tab;
-  const singleSec = document.getElementById('env-section-single');
-  const bulkSec = document.getElementById('env-section-bulk');
-  if (singleSec) singleSec.style.display = tab === 'single' ? 'block' : 'none';
-  if (bulkSec) bulkSec.style.display = tab === 'bulk' ? 'block' : 'none';
-}
-
-async function loadCurrentEnv() {
-  const p = getSelectedProject();
-  if (!p) return;
-  try {
-    const res = await api(`/api/projects/${p.id}/env/raw`, { noCache: true });
-    const bulkInput = document.getElementById('env-bulk-input');
-    if (bulkInput) bulkInput.value = res.content || '';
-    const rawTa = document.getElementById('env-raw-editor-textarea');
-    if (rawTa) {
-      rawTa.value = res.content || '';
-      updateRawEnvLineStats();
-    }
-  } catch (err) {
-    toast(`Failed to load .env: ${err.message}`, 'error');
-  }
-}
-
 async function exportEnvFile() {
   const p = getSelectedProject();
   if (!p) {
@@ -725,11 +698,6 @@ async function exportEnvFile() {
   } catch (err) {
     toast(`Export failed: ${err.message}`, 'error');
   }
-}
-
-async function handleSaveEnv(e) {
-  if (e) e.preventDefault();
-  return handleInlineQuickAddEnv(e);
 }
 
 async function deleteEnvVar(key) {
@@ -778,10 +746,7 @@ window.saveInlineRawEnv = saveInlineRawEnv;
 window.copyRawEnvToClipboard = copyRawEnvToClipboard;
 window.handleEnvFileUpload = handleEnvFileUpload;
 window.restartCurrentProject = restartCurrentProject;
-window.switchEnvModalTab = switchEnvModalTab;
-window.loadCurrentEnv = loadCurrentEnv;
 window.exportEnvFile = exportEnvFile;
-window.handleSaveEnv = handleSaveEnv;
 window.deleteEnvVar = deleteEnvVar;
 
 export {
@@ -808,10 +773,7 @@ export {
   copyRawEnvToClipboard,
   handleEnvFileUpload,
   restartCurrentProject,
-  switchEnvModalTab,
-  loadCurrentEnv,
   exportEnvFile,
-  handleSaveEnv,
   deleteEnvVar,
 };
 

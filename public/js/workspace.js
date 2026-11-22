@@ -777,7 +777,16 @@ function centerActiveWebsiteTab(smooth = true) {
   }
   return true;
 }
-window.addEventListener('resize', () => centerActiveWebsiteTab(false));
+// Resize fires many times per frame while dragging; measure and scroll once per frame.
+let resizeCenterQueued = false;
+window.addEventListener('resize', () => {
+  if (resizeCenterQueued) return;
+  resizeCenterQueued = true;
+  requestAnimationFrame(() => {
+    resizeCenterQueued = false;
+    centerActiveWebsiteTab(false);
+  });
+}, { passive: true });
 
 
 function renderCurrentView() {

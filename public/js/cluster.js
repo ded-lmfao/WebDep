@@ -1088,6 +1088,14 @@ async function refreshInfraData() {
   ]);
 }
 
+function debounce(fn, ms) {
+  let t = null;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
 const ipsPools = new Map();
 /** nodeId -> [{ id, ip, label, apps: [{ id, name }] }] */
 const ipsAddrs = new Map();
@@ -1613,7 +1621,7 @@ document.getElementById('ips-view-body')?.addEventListener('change', (e) => {
   sel.value = '';
   void openMoveToNodeModal(appId, target);
 });
-document.getElementById('ips-search')?.addEventListener('input', () => void loadIpsView(false));
+document.getElementById('ips-search')?.addEventListener('input', debounce(() => void loadIpsView(false), 200));
 
 export async function loadMovesView() {
   const tbody = document.getElementById('moves-list-body');
@@ -1641,7 +1649,8 @@ export async function loadMovesView() {
     </tr>`;
   }).join('') : `<tr><td colspan="6" class="acct-empty">${q ? 'Nothing matches your search.' : 'No websites or services yet.'}</td></tr>`;
 }
-document.getElementById('moves-search')?.addEventListener('input', () => void loadMovesView());
+// loadMovesView refetches infra data, so wait for typing to pause instead of fetching per keystroke.
+document.getElementById('moves-search')?.addEventListener('input', debounce(() => void loadMovesView(), 250));
 
 /** Explains a "no free ports" refusal from app creation; returns true when handled. */
 export function handleNoFreePort(err) {

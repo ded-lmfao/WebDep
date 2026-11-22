@@ -562,6 +562,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gh_token_detection_runs_once_then_waits() {
+        assert!(gh_detection_due(), "the first settings load may detect a token");
+        assert!(!gh_detection_due(), "loads right after it must not spawn gh again");
+        assert!(!gh_detection_due());
+    }
+
+    #[test]
     fn test_normalize_theme_id_and_asset_parity() {
         assert_eq!(ALLOWED_THEME_IDS.len(), 15);
         assert_eq!(normalize_theme_id("nordic-frost"), "nordic-frost");
