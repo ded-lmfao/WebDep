@@ -430,6 +430,60 @@ pub enum Owner {
     Database(i64),
 }
 
+/// What to put in the Port field of a create form.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortSuggestion {
+    pub port: u16,
+    /// `pool` (an open port from the node's list) or `free` (the node has no list).
+    pub source: &'static str,
+    /// Ports that looked free in the list but something is already listening on.
+    pub skipped_busy: Vec<u16>,
+}
+
+/// True when nothing on this machine is listening on `port`.
+async fn nothing_listening(port: u16) -> bool {
+    tokio::net::TcpListener::bind(("0.0.0.0", port)).await.is_ok()
+}
+
+/// Picks the port for a new app or database on a node, checking one by one: from the node's open
+/// ports when it has a list (lowest first, skipping ports any app or database holds), otherwise the
+/// first free port from `base`. On this machine a port something already listens on is skipped too.
+pub async fn suggest_port(db: &DbPool, node_id: i64, base: u16) -> Result<PortSuggestion, String> {
+    let local = is_local(db, node_id).await;
+    let used = used_anywhere(db).await.map_err(|e| e.to_string())?;
+    let mut skipped_busy = Vec::new();
+    if has_pool(db, node_id).await {
+        let open: Vec<i32> = sqlx::query_scalar("SELECT port FROM node_ports WHERE node_id = $1 AND is_open ORDER BY port")
+            .bind(node_id)
+            .fetch_all(db)
+            .await
+            .map_err(|e| e.to_string())?;
+        for port in open.into_iter().filter_map(|p| u16::try_from(p).ok()) {
+            if used.contains(&port) {
+                continue;
+            }
+            if local && !nothing_listening(port).await {
+                skipped_busy.push(port);
+                continue;
+            }
+            return Ok(PortSuggestion { port, source: "pool", skipped_busy });
+        }
+        return Err(no_free_port_message("this node"));
+    }
+    let mut port = base.max(MIN_POOL_PORT);
+    while port < u16::MAX {
+        if !used.contains(&port) {
+            if !local || nothing_listening(port).await {
+                return Ok(PortSuggestion { port, source: "free", skipped_busy });
+            }
+            skipped_busy.push(port);
+        }
+        port += 1;
+    }
+    Err(format!("{NO_FREE_PORT} on this server. Free a port or add a port range in Admin Panel > IP Addresses, then try again."))
+}
+
 /// Checks that `port` is an open, unused pool port on the node (for a manual choice).
 /// `allow_project` lets an app keep a port it already holds.
 pub async fn check_assignable(db: &DbPool, node_id: i64, port: u16, allow_project: Option<i64>) -> Result<(), String> {
@@ -669,6 +723,36 @@ mod tests {
         assert!(parse_port_list("abc").is_err());
         assert!(parse_port_list("").is_err());
         assert!(parse_port_list("10000-20000").is_err(), "too large");
+    }
+
+    #[tokio::test]
+    async fn suggestions_walk_the_open_ports_one_by_one_and_skip_busy_ones() {
+        let db = crate::pg_control::test_db::isolated_pool().await;
+        let node_id: i64 = sqlx::query_scalar(
+            "INSERT INTO nodes(name, region, tags_json, status, is_local, public_ip, mesh_ip, wg_pubkey, wg_endpoint,
+                node_token_hash, node_version, capabilities_json, metrics_json, last_seen_at, created_at, updated_at)
+             VALUES('suggest-node', 'default', '[]', 'online', TRUE, '', '10.200.0.7', '', '', 'h', 'v', '{}', '{}', 0, 0, 0)
+             RETURNING id",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        set_range(&db, node_id, 9300, 9303).await.unwrap();
+        // 9300 is taken by a database, 9301 has a program listening on it.
+        sqlx::query("INSERT INTO databases(name, db_name, db_user, db_password, port, node_id, created_at, updated_at) VALUES('d','d','u','p',9300,$1,0,0)")
+            .bind(node_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let _busy = tokio::net::TcpListener::bind(("0.0.0.0", 9301)).await.unwrap();
+        let s = suggest_port(&db, node_id, 3000).await.unwrap();
+        assert_eq!((s.port, s.source), (9302, "pool"));
+        assert_eq!(s.skipped_busy, vec![9301]);
+
+        // Nothing left: a clear message the UI turns into a "no free ports" dialog.
+        set_open(&db, node_id, &[9302, 9303], false).await.unwrap();
+        let err = suggest_port(&db, node_id, 3000).await.unwrap_err();
+        assert!(err.starts_with(NO_FREE_PORT), "{err}");
     }
 
     #[tokio::test]

@@ -235,22 +235,25 @@ pub(crate) async fn create_project_handler(
                     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
                 req
             }
-            None => match crate::cluster::ports::next_free_port(&state.db, nid, &[])
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            {
-                Some(port) => port,
-                None => {
-                    let name = node_display_name(&state, nid).await;
-                    return Err((StatusCode::CONFLICT, crate::cluster::ports::no_free_port_message(&name)));
+            None => {
+                let name = node_display_name(&state, nid).await;
+                match crate::cluster::ports::suggest_port(&state.db, nid, 3000).await {
+                    Ok(s) => s.port,
+                    Err(_) => return Err((StatusCode::CONFLICT, crate::cluster::ports::no_free_port_message(&name))),
                 }
-            },
+            }
         }
     } else {
         let default_start = if is_service { 8000 } else { 3000 };
-        crate::db::allocate_global_unique_port(&state.db, p.port, default_start, None, None)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        match (p.port.filter(|&pt| pt > 0), p.node_id) {
+            (None, Some(nid)) => crate::cluster::ports::suggest_port(&state.db, nid, default_start)
+                .await
+                .map(|s| s.port)
+                .map_err(|e| (StatusCode::CONFLICT, e))?,
+            _ => crate::db::allocate_global_unique_port(&state.db, p.port, default_start, None, None)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
+        }
     };
 
     if !is_service && p.health_url.contains(":3000") && allocated_port != 3000 {

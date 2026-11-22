@@ -16,6 +16,7 @@ export function openCreateDatabaseModal() {
   const portInput = document.getElementById('db-create-port');
   if (portInput) {
     portInput.value = getPort(5432);
+    void window.refreshSuggestedPort?.('db-create-port', null, 5432);
   }
 
   generateRandomDbPassword('db-create-password');

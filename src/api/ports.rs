@@ -351,6 +351,30 @@ pub(crate) async fn set_extra_ports_handler(
     Ok(Json(serde_json::json!({ "ok": true, "extraPorts": list, "firewallNote": note })))
 }
 
+#[derive(Deserialize)]
+pub(crate) struct SuggestQuery {
+    #[serde(alias = "nodeId")]
+    node_id: Option<i64>,
+    /// Where to start looking when the node has no port list (3000 for apps, 5432 for databases).
+    base: Option<u16>,
+}
+
+/// `GET /api/ports/suggest?nodeId=&base=`: the port a create form should start with.
+pub(crate) async fn suggest_port_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<SuggestQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_current_user(&state, &headers).await?;
+    let node_id = match q.node_id {
+        Some(id) => id,
+        None => state.cluster.default_local_node_id().await.ok_or_else(|| bad("No node is available."))?,
+    };
+    let node = load_node(&state, node_id).await?;
+    let s = ports::suggest_port(&state.db, node.id, q.base.unwrap_or(3000)).await.map_err(bad)?;
+    Ok(Json(serde_json::json!({ "port": s.port, "source": s.source, "skippedBusy": s.skipped_busy, "nodeName": node.name })))
+}
+
 async fn database_node(state: &AppState, db: &crate::databases::ManagedDatabase) -> Result<crate::cluster::ClusterNode, ApiError> {
     let node_id = match db.node_id {
         Some(id) => id,

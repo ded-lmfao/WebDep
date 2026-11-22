@@ -478,11 +478,9 @@ impl Databases {
                     crate::cluster::ports::check_assignable(&self.db, nid, req, None).await?;
                     req
                 }
-                None => crate::cluster::ports::next_free_port(&self.db, nid, &[])
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| crate::cluster::ports::no_free_port_message("this node"))?,
+                None => crate::cluster::ports::suggest_port(&self.db, nid, 5432).await?.port,
             },
+            Some(nid) if input.port.filter(|p| *p > 0).is_none() => crate::cluster::ports::suggest_port(&self.db, nid, 5432).await?.port,
             _ => crate::db::allocate_global_unique_port(&self.db, input.port, 5432, None, None).await?,
         };
 

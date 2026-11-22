@@ -90,6 +90,7 @@ export function openAddServiceModal() {
   if (window.populateTargetNodeSelect) {
     window.populateTargetNodeSelect('service-node-id', 'service-node-group', null, false);
   }
+  void window.refreshSuggestedPort?.('service-port', 'service-node-id', 8000);
   openModal('modal-service');
 }
 
@@ -321,6 +322,9 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
   const allowedIps = document.getElementById('service-allowed-ips')?.value.trim() || '';
   const selectedNodeVal = document.getElementById('service-node-id')?.value;
 
+  const svcPort = portVal ? Number(portVal) : await window.fetchSuggestedPort?.(Number(selectedNodeVal || 0), 8000);
+  if (!svcPort) return;
+
   const payload = {
     name,
     slug,
@@ -334,7 +338,7 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
     build_cmd: '',
     start_cmd: startCmd,
     health_url: '',
-    port: portVal ? Number(portVal) : getPort(8000),
+    port: svcPort,
     domains: domainVal ? [domainVal] : [],
     access_mode: accessMode,
     allowed_ips: allowedIps,
@@ -384,3 +388,7 @@ window.openAddServiceModal = openAddServiceModal;
 window.applyServicePreset = applyServicePreset;
 window.openEditServiceModal = openEditServiceModal;
 
+
+document.getElementById('service-node-id')?.addEventListener('change', () => {
+  if (!document.getElementById('service-form-id')?.value) void window.refreshSuggestedPort?.('service-port', 'service-node-id', 8000);
+});

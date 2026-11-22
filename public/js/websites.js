@@ -364,7 +364,8 @@ function openAddWebsiteModal() {
   if (portInput) portInput.value = getNextAvailablePort(3000);
 
   populateTargetNodeSelect('website-node-id', 'website-node-group', null, false)
-    .catch((err) => console.warn('Could not load target nodes:', err));
+    .catch((err) => console.warn('Could not load target nodes:', err))
+    .finally(() => void refreshSuggestedPort('website-port', 'website-node-id', 3000));
   openModal('modal-website');
 }
 window.openAddWebsiteModal = openAddWebsiteModal;
@@ -466,6 +467,40 @@ function getNextAvailablePort(basePort = 3000) {
 }
 window.getNextAvailablePort = getNextAvailablePort;
 
+/**
+ * Asks the server for the port a new app or database should use: the node's open ports one by one,
+ * skipping used ones and ones something already listens on. Returns the port, or null after
+ * telling the user that no port is available.
+ */
+export async function fetchSuggestedPort(nodeId, base = 3000) {
+  const q = new URLSearchParams({ base: String(base) });
+  if (nodeId) q.set('nodeId', String(nodeId));
+  try {
+    const res = await api(`/api/ports/suggest?${q}`, { noCache: true });
+    return Number(res.port) || null;
+  } catch (err) {
+    if (!window.handleNoFreePort?.(err)) toast(`No port available: ${err.message}`, 'error');
+    return null;
+  }
+}
+
+/** Puts the server's port suggestion into a create form's port field (new apps only). */
+export async function refreshSuggestedPort(portInputId, nodeSelectId, base) {
+  const input = document.getElementById(portInputId);
+  if (!input) return;
+  const nodeId = nodeSelectId ? Number(document.getElementById(nodeSelectId)?.value || 0) : 0;
+  const port = await fetchSuggestedPort(nodeId, base);
+  if (port) {
+    input.value = String(port);
+    input.title = 'Chosen automatically from the open ports of the node';
+  }
+}
+window.refreshSuggestedPort = refreshSuggestedPort;
+window.fetchSuggestedPort = fetchSuggestedPort;
+document.getElementById('website-node-id')?.addEventListener('change', () => {
+  if (!document.getElementById('website-form-id')?.value) void refreshSuggestedPort('website-port', 'website-node-id', 3000);
+});
+
 function applyPreset(type) {
   const conf = PRESETS[type] || PRESETS.node;
   document.querySelectorAll('#preset-buttons .preset-chip').forEach((c) => {
@@ -487,7 +522,10 @@ function applyPreset(type) {
 
 // Preset chips click
 document.querySelectorAll('#preset-buttons .preset-chip').forEach((chip) => {
-  chip.addEventListener('click', () => applyPreset(chip.getAttribute('data-type')));
+  chip.addEventListener('click', () => {
+    applyPreset(chip.getAttribute('data-type'));
+    if (!document.getElementById('website-form-id')?.value) void refreshSuggestedPort('website-port', 'website-node-id', 3000);
+  });
 });
 
 // Browse GitHub Repos button
@@ -568,7 +606,8 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
   const portInput = document.getElementById('website-port');
   let port = portInput?.value ? Number(portInput.value) : Number.NaN;
   if (!port || Number.isNaN(port) || port < 1 || port > 65535) {
-    port = getNextAvailablePort(3000);
+    port = await fetchSuggestedPort(Number(document.getElementById('website-node-id')?.value || 0), 3000);
+    if (!port) return;
     if (portInput) portInput.value = port;
   }
 

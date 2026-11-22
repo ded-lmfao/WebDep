@@ -228,6 +228,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/projects/:id/port", put(set_app_port_handler))
         .route("/api/projects/:id/extra-ports", put(set_extra_ports_handler))
         .route("/api/databases/:id/port", put(set_database_port_handler))
+        .route("/api/ports/suggest", get(suggest_port_handler))
         .route("/api/databases/:id/move", post(db_move::move_database_handler))
         .route("/api/databases/:id/move-status", get(db_move::move_status_handler))
         .route("/api/databases/:id/extra-ports", put(set_database_extra_ports_handler))
