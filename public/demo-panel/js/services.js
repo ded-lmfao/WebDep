@@ -9,7 +9,7 @@ import { loadProjects } from './websites.js';
 import { openWebsiteWorkspace } from './workspace.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
 
-// Re-export modal submodule so consumers have full backward compatibility
+// Re-export the submodule through this module
 export * from './services_modal.js';
 
 export async function loadServicesView() {
@@ -136,7 +136,7 @@ export function renderServicesList() {
         <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 20px;">
           ${q ? 'No services match your search filter.' : 'Add your first service to deploy it directly to your VM.'}
         </p>
-        ${hasPower('services_manage') ? '<button class="btn btn-primary" onclick="openAddServiceModal()">Add New Service</button>' : ''}
+        ${window.canCreate('service') ? '<button class="btn btn-primary" onclick="openAddServiceModal()">Add New Service</button>' : ''}
       </div>
     `);
     return;
@@ -247,13 +247,13 @@ export function renderServicesList() {
         <!-- Actions Footer -->
         <div class="project-card-actions" onclick="event.stopPropagation()" style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-top: 2px;">
           <div style="display: flex; gap: 6px; align-items: center;">
-            ${hasPower('process') ? (isOnline
+            ${hasPower('process', { projectId: p.id }) ? (isOnline
         ? `<button class="btn btn-danger btn-sm" onclick="stopProject(${p.id})" style="padding: 4px 10px; font-size: 11.5px;">Stop</button>`
         : `<button class="btn btn-success btn-sm" onclick="startProject(${p.id})" style="padding: 4px 10px; font-size: 11.5px;">Start</button>`
       ) : ''}
-            ${hasAnyPower(['files', 'files_write']) ? `<button class="btn btn-secondary btn-sm" onclick="openWebsiteWorkspace(${p.id}, 'files')" style="padding: 4px 10px; font-size: 11.5px;" title="Manage files">Files</button>` : ''}
-            ${hasPower('logs') ? `<button class="btn btn-secondary btn-sm" onclick="openWebsiteWorkspace(${p.id}, 'logs')" style="padding: 4px 10px; font-size: 11.5px;" title="Live console logs">Logs</button>` : ''}
-            ${hasPower('services_manage') ? `
+            ${hasAnyPower(['files', 'files_write'], { projectId: p.id }) ? `<button class="btn btn-secondary btn-sm" onclick="openWebsiteWorkspace(${p.id}, 'files')" style="padding: 4px 10px; font-size: 11.5px;" title="Manage files">Files</button>` : ''}
+            ${hasPower('logs', { projectId: p.id }) ? `<button class="btn btn-secondary btn-sm" onclick="openWebsiteWorkspace(${p.id}, 'logs')" style="padding: 4px 10px; font-size: 11.5px;" title="Live console logs">Logs</button>` : ''}
+            ${hasPower('services_manage', { projectId: p.id }) ? `
               <button class="btn btn-secondary btn-sm" onclick="openEditServiceModal(${p.id})" style="padding: 4px 8px; font-size: 11.5px; display: inline-flex; align-items: center; justify-content: center;" title="Settings">
                 ${icon('settings', { size: 12 })}
               </button>

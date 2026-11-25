@@ -25,6 +25,7 @@ import {
 import { api, toast } from './api.js';
 import { cleanDomainList } from './settings.js';
 import { toggleDatabaseAccessIpFields } from './databases_modal.js';
+import { readLimitFields, resetLimitFields, setLimitFieldsVisible } from './limits_fields.js';
 import { renderWebsiteWorkspaceHeader, navigateTo, openWebsiteWorkspace } from './workspace.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
 import { startProject, stopProject } from './workspace_actions.js';
@@ -126,7 +127,7 @@ function renderProjectsList() {
       <div style="grid-column: 1 / -1; text-align: center; padding: 48px; background: var(--bg-card); border-radius: var(--radius-lg); border: 1px dashed var(--border-medium);">
         <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">No hosted websites found</p>
         <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 20px;">Add your first website to deploy it directly to your VM.</p>
-        ${hasPower('projects_manage') ? '<button class="btn btn-primary" onclick="openAddWebsiteModal()">Add New Website</button>' : ''}
+        ${window.canCreate('website') ? '<button class="btn btn-primary" onclick="openAddWebsiteModal()">Add New Website</button>' : ''}
       </div>
     `);
     return;
@@ -236,13 +237,13 @@ function renderProjectsList() {
         <!-- Actions Footer -->
         <div class="project-card-actions" onclick="event.stopPropagation()" style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-top: 2px;">
           <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
-            ${hasPower('process') ? (isOnline
+            ${hasPower('process', { projectId: p.id }) ? (isOnline
         ? `<button class="btn btn-danger btn-sm" onclick="stopProject(${p.id})" style="padding: 4px 10px; font-size: 11.5px;">Stop</button>`
         : `<button class="btn btn-success btn-sm" onclick="startProject(${p.id})" style="padding: 4px 10px; font-size: 11.5px;">Start</button>`
       ) : ''}
-            ${hasAnyPower(['files', 'files_write']) ? `<button class="btn btn-secondary btn-sm" onclick="openWebsiteWorkspace(${p.id}, 'files')" style="padding: 4px 10px; font-size: 11.5px;" title="Manage files">Files</button>` : ''}
-            ${hasPower('logs') ? `<button class="btn btn-secondary btn-sm" onclick="openWebsiteWorkspace(${p.id}, 'logs')" style="padding: 4px 10px; font-size: 11.5px;" title="Live console logs">Logs</button>` : ''}
-            ${hasPower('projects_manage') ? `
+            ${hasAnyPower(['files', 'files_write'], { projectId: p.id }) ? `<button class="btn btn-secondary btn-sm" onclick="openWebsiteWorkspace(${p.id}, 'files')" style="padding: 4px 10px; font-size: 11.5px;" title="Manage files">Files</button>` : ''}
+            ${hasPower('logs', { projectId: p.id }) ? `<button class="btn btn-secondary btn-sm" onclick="openWebsiteWorkspace(${p.id}, 'logs')" style="padding: 4px 10px; font-size: 11.5px;" title="Live console logs">Logs</button>` : ''}
+            ${hasPower('projects_manage', { projectId: p.id }) ? `
               <button class="btn btn-secondary btn-sm" onclick="openEditWebsiteModal(${p.id})" style="padding: 4px 8px; font-size: 11.5px; display: inline-flex; align-items: center; justify-content: center;" title="Website Settings">
                 ${icon('settings', { size: 12 })}
               </button>
@@ -332,6 +333,8 @@ function openAddWebsiteModal() {
   }
   const idInput = document.getElementById('website-form-id');
   if (idInput) idInput.value = '';
+  resetLimitFields('website');
+  setLimitFieldsVisible('website', true);
   const titleEl = document.getElementById('modal-website-title');
   if (titleEl) titleEl.textContent = 'Add New Website';
   const submitBtn = document.getElementById('save-website-submit-btn');
@@ -361,7 +364,8 @@ function openAddWebsiteModal() {
   if (portInput) portInput.value = getNextAvailablePort(3000);
 
   populateTargetNodeSelect('website-node-id', 'website-node-group', null, false)
-    .catch((err) => console.warn('Could not load target nodes:', err));
+    .catch((err) => console.warn('Could not load target nodes:', err))
+    .finally(() => void refreshSuggestedPort('website-port', 'website-node-id', 3000));
   openModal('modal-website');
 }
 window.openAddWebsiteModal = openAddWebsiteModal;
@@ -373,6 +377,7 @@ async function openEditWebsiteModal(projectId) {
   const form = document.getElementById('website-form');
   if (form) form.reset();
   document.getElementById('website-form-id').value = String(p.id);
+  setLimitFieldsVisible('website', false);
   document.getElementById('modal-website-title').textContent = `Edit Website: ${p.name}`;
   document.getElementById('save-website-submit-btn').textContent = 'Update Website';
 
@@ -462,6 +467,40 @@ function getNextAvailablePort(basePort = 3000) {
 }
 window.getNextAvailablePort = getNextAvailablePort;
 
+/**
+ * Asks the server for the port a new app or database should use: the node's open ports one by one,
+ * skipping used ones and ones something already listens on. Returns the port, or null after
+ * telling the user that no port is available.
+ */
+export async function fetchSuggestedPort(nodeId, base = 3000) {
+  const q = new URLSearchParams({ base: String(base) });
+  if (nodeId) q.set('nodeId', String(nodeId));
+  try {
+    const res = await api(`/api/ports/suggest?${q}`, { noCache: true });
+    return Number(res.port) || null;
+  } catch (err) {
+    if (!window.handleNoFreePort?.(err)) toast(`No port available: ${err.message}`, 'error');
+    return null;
+  }
+}
+
+/** Puts the server's port suggestion into a create form's port field (new apps only). */
+export async function refreshSuggestedPort(portInputId, nodeSelectId, base) {
+  const input = document.getElementById(portInputId);
+  if (!input) return;
+  const nodeId = nodeSelectId ? Number(document.getElementById(nodeSelectId)?.value || 0) : 0;
+  const port = await fetchSuggestedPort(nodeId, base);
+  if (port) {
+    input.value = String(port);
+    input.title = 'Chosen automatically from the open ports of the node';
+  }
+}
+window.refreshSuggestedPort = refreshSuggestedPort;
+window.fetchSuggestedPort = fetchSuggestedPort;
+document.getElementById('website-node-id')?.addEventListener('change', () => {
+  if (!document.getElementById('website-form-id')?.value) void refreshSuggestedPort('website-port', 'website-node-id', 3000);
+});
+
 function applyPreset(type) {
   const conf = PRESETS[type] || PRESETS.node;
   document.querySelectorAll('#preset-buttons .preset-chip').forEach((c) => {
@@ -483,7 +522,10 @@ function applyPreset(type) {
 
 // Preset chips click
 document.querySelectorAll('#preset-buttons .preset-chip').forEach((chip) => {
-  chip.addEventListener('click', () => applyPreset(chip.getAttribute('data-type')));
+  chip.addEventListener('click', () => {
+    applyPreset(chip.getAttribute('data-type'));
+    if (!document.getElementById('website-form-id')?.value) void refreshSuggestedPort('website-port', 'website-node-id', 3000);
+  });
 });
 
 // Browse GitHub Repos button
@@ -564,7 +606,8 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
   const portInput = document.getElementById('website-port');
   let port = portInput?.value ? Number(portInput.value) : Number.NaN;
   if (!port || Number.isNaN(port) || port < 1 || port > 65535) {
-    port = getNextAvailablePort(3000);
+    port = await fetchSuggestedPort(Number(document.getElementById('website-node-id')?.value || 0), 3000);
+    if (!port) return;
     if (portInput) portInput.value = port;
   }
 
@@ -607,6 +650,10 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
   if (!id && selectedNodeVal) {
     payload.node_id = Number(selectedNodeVal);
   }
+  if (!id) {
+    const l = readLimitFields('website');
+    Object.assign(payload, { cpu_limit: l.cpu, memory_limit_mb: l.memoryMb, disk_limit_mb: l.diskMb, backup_limit: l.backups });
+  }
 
   const submitBtn = document.getElementById('save-website-submit-btn');
   const oldText = submitBtn ? submitBtn.textContent : '';
@@ -633,6 +680,7 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
       }
     }
   } catch (err) {
+    if (window.handleNoFreePort?.(err)) return;
     toast(`Save failed: ${err.message}`, 'error');
   } finally {
     if (submitBtn) {
@@ -643,27 +691,29 @@ document.getElementById('save-website-submit-btn')?.addEventListener('click', as
 });
 
 // Delete Project
-async function deleteProject(id, slug) {
+async function deleteProject(id) {
   const delProj = (state.projects || []).find((x) => x.id === id);
-  const delIsService = !!delProj && delProj.project_kind === 'service';
+  if (!delProj) return;
+  const delIsService = delProj.project_kind === 'service';
   const delNoun = delIsService ? 'service' : 'website';
   const delNounCap = delIsService ? 'Service' : 'Website';
-  const confirmSlug = await showPromptDialog({
-    title: `Delete ${delNounCap}`,
-    message: `CAUTION: Deleting this ${delNoun} will remove its configuration and stop its running process.\n\nType the ${delNoun} slug "${slug}" below to confirm deletion:`,
-    placeholder: slug,
-    confirmText: `Delete ${delNounCap}`,
+  const name = delProj.name;
+  const typed = await showPromptDialog({
+    title: `Delete ${delNoun} "${name}"`,
+    message: `This stops the ${delNoun} and permanently removes its files, settings, releases, and data. It can't be undone.\n\nType "${name}" to confirm:`,
+    placeholder: 'Type the name to confirm',
+    confirmText: `Delete ${delNoun}`,
     danger: true,
   });
-  if (confirmSlug === null) return;
-  if (confirmSlug.trim() !== slug) {
-    toast('Slug confirmation did not match. Deletion cancelled.', 'warning');
+  if (typed === null) return;
+  if (typed.trim() !== name) {
+    toast(`The name didn't match, so nothing was deleted.`, 'warning');
     return;
   }
 
   try {
-    await api(`/api/projects/${id}`, { method: 'DELETE', body: { confirm: slug } });
-    toast(`${delNounCap} "${slug}" deleted.`, 'success');
+    await api(`/api/projects/${id}`, { method: 'DELETE', body: { confirm: delProj.slug } });
+    toast(`${delNounCap} "${name}" deleted.`, 'success');
     if (state.selectedProjectId === id) state.selectedProjectId = null;
     await loadProjects();
     navigateTo(delIsService ? 'services' : 'projects');

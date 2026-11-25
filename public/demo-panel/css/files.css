@@ -450,38 +450,23 @@
 .file-editor-code {
   color: #abb2bf;
 }
-.shj-syn-kwd     { color: #c678dd !important; font-weight: 600 !important; }
-.shj-syn-func    { color: #61afef !important; font-weight: 500 !important; }
-.shj-syn-str     { color: #98c379 !important; }
-.shj-syn-class   { color: #e5c07b !important; font-weight: 600 !important; }
-.shj-syn-type    { color: #56b6c2 !important; }
-.shj-syn-cmnt    { color: #64748b !important; font-style: italic !important; }
-.shj-syn-num     { color: #d19a66 !important; }
-.shj-syn-bool    { color: #e5c07b !important; font-weight: 500 !important; }
-.shj-syn-oper    { color: #56b6c2 !important; }
-.shj-syn-var     { color: #e06c75 !important; }
-.shj-syn-section { color: #61afef !important; font-weight: 600 !important; }
-.shj-syn-insert  { color: #98c379 !important; }
-.shj-syn-deleted { color: #e06c75 !important; }
-.shj-syn-err     { color: #f87171 !important; text-decoration: underline !important; }
 
-/* Legacy Fallback Tokens */
-.tok-comment    { color: #64748b !important; font-style: italic !important; }
-.tok-docstring  { color: #64748b !important; font-style: italic !important; }
-.tok-string     { color: #98c379 !important; }
-.tok-keyword    { color: #c678dd !important; font-weight: 500 !important; }
-.tok-builtin    { color: #e5c07b !important; font-weight: 500 !important; }
-.tok-number     { color: #d19a66 !important; }
-.tok-function   { color: #61afef !important; font-weight: 500 !important; }
-.tok-type       { color: #e5c07b !important; }
-.tok-property   { color: #61afef !important; }
-.tok-variable   { color: #e06c75 !important; }
-.tok-decorator  { color: #e5c07b !important; }
-.tok-operator   { color: #56b6c2 !important; }
-.tok-punct      { color: #94a3b8 !important; }
-.tok-tag        { color: #e06c75 !important; font-weight: 500 !important; }
-.tok-attr       { color: #d19a66 !important; }
-.tok-regex      { color: #98c379 !important; }
+/* The highlighter builds these class names at run time (shj-syn-<token>), so they look unused to a
+   text search. Colour and style only: a heavier weight could shift text away from the cursor. */
+.shj-syn-kwd     { color: #c678dd; }
+.shj-syn-func    { color: #61afef; }
+.shj-syn-str     { color: #98c379; }
+.shj-syn-class   { color: #e5c07b; }
+.shj-syn-type    { color: #56b6c2; }
+.shj-syn-cmnt    { color: #7f8ba3; font-style: italic; }
+.shj-syn-num     { color: #d19a66; }
+.shj-syn-bool    { color: #e5c07b; }
+.shj-syn-oper    { color: #56b6c2; }
+.shj-syn-var     { color: #e06c75; }
+.shj-syn-section { color: #61afef; }
+.shj-syn-insert  { color: #98c379; }
+.shj-syn-deleted { color: #e06c75; }
+.shj-syn-err     { color: #f87171; text-decoration: underline; }
 
 .file-editor-footer {
   display: flex;
@@ -505,5 +490,4 @@
   font-size: 11px;
   font-weight: 500;
 }
-
 

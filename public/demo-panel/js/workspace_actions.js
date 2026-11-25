@@ -3,7 +3,7 @@
  * Start, stop, restart, auto-deployment redirects, and maintenance mode toggling.
  */
 
-import { state, syncOverviewResourceStatus } from './state.js';
+import { state, syncOverviewResourceStatus, setButtonBusy } from './state.js';
 import { api, toast } from './api.js';
 
 function applyProjectLifecycleState(proj, status, pid = undefined) {
@@ -49,11 +49,11 @@ function setActionButtonsLoading(projectId, activeAction) {
     if (isStart || isStop || isRestart || isDeploy) {
       b.disabled = true;
       if (activeAction === 'start' && isStart) {
-        b.innerHTML = '<span class="btn-spinner"></span> Starting';
+        setButtonBusy(b, 'Starting');
       } else if (activeAction === 'stop' && isStop) {
-        b.innerHTML = '<span class="btn-spinner"></span> Stopping';
+        setButtonBusy(b, 'Stopping');
       } else if (activeAction === 'restart' && isRestart) {
-        b.innerHTML = '<span class="btn-spinner"></span> Restarting';
+        setButtonBusy(b, 'Restarting');
       }
     }
   });

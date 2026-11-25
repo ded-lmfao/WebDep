@@ -7,7 +7,7 @@ import { DEVICONS, icon } from './icons.js';
 import { state, escapeHtml, showConfirmDialog, showPromptDialog, getFilesEntityContext } from './state.js';
 import { api, toast } from './api.js';
 
-// Re-export editor submodule so imports from './files.js' remain 100% compatible
+// Re-export the submodule through this module
 export * from './files_editor.js';
 
 import { filesCloseEditor, filesOpen } from './files_editor.js';
@@ -380,7 +380,7 @@ export async function filesRename(path) {
   const input = await showPromptDialog({
     title: 'Rename File or Folder',
     message: `Enter new name for "${currentName}":`,
-    placeholder: currentName,
+    placeholder: 'New name',
     defaultValue: currentName,
     confirmText: 'Rename',
   });
@@ -413,7 +413,7 @@ export async function filesNewFile() {
   const input = await showPromptDialog({
     title: 'New File',
     message: `Create a file in /${ctx.rootLabel}${state.filesPath ? '/' + state.filesPath : ''}:`,
-    placeholder: ctx.kind === 'database' ? 'e.g. notes.sql or custom.conf' : 'e.g. .env, config.json, or start.sh',
+    placeholder: 'File name',
     confirmText: 'Create File',
   });
   const name = (input || '').trim();
@@ -435,7 +435,7 @@ export async function filesNewFolder() {
   const input = await showPromptDialog({
     title: 'New Folder',
     message: `Create a subfolder in /${ctx.rootLabel}${state.filesPath ? '/' + state.filesPath : ''}:`,
-    placeholder: 'e.g. config, assets, or src',
+    placeholder: 'Folder name',
     confirmText: 'Create Folder',
   });
   const name = (input || '').trim();

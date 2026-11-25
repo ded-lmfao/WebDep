@@ -100,7 +100,8 @@ export function updateEditorGutter() {
     for (let i = 1; i <= lineCount; i++) {
       nums += i + '\n';
     }
-    gutter.textContent = nums;
+    // Spare lines: the textarea's horizontal scrollbar lets it scroll further than the numbers.
+    gutter.textContent = nums + '\n\n';
     if (linesSpan) linesSpan.textContent = `${lineCount} line${lineCount === 1 ? '' : 's'}`;
   }
 
@@ -119,20 +120,26 @@ export function updateEditorPos() {
   posSpan.textContent = `Ln ${row}, Col ${col}`;
 }
 
+/**
+ * Keeps the coloured text and the line numbers under the textarea, which holds the cursor.
+ * The text is moved rather than scrolled: a layer without scrollbars stops short of the
+ * textarea's end, which leaves the cursor above the line being typed.
+ */
+function syncEditorScroll() {
+  const textarea = document.getElementById('files-editor');
+  const codeEl = document.getElementById('files-editor-code');
+  const gutter = document.getElementById('files-editor-gutter');
+  if (!textarea) return;
+  if (codeEl) codeEl.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
+  if (gutter) gutter.scrollTop = textarea.scrollTop;
+}
+
 export function bindEditorEvents() {
   const textarea = document.getElementById('files-editor');
-  const gutter = document.getElementById('files-editor-gutter');
-  const pre = document.getElementById('files-editor-pre');
   if (!textarea || textarea.dataset.bound) return;
   textarea.dataset.bound = 'true';
 
-  textarea.addEventListener('scroll', () => {
-    if (gutter) gutter.scrollTop = textarea.scrollTop;
-    if (pre) {
-      pre.scrollTop = textarea.scrollTop;
-      pre.scrollLeft = textarea.scrollLeft;
-    }
-  }, { passive: true });
+  textarea.addEventListener('scroll', syncEditorScroll, { passive: true });
 
   textarea.addEventListener('keyup', updateEditorPos);
   textarea.addEventListener('click', updateEditorPos);
@@ -189,8 +196,6 @@ export async function filesOpen(path) {
     const dirtyBadge = document.getElementById('files-editor-dirty-badge');
     const metaEl = document.getElementById('files-editor-meta');
     const iconEl = document.getElementById('files-editor-icon');
-    const gutter = document.getElementById('files-editor-gutter');
-    const pre = document.getElementById('files-editor-pre');
 
     if (nameEl) {
       const parts = path.split('/');
@@ -245,13 +250,7 @@ export async function filesOpen(path) {
       textarea.scrollTop = 0;
       textarea.scrollLeft = 0;
     }
-    if (pre) {
-      pre.scrollTop = 0;
-      pre.scrollLeft = 0;
-    }
-    if (gutter) {
-      gutter.scrollTop = 0;
-    }
+    syncEditorScroll();
   } catch (err) {
     toast(err.message, 'error');
   }

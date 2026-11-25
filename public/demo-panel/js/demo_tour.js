@@ -95,13 +95,19 @@
       body: 'Which languages and tools each server has: Git, Node.js, Python, Java, Go, Rust, PHP and more. Install or remove them per server in one click. Try it, it works in the demo.',
     },
     {
-      view: 'settings',
-      target: '#settings-users-card',
+      view: 'ips',
+      target: '#ips-view-body',
+      title: 'Ports & IPs',
+      body: 'Each server hands out ports from its own range. Click a port to see which app uses it, then type a new port and press <b>Change port</b>: the app, firewall and domain routes all move with it. Try it, it works in the demo.',
+    },
+    {
+      view: 'users',
+      target: '#users-list-body',
       title: 'Users & access',
       body: 'Invite teammates and give each one an access level (Viewer, Developer, Full access or Custom) and limit them to specific websites and services.',
     },
     {
-      view: 'settings',
+      view: 'account',
       target: '#settings-security-card',
       title: 'Security',
       body: 'Sign in with passkeys (Touch ID, Windows Hello), turn on two-factor authentication and see or end your active sessions.',

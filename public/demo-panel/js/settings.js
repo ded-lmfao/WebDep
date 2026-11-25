@@ -1,6 +1,6 @@
 /**
  * WebDep Platform Settings, Monitoring & Self-Updater Subsystem
- * Server monitoring, security overview, SQLite system settings, audit logs, and self-updater pipeline.
+ * Server monitoring, security overview, system settings, audit logs, and self-updater pipeline.
  */
 
 import {
@@ -27,8 +27,8 @@ export * from './settings_caddy.js';
 import {
   syncGithubTokensDomToDraft,
   renderGithubTokensRows,
-  renderUsersTable,
 } from './settings_users.js';
+import { loadRegistrationSetting } from './accounts.js';
 
 // ============================================================================
 // View 10: Server Monitoring
@@ -106,7 +106,7 @@ export function renderSecurityStatusSummary() {
     badge.textContent = isProtected ? 'Protected' : 'Unprotected';
   }
   const unameEl = document.getElementById('settings-sec-username');
-  if (unameEl) unameEl.textContent = `${state.user.username} (${state.user.isMainAdmin ? 'Main admin' : 'User'})`;
+  if (unameEl) unameEl.textContent = `${state.user.username} (${state.user.isMainAdmin ? 'Main admin' : state.user.isAdmin ? 'Admin' : 'User'})`;
 
   const pkText = document.getElementById('settings-sec-passkeys-text');
   if (pkText) {
@@ -142,12 +142,10 @@ export async function loadSettingsView() {
   renderThemePicker();
   if (window.loadPasskeysList) window.loadPasskeysList().catch(() => {});
 
-  const isMain = Boolean(state.user && state.user.isMainAdmin);
-  const canSettings = hasPower('settings_manage');
-  const canSystem = hasPower('system_manage');
+  const canSettings = hasPower('settings_manage', 'panel');
+  const canSystem = hasPower('system_manage', 'panel');
 
   const globalCard = document.getElementById('settings-global-config-card');
-  const usersCard = document.getElementById('settings-users-card');
   const panelCard = document.getElementById('settings-panel-card');
   const updateCard = document.getElementById('settings-update-card');
   const restartBtn = document.getElementById('restart-panel-btn');
@@ -158,10 +156,10 @@ export async function loadSettingsView() {
   if (restartBtn) restartBtn.style.display = canSystem ? '' : 'none';
   if (clearCacheBtn) clearCacheBtn.style.display = canSettings ? '' : 'none';
   if (updateCard) updateCard.style.display = canSystem ? '' : 'none';
-  if (usersCard) usersCard.style.display = isMain ? '' : 'none';
+  void loadRegistrationSetting();
   if (canSystem) loadSystemVersionInfo(true).catch(() => {});
 
-  if (!canSettings && !isMain) return;
+  if (!canSettings) return;
 
   try {
     if (canSettings) {
@@ -220,11 +218,6 @@ export async function loadSettingsView() {
     }
 
     // Users list
-    if (isMain) {
-      const users = await api('/api/users', { noCache: true });
-      state.usersList = users;
-      renderUsersTable(users);
-    }
   } catch (err) {
     toast(`Failed to load settings: ${err.message}`, 'error');
   }

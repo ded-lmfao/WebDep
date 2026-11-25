@@ -99,6 +99,7 @@
   min-width: 0;
 }
 .user-snippet:hover { background: var(--ink-2); }
+.user-snippet.active { background: var(--ink-2); box-shadow: inset 2px 0 0 var(--accent, currentColor); }
 
 .user-avatar {
   width: 28px;

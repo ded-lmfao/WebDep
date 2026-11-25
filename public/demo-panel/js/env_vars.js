@@ -24,13 +24,35 @@ const envUiState = {
   selectedKeys: new Set(),
   quickAddSecret: true,
   multiRows: [],
+  projectId: null,
+  secrets: new Map(), // secret values the user asked to see, by key
 };
 
+/** The value if we hold it; secrets are empty until revealed. */
 function getRealEnvValue(v) {
   if (!v) return '';
-  if (typeof v.real_value === 'string' && v.real_value.length > 0) return v.real_value;
-  if (v.value && v.value !== '********') return v.value;
-  return v.real_value ?? '';
+  if (!v.is_secret) return v.value ?? '';
+  return envUiState.secrets.get(v.key) ?? '';
+}
+
+/**
+ * Fetches secret values from the server (each call is recorded in the app's activity):
+ * one key, or all of them. Returns false when they could not be read.
+ */
+async function revealSecrets(key) {
+  const pid = envUiState.projectId;
+  const needed = envUiState.vars.filter((v) => v.is_secret && !envUiState.secrets.has(v.key) && (key === undefined || v.key === key));
+  if (!needed.length) return true;
+  try {
+    const res = await api(`/api/projects/${pid}/env/reveal`, { method: 'POST', body: key === undefined ? {} : { key } });
+    if (envUiState.projectId !== pid) return false;
+    Object.entries(res.values || {}).forEach(([k, val]) => envUiState.secrets.set(k, val));
+    // Never let an editor open with a blank in place of a secret: saving would erase it.
+    return needed.every((v) => envUiState.secrets.has(v.key));
+  } catch (err) {
+    toast(`Couldn't read the value: ${err.message}`, 'error');
+    return false;
+  }
 }
 
 function formatEnvVarsToRaw(vars) {
@@ -64,19 +86,14 @@ async function loadEnvView() {
 
   try {
     const vars = await api(`/api/projects/${p.id}/env`, { noCache: true });
-    // If any secret variable lacks real_value (e.g. older backend), hydrate from /env/raw
-    const needsRawHydration = vars.some((v) => (v.is_secret ?? v.secret) && typeof v.real_value !== 'string');
-    if (needsRawHydration) {
-      try {
-        const rawRes = await api(`/api/projects/${p.id}/env/raw`, { noCache: true });
-        const map = parseDotenvClient(rawRes.content || '');
-        vars.forEach((v) => {
-          if (map.has(v.key)) v.real_value = map.get(v.key);
-        });
-      } catch (_) {}
-    }
-
     envUiState.vars = Array.isArray(vars) ? vars : [];
+    envUiState.projectId = p.id;
+    envUiState.secrets.clear();
+    envUiState.revealedKeys.clear();
+    envUiState.revealAll = false;
+    envUiState.editingKey = null;
+    const revealBtn = document.getElementById('env-toggle-all-reveal-btn');
+    if (revealBtn) revealBtn.textContent = 'Show All Values';
     // Clean up selectedKeys that no longer exist
     const existingKeySet = new Set(envUiState.vars.map((v) => v.key));
     for (const k of Array.from(envUiState.selectedKeys)) {
@@ -86,13 +103,10 @@ async function loadEnvView() {
     const countBadge = document.getElementById('env-count-badge');
     if (countBadge) countBadge.textContent = String(envUiState.vars.length);
 
-    if (envUiState.viewMode === 'multi') {
-      initMultiEditRows();
-      renderMultiEditTable();
-    } else if (envUiState.viewMode === 'raw') {
-      populateRawEditorFromState();
-    } else {
+    if (envUiState.viewMode === 'list') {
       renderEnvTableFromState();
+    } else {
+      await setEnvViewMode(envUiState.viewMode);
     }
   } catch (err) {
     if (tbody) {
@@ -123,7 +137,9 @@ function parseDotenvClient(input) {
   return map;
 }
 
-function setEnvViewMode(mode) {
+async function setEnvViewMode(mode) {
+  // The editors need every value; stay in the list if they can't be read.
+  if (mode !== 'list' && !(await revealSecrets())) mode = 'list';
   envUiState.viewMode = mode;
   envUiState.editingKey = null;
 
@@ -207,7 +223,7 @@ function renderEnvTableFromState() {
               <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleSelectEnvVar(${keyJs}, this.checked)">
             </td>
             <td>
-              <input type="text" id="env-inline-edit-key" class="form-control env-mono-input" value="${escapeHtml(envUiState.editDraft.key)}" placeholder="KEY_NAME" autocomplete="off" onkeydown="handleInlineEditKeydown(event, ${keyJs})">
+              <input type="text" id="env-inline-edit-key" class="form-control env-mono-input" value="${escapeHtml(envUiState.editDraft.key)}" placeholder="Variable name" autocomplete="off" onkeydown="handleInlineEditKeydown(event, ${keyJs})">
             </td>
             <td>
               <input type="text" id="env-inline-edit-val" class="form-control env-mono-input" value="${escapeHtml(envUiState.editDraft.value)}" placeholder="Variable value" autocomplete="off" onkeydown="handleInlineEditKeydown(event, ${keyJs})">
@@ -265,7 +281,8 @@ function renderEnvTableFromState() {
   });
 }
 
-function startInlineEnvEdit(key) {
+async function startInlineEnvEdit(key) {
+  if (!(await revealSecrets(key))) return;
   const found = envUiState.vars.find((v) => v.key === key);
   if (!found) return;
   envUiState.editingKey = key;
@@ -404,16 +421,18 @@ async function handleInlineQuickAddEnv(e) {
   }
 }
 
-function toggleRevealSingleEnv(key) {
+async function toggleRevealSingleEnv(key) {
   if (envUiState.revealedKeys.has(key)) {
     envUiState.revealedKeys.delete(key);
   } else {
+    if (!(await revealSecrets(key))) return;
     envUiState.revealedKeys.add(key);
   }
   renderEnvTableFromState();
 }
 
-function toggleRevealAllEnv() {
+async function toggleRevealAllEnv() {
+  if (!envUiState.revealAll && !(await revealSecrets())) return;
   envUiState.revealAll = !envUiState.revealAll;
   if (!envUiState.revealAll) {
     envUiState.revealedKeys.clear();
@@ -425,7 +444,8 @@ function toggleRevealAllEnv() {
   renderEnvTableFromState();
 }
 
-function copyEnvVarValue(key) {
+async function copyEnvVarValue(key) {
+  if (!(await revealSecrets(key))) return;
   const found = envUiState.vars.find((v) => v.key === key);
   if (!found) return;
   void copyTextToClipboard(getRealEnvValue(found), `Copied value for "${key}"`);
@@ -514,7 +534,7 @@ function renderMultiEditTable() {
   tbody.innerHTML = envUiState.multiRows.map((row, idx) => `
     <tr data-multi-idx="${idx}">
       <td>
-        <input type="text" class="form-control env-mono-input multi-env-key" value="${escapeHtml(row.key)}" placeholder="KEY_NAME" autocomplete="off">
+        <input type="text" class="form-control env-mono-input multi-env-key" value="${escapeHtml(row.key)}" placeholder="Variable name" autocomplete="off">
       </td>
       <td>
         <input type="text" class="form-control env-mono-input multi-env-val" value="${escapeHtml(row.value)}" placeholder="Value" autocomplete="off">
@@ -559,7 +579,7 @@ function toggleMultiEditRowSecret(idx) {
 
 async function finishEnvSave(p, countMsg, andRestart) {
   toast(countMsg, 'success');
-  setEnvViewMode('list');
+  await setEnvViewMode('list');
   await loadEnvView();
   if (andRestart && typeof window.restartProject === 'function') {
     await window.restartProject(p.id);
@@ -652,9 +672,10 @@ function handleEnvFileUpload(event) {
   const file = event?.target?.files?.[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     const content = String(e.target?.result || '');
-    setEnvViewMode('raw');
+    await setEnvViewMode('raw');
+    if (envUiState.viewMode !== 'raw') return;
     const ta = document.getElementById('env-raw-editor-textarea');
     if (ta) {
       ta.value = content;
@@ -670,33 +691,6 @@ function restartCurrentProject() {
   const p = getSelectedProject();
   if (p && typeof window.restartProject === 'function') {
     void window.restartProject(p.id);
-  }
-}
-
-let activeEnvTab = 'single';
-
-function switchEnvModalTab(tab) {
-  activeEnvTab = tab;
-  const singleSec = document.getElementById('env-section-single');
-  const bulkSec = document.getElementById('env-section-bulk');
-  if (singleSec) singleSec.style.display = tab === 'single' ? 'block' : 'none';
-  if (bulkSec) bulkSec.style.display = tab === 'bulk' ? 'block' : 'none';
-}
-
-async function loadCurrentEnv() {
-  const p = getSelectedProject();
-  if (!p) return;
-  try {
-    const res = await api(`/api/projects/${p.id}/env/raw`, { noCache: true });
-    const bulkInput = document.getElementById('env-bulk-input');
-    if (bulkInput) bulkInput.value = res.content || '';
-    const rawTa = document.getElementById('env-raw-editor-textarea');
-    if (rawTa) {
-      rawTa.value = res.content || '';
-      updateRawEnvLineStats();
-    }
-  } catch (err) {
-    toast(`Failed to load .env: ${err.message}`, 'error');
   }
 }
 
@@ -725,11 +719,6 @@ async function exportEnvFile() {
   } catch (err) {
     toast(`Export failed: ${err.message}`, 'error');
   }
-}
-
-async function handleSaveEnv(e) {
-  if (e) e.preventDefault();
-  return handleInlineQuickAddEnv(e);
 }
 
 async function deleteEnvVar(key) {
@@ -778,10 +767,7 @@ window.saveInlineRawEnv = saveInlineRawEnv;
 window.copyRawEnvToClipboard = copyRawEnvToClipboard;
 window.handleEnvFileUpload = handleEnvFileUpload;
 window.restartCurrentProject = restartCurrentProject;
-window.switchEnvModalTab = switchEnvModalTab;
-window.loadCurrentEnv = loadCurrentEnv;
 window.exportEnvFile = exportEnvFile;
-window.handleSaveEnv = handleSaveEnv;
 window.deleteEnvVar = deleteEnvVar;
 
 export {
@@ -808,10 +794,7 @@ export {
   copyRawEnvToClipboard,
   handleEnvFileUpload,
   restartCurrentProject,
-  switchEnvModalTab,
-  loadCurrentEnv,
   exportEnvFile,
-  handleSaveEnv,
   deleteEnvVar,
 };
 

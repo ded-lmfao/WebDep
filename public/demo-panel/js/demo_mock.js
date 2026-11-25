@@ -402,6 +402,7 @@ export function verifyWebhook(sigHeader) {
   const demoUser = {
     id: 1,
     username: 'admin',
+    isAdmin: true,
     isMainAdmin: true,
     role: 'Main Admin',
     permissions: ['*'],
@@ -664,6 +665,148 @@ export function verifyWebhook(sigHeader) {
     }, 650);
 
     return dep;
+  }
+
+  // Port pools and public IPs per node (IP Addresses page).
+  const pools = {
+    1: { min: 3000, max: 3011, closed: new Set([3010]), public: new Set([3001]) },
+    2: { min: 4000, max: 4007, closed: new Set(), public: new Set() },
+  };
+  const nodeIps = { 1: [{ id: 1, ip: '203.0.113.10', label: 'Primary', apps: [] }], 2: [] };
+  let nextIpId = 10;
+
+  function poolFor(nid) {
+    if (!pools[nid]) pools[nid] = { min: null, max: null, closed: new Set(), public: new Set() };
+    return pools[nid];
+  }
+
+  function portUsers(nid) {
+    const users = new Map();
+    for (const p of projects) {
+      if ((p.node_id || 1) !== nid || !p.port) continue;
+      users.set(Number(p.port), { kind: p.project_kind === 'service' ? 'service' : 'website', id: p.id, name: p.name, role: 'main', running: p.app_status === 'running', access: p.access_mode === 'public' ? 'public' : 'local' });
+    }
+    for (const d of databases) {
+      if ((d.node_id || 1) !== nid || !d.port) continue;
+      users.set(Number(d.port), { kind: 'database', id: d.id, name: d.name, role: 'main', running: d.status === 'running' });
+    }
+    return users;
+  }
+
+  function poolPayload(nid, note = null) {
+    const pool = poolFor(nid);
+    const users = portUsers(nid);
+    const ports = [];
+    if (pool.min && pool.max) {
+      for (let port = pool.min; port <= pool.max; port++) {
+        const usedBy = users.get(port) || null;
+        users.delete(port);
+        ports.push({ port, open: !pool.closed.has(port), public: pool.public.has(port), manual: false, inPool: true, usedBy });
+      }
+    }
+    for (const [port, usedBy] of users) ports.push({ port, open: true, public: false, manual: false, inPool: false, usedBy });
+    ports.sort((a, b) => a.port - b.port);
+    return {
+      firewallManaged: true,
+      firewallNote: note,
+      pool: { nodeId: nid, portMin: pool.min, portMax: pool.max, ports, firewall: { state: 'ok', error: null, syncedAt: nowSec() } },
+    };
+  }
+
+  function parsePortList(text) {
+    const out = [];
+    for (const part of String(text || '').split(/[\s,]+/).filter(Boolean)) {
+      const [a, b] = part.split('-').map(Number);
+      for (let p = a; p <= (b || a); p++) if (p >= 1024 && p <= 65535) out.push(p);
+    }
+    return out;
+  }
+
+  // Moves an app or database to `wanted` (or the next free pool port) on its node.
+  function movePort(item, wanted) {
+    const nid = item.node_id || 1;
+    const pool = poolFor(nid);
+    const users = portUsers(nid);
+    let target = wanted;
+    if (!target) {
+      for (let p = pool.min; pool.min && p <= pool.max; p++) {
+        if (!users.has(p) && !pool.closed.has(p)) { target = p; break; }
+      }
+      if (!target) return [{ error: 'No free port left in this node\'s range.' }, 400];
+    }
+    if (target < 1024 || target > 65535) return [{ error: 'Choose a port between 1024 and 65535.' }, 400];
+    const user = users.get(target);
+    const isSelf = user && user.id === item.id && (user.kind === 'database') === Boolean(item.db_name);
+    if (user && !isSelf) {
+      return [{ error: `Port ${target} is already used by ${user.name}.` }, 400];
+    }
+    if (pool.min && (target < pool.min || target > pool.max)) {
+      return [{ error: `Port ${target} is outside this node's range (${pool.min}-${pool.max}).` }, 400];
+    }
+    item.port = target;
+    return [item.db_name ? { ...item, linkedAppNeedsRestart: false } : item];
+  }
+
+  function handlePortsRoute(path, method, body) {
+    let m;
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/ports$/))) {
+      const nid = Number(m[1]);
+      const pool = poolFor(nid);
+      if (method === 'POST') {
+        for (const p of parsePortList(body.ports)) { pool.closed.delete(p); if (!pool.min || p < pool.min) pool.min = p; if (!pool.max || p > pool.max) pool.max = p; }
+      } else if (method === 'PATCH') {
+        for (const p of parsePortList(body.ports)) {
+          if (body.open !== undefined) { if (body.open) pool.closed.delete(p); else pool.closed.add(p); }
+          if (body.public !== undefined) { if (body.public) pool.public.add(p); else pool.public.delete(p); }
+        }
+      }
+      return [poolPayload(nid)];
+    }
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/ports\/remove$/)) && method === 'POST') {
+      const pool = poolFor(Number(m[1]));
+      for (const p of parsePortList(body.ports)) pool.closed.add(p);
+      return [poolPayload(Number(m[1]))];
+    }
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/ports\/(\d+)$/)) && method === 'DELETE') {
+      poolFor(Number(m[1])).closed.add(Number(m[2]));
+      return [poolPayload(Number(m[1]))];
+    }
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/port-range$/)) && method === 'PUT') {
+      const pool = poolFor(Number(m[1]));
+      const min = Number(body.min); const max = Number(body.max);
+      if (!(min >= 1024 && max <= 65535 && min <= max)) return [{ error: 'Enter a range between 1024 and 65535.' }, 400];
+      pool.min = min; pool.max = max;
+      return [poolPayload(Number(m[1]))];
+    }
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/firewall-sync$/)) && method === 'POST') {
+      return [poolPayload(Number(m[1]))];
+    }
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/ips$/))) {
+      const nid = Number(m[1]);
+      if (!nodeIps[nid]) nodeIps[nid] = [];
+      if (method === 'POST') {
+        if (!body.ip) return [{ error: 'Enter an IP address.' }, 400];
+        nodeIps[nid].push({ id: nextIpId++, ip: String(body.ip), label: String(body.label || ''), apps: [] });
+      }
+      return [{ ips: nodeIps[nid] }];
+    }
+    if ((m = path.match(/^\/api\/cluster\/nodes\/(\d+)\/ips\/(\d+)$/)) && method === 'DELETE') {
+      const nid = Number(m[1]);
+      nodeIps[nid] = (nodeIps[nid] || []).filter((x) => x.id !== Number(m[2]));
+      return [{ ips: nodeIps[nid] }];
+    }
+    if ((m = path.match(/^\/api\/projects\/(\d+)\/port$/)) && method === 'PUT') {
+      const p = projects.find((x) => x.id === Number(m[1]));
+      return p ? movePort(p, Number(body.port) || null) : [{ error: 'App not found' }, 404];
+    }
+    if ((m = path.match(/^\/api\/databases\/(\d+)\/port$/)) && method === 'PUT') {
+      const d = databases.find((x) => x.id === Number(m[1]));
+      return d ? movePort(d, Number(body.port) || null) : [{ error: 'Database not found' }, 404];
+    }
+    if ((m = path.match(/^\/api\/(projects|databases)\/(\d+)\/ip$/)) && method === 'PUT') {
+      return [{ ok: true }];
+    }
+    return null;
   }
 
   // Intercept /api/* requests
@@ -1026,7 +1169,7 @@ export function verifyWebhook(sigHeader) {
       ]);
     }
     if (path === '/api/system/version') {
-      return jsonResp({ version: '3.27.0', current_tag: 'v3.27.0', remote_tag: 'v3.27.0', up_to_date: true });
+      return jsonResp({ version: '3.5.2', current_tag: 'v3.5.2', remote_tag: 'v3.5.2', up_to_date: true });
     }
     if (path === '/api/system/update/status') {
       return jsonResp({ active: false, progress: 100 });
@@ -1041,6 +1184,24 @@ export function verifyWebhook(sigHeader) {
     if (path === '/api/cache/clear') {
       return jsonResp({ ok: true });
     }
+
+    const portsRes = handlePortsRoute(path, method, body);
+    if (portsRes) return jsonResp(portsRes[0], portsRes[1] || 200);
+
+    // Newer admin pages: limits, sign-up requests, sessions, registration.
+    if (path === '/api/limits') {
+      const rows = [
+        ...projects.map((p) => ({ kind: p.project_kind === 'service' ? 'service' : 'website', id: p.id, name: p.name, nodeId: p.node_id || 1, port: p.port, extraPorts: [], cpu: null, memoryMb: null, diskMb: null })),
+        ...databases.map((d) => ({ kind: 'database', id: d.id, name: d.name, nodeId: d.node_id || 1, port: d.port, extraPorts: [], cpu: null, memoryMb: null, diskMb: null })),
+      ];
+      return jsonResp({ limits: rows, enforcement: { works: true }, isolation: { requested: true, active: true } });
+    }
+    if (path === '/api/limit-events') return jsonResp({ events: [], latestId: 0 });
+    if (path === '/api/requests') return jsonResp([]);
+    if (path === '/api/auth/sessions') {
+      return jsonResp({ current: 'demo', sessions: [{ ref: 'demo', ip: '203.0.113.50', userAgent: navigator.userAgent, createdAt: nowSec() - 3600, lastActiveAt: nowSec() }] });
+    }
+    if (path === '/api/auth/registration') return jsonResp({ enabled: false });
 
     return jsonResp({ ok: true });
   };

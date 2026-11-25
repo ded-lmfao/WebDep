@@ -4,6 +4,7 @@
  */
 
 import { state, escapeHtml, openModal, closeModal } from './state.js';
+import { readLimitFields, setLimitFieldsVisible, resetLimitFields } from './limits_fields.js';
 import { api, toast } from './api.js';
 
 export function setServiceSourceMode(mode) {
@@ -44,6 +45,8 @@ export function setServiceSourceMode(mode) {
 export function openAddServiceModal() {
   const form = document.getElementById('service-form');
   if (form) form.reset();
+  resetLimitFields('service');
+  setLimitFieldsVisible('service', true);
   const idEl = document.getElementById('service-form-id');
   if (idEl) idEl.value = '';
   const titleEl = document.getElementById('modal-service-title');
@@ -87,6 +90,7 @@ export function openAddServiceModal() {
   if (window.populateTargetNodeSelect) {
     window.populateTargetNodeSelect('service-node-id', 'service-node-group', null, false);
   }
+  void window.refreshSuggestedPort?.('service-port', 'service-node-id', 8000);
   openModal('modal-service');
 }
 
@@ -165,6 +169,7 @@ export function applyServicePreset(preset) {
 export function openEditServiceModal(id) {
   const p = state.projects.find((x) => x.id === id);
   if (!p) return;
+  setLimitFieldsVisible('service', false);
 
   const idEl = document.getElementById('service-form-id');
   if (idEl) idEl.value = p.id;
@@ -317,6 +322,9 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
   const allowedIps = document.getElementById('service-allowed-ips')?.value.trim() || '';
   const selectedNodeVal = document.getElementById('service-node-id')?.value;
 
+  const svcPort = portVal ? Number(portVal) : await window.fetchSuggestedPort?.(Number(selectedNodeVal || 0), 8000);
+  if (!svcPort) return;
+
   const payload = {
     name,
     slug,
@@ -330,7 +338,7 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
     build_cmd: '',
     start_cmd: startCmd,
     health_url: '',
-    port: portVal ? Number(portVal) : getPort(8000),
+    port: svcPort,
     domains: domainVal ? [domainVal] : [],
     access_mode: accessMode,
     allowed_ips: allowedIps,
@@ -338,6 +346,10 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
   };
   if (!id && selectedNodeVal) {
     payload.node_id = Number(selectedNodeVal);
+  }
+  if (!id) {
+    const l = readLimitFields('service');
+    Object.assign(payload, { cpu_limit: l.cpu, memory_limit_mb: l.memoryMb, disk_limit_mb: l.diskMb, backup_limit: l.backups });
   }
 
   try {
@@ -360,6 +372,7 @@ document.getElementById('save-service-submit-btn')?.addEventListener('click', as
       if (window.navigateTo) window.navigateTo('services');
     }
   } catch (err) {
+    if (window.handleNoFreePort?.(err)) return;
     toast(`Save failed: ${err.message}`, 'error');
   } finally {
     if (submitBtn) {
@@ -375,3 +388,7 @@ window.openAddServiceModal = openAddServiceModal;
 window.applyServicePreset = applyServicePreset;
 window.openEditServiceModal = openEditServiceModal;
 
+
+document.getElementById('service-node-id')?.addEventListener('change', () => {
+  if (!document.getElementById('service-form-id')?.value) void window.refreshSuggestedPort?.('service-port', 'service-node-id', 8000);
+});
