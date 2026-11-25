@@ -54,9 +54,12 @@ pub enum Msg {
     Exit { code: Option<i32>, signal: Option<i32> },
 }
 
-/// Whether apps should be started through the relay.
+/// Whether apps should be started through the relay. Never in unit tests: the relay is this
+/// program run with a flag, and under `cargo test` this program is the test runner
+/// (tests/log_relay.rs runs the real binary instead).
 pub fn enabled() -> bool {
     cfg!(unix)
+        && !cfg!(test)
         && !std::env::var(ENV_ENABLE).is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
 }
 
