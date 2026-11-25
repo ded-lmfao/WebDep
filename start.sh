@@ -364,6 +364,20 @@ if [[ "$HAS_PRIVS" == "1" ]]; then
         echo "${SERVICE_USER} ALL=(ALL) NOPASSWD: /usr/sbin/ufw, /usr/sbin/iptables, /usr/bin/wg, /usr/bin/wg-quick, /usr/bin/apt-get, /usr/bin/dnf, /usr/bin/yum, /sbin/apk, /usr/bin/apk, /usr/bin/pacman, /usr/bin/systemctl reload caddy, /usr/bin/systemctl restart webdep, /bin/systemctl restart webdep, /usr/bin/systemctl restart webdep-core, /bin/systemctl restart webdep-core, /usr/bin/systemctl restart webdep-node, /bin/systemctl restart webdep-node" | $SUDO tee /etc/sudoers.d/webdep-firewall >/dev/null 2>&1 || true
         $SUDO chmod 0440 /etc/sudoers.d/webdep-firewall 2>/dev/null || true
     fi
+    # A system Caddy (systemd unit) reads only /etc/caddy/Caddyfile, but the panel writes each
+    # site to data/caddy/<slug>.caddy and reloads that unit. Import those files so panel domains go live.
+    if [[ -f /etc/caddy/Caddyfile ]]; then
+        CADDY_IMPORT="import ${APP_DIR}/data/caddy/*.caddy"
+        # Skip when the file already imports anything from data/caddy (e.g. the master Caddyfile).
+        if ! $SUDO grep -qF "${APP_DIR}/data/caddy/" /etc/caddy/Caddyfile; then
+            echo "[*] Linking WebDep site configs into /etc/caddy/Caddyfile..."
+            printf '\n# WebDep panel sites\n%s\n' "$CADDY_IMPORT" | $SUDO tee -a /etc/caddy/Caddyfile >/dev/null
+        fi
+        # The caddy user must be able to reach and read the generated site files.
+        $SUDO chmod o+x "${APP_DIR}" "${APP_DIR}/data" 2>/dev/null || true
+        $SUDO chmod -R o+rX "${APP_DIR}/data/caddy" 2>/dev/null || true
+        $SUDO systemctl reload caddy >/dev/null 2>&1 || true
+    fi
 fi
 
 if [[ "$ROLE_MODE" == "node" ]]; then

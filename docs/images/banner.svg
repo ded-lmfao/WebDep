@@ -59,17 +59,44 @@
     <!-- logo mark -->
     <g class="float">
       <rect x="80" y="90" width="160" height="160" rx="36" fill="#0f172a" stroke="url(#blue)" stroke-width="3"/>
-      <g fill="url(#blue)">
-        <path d="M160 110L108 160H121L160 123L199 160H212Z"/>
-        <rect x="136" y="150" width="48" height="14" rx="3"/>
-        <rect x="136" y="169" width="48" height="14" rx="3"/>
+      <!-- the real mark from public/logo-mark.svg (144x144), scaled into the tile -->
+      <g transform="translate(102.4 112.4) scale(0.8)">
+        <defs>
+          <linearGradient id="wd-blue" x1="10" y1="6" x2="72" y2="136" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#2563eb"/>
+          </linearGradient>
+          <linearGradient id="wd-cyan" x1="72" y1="6" x2="134" y2="136" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#22d3ee"/>
+          </linearGradient>
+          <clipPath id="wd-left"><rect x="0" y="0" width="72" height="144"/></clipPath>
+          <clipPath id="wd-right"><rect x="72" y="0" width="72" height="144"/></clipPath>
+          <clipPath id="wd-w-bounds"><rect x="0" y="70" width="144" height="74"/></clipPath>
+          <mask id="wd-server-mask">
+            <rect x="0" y="0" width="144" height="144" fill="#fff"/>
+            <circle cx="55.5" cy="52" r="2.7" fill="#000"/>
+            <rect x="75.5" y="50.6" width="15" height="2.8" rx="1.4" fill="#000"/>
+            <circle cx="55.5" cy="70" r="2.7" fill="#000"/>
+            <rect x="75.5" y="68.6" width="15" height="2.8" rx="1.4" fill="#000"/>
+          </mask>
+          <g id="wd-mark">
+            <polygon points="72,4 13,60 25.5,60 72,16.5 118.5,60 131,60" fill="currentColor"/>
+            <g mask="url(#wd-server-mask)" fill="currentColor">
+              <rect x="47" y="46" width="50" height="12" rx="3"/>
+              <rect x="47" y="64" width="50" height="12" rx="3"/>
+            </g>
+            <g clip-path="url(#wd-w-bounds)" fill="none" stroke="currentColor" stroke-linejoin="miter" stroke-miterlimit="6" stroke-linecap="butt">
+              <rect x="7" y="70" width="29" height="8.5" rx="0.5" fill="currentColor" stroke="none"/>
+              <rect x="108" y="70" width="29" height="8.5" rx="0.5" fill="currentColor" stroke="none"/>
+              <polyline points="12,68 47,124 83,79 97,98 114,68" stroke-width="10"/>
+              <polyline points="31,68 47,94 60,79 65,86" stroke-width="9"/>
+              <polyline points="132,68 97,124 82,102" stroke-width="10"/>
+            </g>
+          </g>
+        </defs>
+        <use href="#wd-mark" clip-path="url(#wd-left)" style="color:#2f7df6"/>
+        <use href="#wd-mark" clip-path="url(#wd-right)" style="color:#29d0f6"/>
+        <circle class="led" cx="72" cy="131" r="6" style="fill:#10b981"/>
       </g>
-      <g fill="#0f172a">
-        <circle cx="144" cy="157" r="2.6"/><rect x="162" y="155.5" width="15" height="3" rx="1.5"/>
-        <circle cx="144" cy="176" r="2.6"/><rect x="162" y="174.5" width="15" height="3" rx="1.5"/>
-      </g>
-      <path d="M112 180L137 224L160 196L183 224L208 180" fill="none" stroke="url(#blue)" stroke-width="10" stroke-linejoin="miter"/>
-      <circle class="led" cx="160" cy="232" r="6"/>
     </g>
 
     <g>
@@ -78,12 +105,12 @@
       <g class="rise r3" font-size="14" font-weight="600" fill="#bae6fd">
         <rect x="293" y="218" width="106" height="32" rx="16" fill="#0ea5e9" fill-opacity=".12" stroke="#38bdf8" stroke-opacity=".5"/>
         <text x="346" y="239" text-anchor="middle">Websites</text>
-        <rect x="409" y="218" width="76" height="32" rx="16" fill="#0ea5e9" fill-opacity=".12" stroke="#38bdf8" stroke-opacity=".5"/>
-        <text x="447" y="239" text-anchor="middle">Bots</text>
-        <rect x="495" y="218" width="108" height="32" rx="16" fill="#0ea5e9" fill-opacity=".12" stroke="#38bdf8" stroke-opacity=".5"/>
-        <text x="549" y="239" text-anchor="middle">PostgreSQL</text>
-        <rect x="613" y="218" width="106" height="32" rx="16" fill="#0ea5e9" fill-opacity=".12" stroke="#38bdf8" stroke-opacity=".5"/>
-        <text x="666" y="239" text-anchor="middle">Multi-VPS</text>
+        <rect x="409" y="218" width="106" height="32" rx="16" fill="#0ea5e9" fill-opacity=".12" stroke="#38bdf8" stroke-opacity=".5"/>
+        <text x="462" y="239" text-anchor="middle">Services</text>
+        <rect x="525" y="218" width="108" height="32" rx="16" fill="#0ea5e9" fill-opacity=".12" stroke="#38bdf8" stroke-opacity=".5"/>
+        <text x="579" y="239" text-anchor="middle">PostgreSQL</text>
+        <rect x="643" y="218" width="106" height="32" rx="16" fill="#0ea5e9" fill-opacity=".12" stroke="#38bdf8" stroke-opacity=".5"/>
+        <text x="696" y="239" text-anchor="middle">Multi-VPS</text>
       </g>
     </g>
 

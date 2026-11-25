@@ -213,7 +213,8 @@
 .ipx-detail p.acct-muted { margin: 6px 0 0; line-height: 1.45; }
 .ipx-btn-stop { background: transparent !important; border: 1px solid var(--danger-border) !important; color: var(--danger-light) !important; }
 .ipx-btn-start { background: transparent !important; border: 1px solid var(--success-border) !important; color: var(--success-light) !important; }
-.ipx-move { height: 30px; width: auto; max-width: 160px; font-size: 12px; }
+.ipx-move, .ipx-port-pick { height: 30px; width: auto; max-width: 160px; font-size: 12px; }
+#ipx-port-pick { width: 120px; }
 .ipx-apps { margin-top: 16px; }
 .ipx-section-title { font-size: 13px; font-weight: 500; color: var(--text-main); margin-bottom: 8px; }
 .ipx-port-link { padding: 1px 6px; border: 1px solid var(--border-subtle); border-radius: 4px; background: var(--bg-card); color: var(--accent-light); font-family: var(--font-mono); font-size: 12px; cursor: pointer; }

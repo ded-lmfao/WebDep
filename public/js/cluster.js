@@ -1283,10 +1283,13 @@ function renderDetail(ports, others) {
         <div class="acct-person-sub">${kindLabel(u.kind)} &middot; ${u.running ? 'Running' : 'Stopped'}${u.role === 'extra' ? ' &middot; extra port' : ''}</div>
       </div>
       ${u.role === 'main' && u.access ? `<p class="ipx-access"><strong>${escapeHtml((ACCESS_TEXT[u.access] || u.access).split(':')[0])}</strong>: ${escapeHtml((ACCESS_TEXT[u.access] || '').split(': ')[1] || '')}. Change it in the app's settings.</p>` : ''}
-      ${u.role === 'main' && u.kind !== 'database'
-        ? `<div class="ipx-detail-actions">${appActionButtons(u.id, u.running, others)}</div>`
-        : '<p class="acct-muted">Change ports in Admin Panel &rsaquo; App Configs.</p>'}
-      ${u.role === 'main' && u.kind !== 'database' ? '<p class="acct-muted">Change its port or extra ports in Admin Panel &rsaquo; App Configs.</p>' : ''}`;
+      ${u.role === 'main'
+        ? `<div class="ipx-detail-actions">
+            <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5" autocomplete="off" class="form-control ipx-port-pick" id="ipx-port-pick" placeholder="New port" aria-label="New port">
+            <button class="btn btn-secondary btn-sm" data-ipx-act="app-port" data-app="${u.id}" data-kind="${u.kind}">Change port</button>
+          </div>
+          <p class="acct-muted">Type a free port, or leave it empty to use the next free one. Updates its firewall and domain routes.</p>`
+        : '<p class="acct-muted">Change extra ports in Admin Panel &rsaquo; App Configs.</p>'}`;
   } else {
     body = `<div class="ipx-detail-actions">
         ${p.open ? '<button class="btn btn-secondary btn-sm" data-ipx-act="close-one">Close port</button>' : '<button class="btn btn-secondary btn-sm" data-ipx-act="open-one">Open port</button>'}
@@ -1527,6 +1530,18 @@ async function runIpxAction(act, el) {
       toast('IP address removed.', 'success');
       return loadIpsView(false);
     }
+    case 'app-port': {
+      const typed = (document.getElementById('ipx-port-pick')?.value || '').trim();
+      if (typed && !/^\d{1,5}$/.test(typed)) return toast('Enter a port number.', 'warning');
+      const pick = Number(typed || 0);
+      const base = el.dataset.kind === 'database' ? `/api/databases/${appId}` : `/api/projects/${appId}`;
+      const res = await api(`${base}/port`, { method: 'PUT', body: { port: pick || null } });
+      const moved = Number(res?.port || pick || 0);
+      if (moved) ipsUi.selected = new Set([moved]);
+      toast(moved ? `Moved to port ${moved}.` : 'Port changed.', 'success');
+      if (res && res.linkedAppNeedsRestart) toast('Restart the linked app to use the new database port.', 'warning');
+      return loadIpsView(true);
+    }
     case 'app-stop':
     case 'app-start':
       await api(`/api/projects/${appId}/${act === 'app-stop' ? 'stop' : 'start'}`, { method: 'POST' });
@@ -1578,6 +1593,13 @@ document.getElementById('ips-view-body')?.addEventListener('click', async (e) =>
     btn.disabled = false;
   }
   return undefined;
+});
+
+// Enter in the port box applies the change, like clicking Change port.
+document.getElementById('ips-view-body')?.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.target.id !== 'ipx-port-pick') return;
+  e.preventDefault();
+  e.target.closest('.ipx-detail-actions')?.querySelector('[data-ipx-act="app-port"]')?.click();
 });
 
 document.getElementById('ips-view-body')?.addEventListener('toggle', (e) => {

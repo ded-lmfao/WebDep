@@ -5,6 +5,10 @@ use std::process::Command;
 use crate::projects::Project;
 use crate::runtime::Runtime;
 
+/// Header of the master Caddyfile. No global options block: automatic HTTPS is Caddy's
+/// default, and `auto_https on` is not a valid value (Caddy rejects the whole file).
+const MASTER_HEADER: &str = "# WebDep — Master Multi-Website Caddyfile\n# Generated automatically for all hosted projects\n\n";
+
 pub struct Caddy {
     caddy_dir: PathBuf,
 }
@@ -87,9 +91,7 @@ impl Caddy {
 
     /// Generates the master unified Caddyfile for all active websites.
     pub fn generate_master_caddyfile(&self, projects: &[Project]) -> String {
-        let mut master = String::from(
-            "# WebDep — Master Multi-Website Caddyfile\n# Generated automatically for all hosted projects\n\n{\n    # Global options\n    auto_https on\n}\n\n",
-        );
+        let mut master = String::from(MASTER_HEADER);
 
         for p in projects {
             if p.project_kind == "service" && (p.domains.is_empty() || p.port.is_none()) {
@@ -149,9 +151,7 @@ impl Caddy {
         let path = self.caddy_dir.join(format!("{}.caddy", p.slug));
         fs::write(&path, conf)?;
 
-        let mut master = String::from(
-            "# WebDep — Master Multi-Website Caddyfile\n# Generated automatically for all hosted projects\n\n{\n    # Global options\n    auto_https on\n}\n\n",
-        );
+        let mut master = String::from(MASTER_HEADER);
         for item in all_projects {
             if item.id == p.id {
                 master.push_str(&self.generate_staging_http_config(p));
@@ -283,6 +283,15 @@ mod tests {
             disk_limit_mb: 0,
             backup_limit: 0,
         }
+    }
+
+    #[test]
+    fn master_caddyfile_has_no_invalid_global_options() {
+        let caddy = Caddy::new(&std::env::temp_dir().join("webdep-caddy-master-test"));
+        let master = caddy.generate_master_caddyfile(&[sample_project()]);
+        // `auto_https on` is rejected by Caddy and made the whole file fail to load.
+        assert!(!master.contains("auto_https"));
+        assert!(master.contains("app.example.com, www.example.com {"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "name": "webdep",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "description": "Self-hosted deployment platform: GitHub sync, release directories, health-checked deploys, automatic rollback.",
   "type": "module",
   "private": true,

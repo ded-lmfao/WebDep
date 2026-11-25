@@ -4,7 +4,7 @@
 
 <br>
 
-Deploy websites, bots, services and PostgreSQL databases across one VPS or many, from a single Rust binary.
+Deploy websites, backend services and PostgreSQL databases across one VPS or many, from a single Rust binary.
 
 [![Latest release](https://img.shields.io/github/v/release/ded-lmfao/WebDep?style=for-the-badge&label=release&color=2563eb)](https://github.com/ded-lmfao/WebDep/releases/latest)
 [![Build](https://img.shields.io/github/actions/workflow/status/ded-lmfao/WebDep/release.yml?branch=main&style=for-the-badge&label=build)](https://github.com/ded-lmfao/WebDep/actions/workflows/release.yml)
@@ -114,7 +114,7 @@ sudo ./start.sh --service
 <td width="50%" valign="top">
 
 ### 🌐 Deploy anything
-- Websites, background services and bots
+- Websites and backend services
 - Git pipeline with 7 live stages and health checks
 - Keeps the newest 5 releases, with rollback
 - Automatic HTTPS through Caddy, plus maintenance mode
@@ -186,7 +186,7 @@ sudo ./start.sh --service
 
 | Runtime | Example install | Example start | Good for |
 | :--- | :--- | :--- | :--- |
-| **Node.js** | `npm ci` / `pnpm install` | `npm start` / `node server.js` | Next.js, Express, Fastify, bots |
+| **Node.js** | `npm ci` / `pnpm install` | `npm start` / `node server.js` | Next.js, Express, Fastify, workers |
 | **Python** | `pip install -r requirements.txt` | `python -m uvicorn main:app --port {{PORT}}` | FastAPI, Flask, Django, workers |
 | **Go** | `go build -o app .` | `./app` | Gin, Echo, Fiber, daemons |
 | **Rust** | `cargo build --release` | `./target/release/server` | Axum, Actix-web |
@@ -296,7 +296,7 @@ To restart an enrolled worker later, run `& $webdep --node` from its folder.
 | :--- | :--- |
 | **Overview** | Live usage and every running workload, filtered by server |
 | **Websites** | Web apps with ports, domains, HTTPS and maintenance mode |
-| **Services** | Always-on processes: bots, workers, Lavalink, Go and Rust binaries |
+| **Services** | Always-on backend processes: APIs, workers, Lavalink, Go and Rust binaries |
 | **Databases** | PostgreSQL clusters and their access rules |
 | **My Account** | Profile, password, passkeys, 2FA, sessions and your app access |
 | **Admin Panel** | Users, Requests, Nodes, VPS Modules, IP Addresses, Move Apps, App Configs, Platform Settings, Audit |
