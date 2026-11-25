@@ -360,7 +360,7 @@ mod unix {
             set_signal(sig, libc::SIG_IGN);
         }
 
-        let _ = std::fs::remove_file(&socket);
+        let _ = tokio::fs::remove_file(&socket).await;
         let listener = match UnixListener::bind(&socket) {
             Ok(l) => l,
             Err(e) => {
@@ -370,7 +370,7 @@ mod unix {
         };
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
+            let _ = tokio::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).await;
         }
 
         let mut cmd = tokio::process::Command::new(&program[0]);
@@ -393,7 +393,7 @@ mod unix {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("log relay: cannot start {}: {e}", program[0]);
-                let _ = std::fs::remove_file(&socket);
+                let _ = tokio::fs::remove_file(&socket).await;
                 return 127;
             }
         };
@@ -488,7 +488,7 @@ mod unix {
         wake.notify_one();
         let _ = tokio::time::timeout(LINGER_AFTER_EXIT, delivered.notified()).await;
         accept.abort();
-        let _ = std::fs::remove_file(&socket);
+        let _ = tokio::fs::remove_file(&socket).await;
         match (code, signal) {
             (Some(c), _) => c,
             (None, Some(s)) => 128 + s,
