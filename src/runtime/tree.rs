@@ -269,7 +269,7 @@ pub(crate) async fn kill_project_processes_pure(
     deploy_dir: &str,
     port: Option<u16>,
     known_extra_pids: &[u32],
-    old_child: Option<tokio::process::Child>,
+    old_child: Option<super::AppProcess>,
 ) -> bool {
     let fake_proj = Project {
         id: project_id,

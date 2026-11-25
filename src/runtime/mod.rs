@@ -1,7 +1,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use tokio::process::Child;
 
 use crate::db::DbPool;
 use crate::logs::Logs;
@@ -11,16 +10,18 @@ pub mod isolation;
 pub mod limits;
 pub mod port;
 pub mod process;
+pub mod relay;
 pub mod tree;
 pub mod maintenance;
 pub mod supervisor;
 
+pub use relay::AppProcess;
 pub use tree::{detect_java_exe, is_pid_alive};
 
 pub struct Runtime {
     pub(crate) db: DbPool,
     pub(crate) logs: Logs,
-    pub(crate) processes: Arc<Mutex<HashMap<i64, Child>>>,
+    pub(crate) processes: Arc<Mutex<HashMap<i64, AppProcess>>>,
     pub(crate) project_locks: Arc<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>>,
     pub(crate) stop_seq: Arc<Mutex<HashMap<i64, u64>>>,
     pub(crate) maintenance_shutdowns: Arc<Mutex<HashMap<i64, tokio::sync::oneshot::Sender<()>>>>,

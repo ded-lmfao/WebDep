@@ -159,7 +159,7 @@ fn resolve_active_exe_path() -> PathBuf {
 /// binary, which was renamed to `<name>.old` (Linux then reports `<name>.old`, or `<name> (deleted)`
 /// if it was removed). Updating again from such a process must target `<name>`, not the leftover
 /// file, so both suffixes are stripped.
-fn normalize_exe_path(exe: PathBuf) -> PathBuf {
+pub(crate) fn normalize_exe_path(exe: PathBuf) -> PathBuf {
     let s = exe.to_string_lossy().into_owned();
     let s = s.strip_suffix(" (deleted)").unwrap_or(&s);
     let s = s.strip_suffix(".old").unwrap_or(s);

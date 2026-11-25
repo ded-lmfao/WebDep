@@ -1,12 +1,11 @@
-# Data model (one idempotent migration: migrations/0020_baseline.sql, Postgres; registered in src/pg_control.rs build_migrator)
-Older databases hold rows for migrations 1-18 (tolerated via ignore_missing); the baseline finds everything in place. Never edit 0020 once released: add 0021+ for changes. Data steps of the old migrations are NOT in it: first admin = code (is_main_admin), audit trimming on insert (api/common.rs), session ids hashed on write (auth::manager::session_key)
-_meta settings projects project_env deployments releases logs users sessions backups audit project_keys user_passkeys databases access_grants(powers_json) nodes node_enroll_tokens migrations
+# Data model (one migration: migrations/0001_schema.sql = version 1 "schema", Postgres; registered in src/pg_control.rs build_migrator)
+Fresh-install schema since v3.0.13: databases from v3.0.12 or older (versions 1-18/20) cannot upgrade in place (checksum/table clash) - reinstall. Never edit 0001 once released: add 0002+ for changes. First admin = code (is_main_admin), audit trimming on insert (api/common.rs), session ids hashed on write (auth::manager::session_key). No _meta table; users has no permissions/allowed_projects columns (access lives in access_grants).
+settings projects project_env deployments releases logs users sessions backups audit project_keys user_passkeys databases access_grants(powers_json) nodes node_enroll_tokens migrations node_ports node_ips account_requests password_resets database_backups limit_events
 0006 user_management: users.email/display_name/role/must_change_password, account_requests
 0007 node_ports (node_id, port, is_open, manual, project_id for extra ports)
 0008 port_exposure: node_ports.public; nodes.firewall_state/firewall_error/firewall_synced_at
 0009 account_security: password_resets (token_hash); sessions.created_at/ip/user_agent
 0010 app_placement: node_ips (node_id, ip, label); projects.bind_ip, cpu_limit (% of core), memory_limit_mb
-0019 consolidated_schema (replaces the old 0011-0018, idempotent; databases that ran them tolerate the gap via ignore_missing): see the lines below for what it holds
 audit cap: per-app audit kept to newest 100 each (websites/services by project_id, databases by target 'DB #<id>'); enforced on insert: api/common.rs trim_app_audit / trim_database_audit
 limits: projects + databases cpu_limit, memory_limit_mb, disk_limit_mb, backup_limit (0 = no limit)
 backups: backups.status (running|complete|failed), error, checksum_sha256, file_count, locked, created_by, completed_at, archive_path ('' = older folder backup, 'pending' = being built on a node)

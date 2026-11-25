@@ -18,7 +18,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::api::files::{ensure_ancestor_within_root, ensure_existing_within_root, safe_join, service_root};
@@ -74,7 +73,7 @@ pub struct P2pTransferTicket {
 
 pub struct NodeExecState {
     pub data_dir: PathBuf,
-    pub processes: Arc<Mutex<HashMap<i64, Child>>>,
+    pub processes: Arc<Mutex<HashMap<i64, crate::runtime::AppProcess>>>,
     pub project_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     pub stop_seq: Arc<Mutex<HashMap<i64, u64>>>,
     pub maintenance_shutdowns: Arc<Mutex<HashMap<i64, oneshot::Sender<()>>>>,
@@ -1090,6 +1089,24 @@ pub async fn execute_rpc(
             if tracked_alive {
                 // Just a reconnect: this Web-Node instance still supervises the app.
                 return ok_resp(req_id, json!({ "ok": true, "started": false }));
+            }
+            // Started through its log relay, the app outlived the previous Web-Node instance with its
+            // output held: reconnect instead of restarting it.
+            {
+                let container = ensure_container_in_data_dir(&exec.data_dir, &p, p.port.unwrap_or(3000));
+                let tx_clone = ws_tx.clone();
+                let proj_id = p.id;
+                let log_cb: crate::runtime::relay::LogCb =
+                    Arc::new(move |ch, lvl, msg| send_log(&tx_clone, Some(proj_id), None, ch, lvl, msg));
+                if let Some(app) = crate::runtime::process::reattach_app(&container, log_cb).await {
+                    let pid = app.id();
+                    if let Ok(mut map) = exec.processes.lock() {
+                        map.insert(p.id, app);
+                    }
+                    exec.upsert_workload_from_project(&p, Some("running"), p.app_pid.or(pid)).await;
+                    send_log(&ws_tx, Some(p.id), None, "system", "info", &format!("Reconnected to '{}' after Web-Node restart; it kept running", p.name));
+                    return ok_resp(req_id, json!({ "ok": true, "started": false }));
+                }
             }
             // Processes left behind by a previous Web-Node instance may still hold the port, but their
             // stdout/stderr pipes died with that instance (no logs, and many servers fail on the next

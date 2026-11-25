@@ -1,24 +1,26 @@
 # Repo knowledge — WebDep
-Git HEAD at last analysis: 43a6cd9+backups-phase4
+Git HEAD at last analysis: 5bb6ba7
 Schema version: 2
-Last incremental update: 2026-11-21 (owner-facing hardening phases 1-6: upgrades, firewall, account security, maintenance, create perms, IPs, limits)
-Index confidence: file-index re-grepped at 99fe7b1 (38 symbols)
+Last incremental update: 2026-11-26 (v3.0.13-v3.5.2: clean schema, SQLite/legacy removal, env reveal audit, README, editor fix)
+Index confidence: file-index re-grepped at 5bb6ba7 (70 symbols); routes/config/dependencies not re-read (scoped update)
 Stale risk: LOW
 ## Quick Reference
 - What is it? Rust/axum self-hosted deploy panel, single embedded binary. See architecture.md
 - How installed? install.sh (Linux, curl | sudo bash, systemd) / install.ps1 (Windows, irm | iex, logon task); both wrap start.sh/webdep.exe.
 - Where is the VPS-2 join command built? src/cluster/manager.rs (fresh_vps_command).
-- Control DB: zero-config PostgreSQL in data/control-pg (pg_control.rs), migrations/ applied on boot; data/webdep.sqlite imported once (sqlite_import.rs, `_meta.sqlite_imported_at`).
+- Control DB: zero-config PostgreSQL in data/control-pg (pg_control.rs), migrations/0001_schema.sql applied on boot (single clean schema; old installs must reinstall).
 - Module install/uninstall: api/cluster.rs apply_modules_action (local or RPC) -> cluster/modules.rs run_pkg_manager (sudo -n when not root).
 - Remote-node proxying for files/git: api/files.rs proxy_file_op, api/projects/git_ops.rs proxy_git_op.
-- Who can create apps? Admins, or panel powers create_websites/create_services/create_databases (legacy *_manage still works); creator gets owner grant. See flows.md #4.
+- Who can create apps? Admins, or panel powers create_websites/create_services/create_databases; creator gets owner grant. See flows.md #4.
 - Backups of apps (archives, restore, lock, download): src/backups.rs + src/api/projects/backups.rs; control-DB backups/audit/webhooks: src/maintenance.rs (hourly loop in main.rs). Upgrade notes: docs/UPGRADING.md.
 - Per-app IP + CPU/memory limits: api/ports.rs, cluster/node_ips.rs, runtime/limits.rs (Linux cgroups v2 only).
 ## Invariants & Gotchas
 - start.sh on a non-main branch compiles from source (slow, needs Rust) unless WEBDEP_FORCE_RELEASE=1.
 - Workers must run the same branch as Core (manager.rs adds branch flag).
 - Release tarball contains only the binary; .env generated from .env.example by start.sh.
-- systemd unit uses KillMode=process: restarting webdep keeps Postgres/apps alive and reconnects to them.
+- systemd unit uses KillMode=process. On Unix apps run under `webdep --log-relay <run/relay.sock> -- sh -c <cmd>` (runtime/relay.rs): on panel/node boot main.rs resume and node project.resume call reattach first; only apps without a reachable relay (older starts, WEBDEP_LOG_RELAY=0, Windows) are killed and restarted. Relay ignores SIGTERM/HUP/INT (app gets them back), keeps <=1000 undelivered lines in RAM, lingers 120 s after app exit. Process maps hold runtime::AppProcess (id/try_wait/start_kill), not Child.
+- v3.0.12 and older cannot update to v3.0.13+: schema migration replaced (version 1). Updater has no rollback.
+- Secret env values never leave the server except via POST env/reveal (audited). Don't add decrypted values to list endpoints.
 - Non-root installs need RemoveIPC=no (logind), else control Postgres loses shared memory on SSH logout.
 - settings.rs test parses public/js/themes.js rows (`['<id>', `): keep THEME_ROWS format in sync with ALLOWED_THEME_IDS.
 - View entrance animation: animateViewEnter on navigation; per-view stagger only on first fill (hadCards/hadRows) to avoid double animation.
@@ -34,6 +36,7 @@ Stale risk: LOW
 - Restore never merges: it replaces the app's Files root (api/files.rs service_root; a `current` symlink is swapped through its target). env-only backups must never wipe files (restore_files handles it).
 - CPU/memory limits: Linux cgroups v2 (root) and Windows job objects; disk limit is a soft stop checked each minute on this server only.
 ## Changelog
+- 2026-11-26: 5bb6ba7 v3.5.2 — scoped refresh: single schema migration 0001, SQLite import + legacy powers/columns removed, app auth key always random, env reveal endpoint + audit, backup download needs env, editor scroll sync + syntax colours, README rewrite (SVGs), port card/Caddy fixes (v3.5.1).
 - 2026-11-22: backups rebuilt (archives, background build, status, checksum, lock, download, safe restore, remote VPS support, older backups use the safe restore); App Configs tab; Windows CPU/memory limits; icon busy fix.
 - 2026-11-21: 99fe7b1 — phases 1-6: pre-upgrade backup + rollback, private ports + firewall state, reset links/sessions/2FA policy/PoW sign-up, backups/audit paging/webhooks, create perms + owner grant, node IPs + Caddy bind, cgroup limits; migrations 0008-0010.
 - 2026-11-21: feat/user-management at 9031ed4 — accounts/requests/admin panel, per-app grants, port pools, custom modules, icon UI.

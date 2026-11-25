@@ -97,6 +97,17 @@ fn parse_cli_options() -> Result<CliOptions, String> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // `webdep --log-relay <socket> -- <command>`: run as an app's log relay (runtime/relay.rs).
+    if std::env::args().nth(1).as_deref() == Some(crate::runtime::relay::FLAG) {
+        #[cfg(unix)]
+        std::process::exit(crate::runtime::relay::run(std::env::args().collect()).await);
+        #[cfg(not(unix))]
+        {
+            eprintln!("the log relay is only used on Linux");
+            std::process::exit(2);
+        }
+    }
+
     // Isolated apps own their folders (including the git clone), while the panel runs git as another
     // user; without this git refuses with "detected dubious ownership" and every fetch fails.
     std::env::set_var("GIT_CONFIG_COUNT", "1");
@@ -336,11 +347,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         };
 
                         if is_already_running {
-                            // The process outlived the previous panel process (e.g. KillMode=process), but
-                            // its stdout/stderr were pipes into that panel and are now closed: logs are
-                            // lost and many servers fail on their next write (Python's http.server answers
-                            // nothing; Node may crash on EPIPE). Restart it under this panel instead of
-                            // adopting a half-broken process.
+                            // Started through its log relay, the app kept running with its output
+                            // held for us: reconnect and leave it alone.
+                            if resume_runtime.reattach_project(&p).await {
+                                resume_logs.add(
+                                    Some(p.id),
+                                    None,
+                                    "system",
+                                    "info",
+                                    &format!("Reconnected to '{}' after the panel restarted; it kept running", p.name),
+                                );
+                                continue;
+                            }
+                            // Otherwise its stdout/stderr were pipes into the previous panel and are now
+                            // closed: logs are lost and many servers fail on their next write (Python's
+                            // http.server answers nothing; Node may crash on EPIPE). Restart it under this
+                            // panel instead of adopting a half-broken process.
                             let _ = resume_runtime.kill_project_everything(&p).await;
                             resume_logs.add(
                                 Some(p.id),

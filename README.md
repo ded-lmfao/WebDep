@@ -366,6 +366,17 @@ App backups are manual, stay on the server that runs the app, and can be locked 
 
 ---
 
+## 🔁 Apps keep running when the panel restarts (Linux)
+
+On Linux each app is started through a small log relay that holds the app's output. When the panel restarts or updates, apps keep running, and the panel reconnects and picks up the logs where it left off.
+
+- Nothing extra is written to disk. While the panel is away, the relay keeps up to 1,000 lines in memory; older lines are dropped and the log says how many.
+- If the app exits while the panel is away, the relay waits up to 2 minutes so the panel still gets the last lines and the exit code.
+- Apps started by an older version are restarted once after updating, then run through the relay.
+- Set `WEBDEP_LOG_RELAY=0` to start apps without it (they are then restarted whenever the panel restarts). Windows always works that way.
+
+---
+
 ## 🛡️ App isolation (Linux)
 
 Without isolation, deployed code runs as the same user as the panel and could read its data. Isolation is **on by default** when the panel runs as root with util-linux (`unshare`, `setpriv`, `mount`) installed.
@@ -409,6 +420,7 @@ WebDep reads `.env` from its working folder, or normal environment variables.
 | `WEBDEP_SKIP_DB_BACKUP` | `false` | Set `1` to skip the pre-upgrade backup, only if you back up yourself |
 | `WEBDEP_MANAGE_FIREWALL` | `true` | Set `false` to stop WebDep editing UFW and iptables |
 | `WEBDEP_ISOLATE_APPS` | on | Set `0` to turn off [app isolation](#%EF%B8%8F-app-isolation-linux) |
+| `WEBDEP_LOG_RELAY` | on | Set `0` to start apps without the [log relay](#-apps-keep-running-when-the-panel-restarts-linux) |
 | `WEBDEP_APP_UID` / `WEBDEP_APP_GID` | `65534` | User and group for isolated apps |
 | `RUST_LOG` | `webdep=info` | Log level |
 

@@ -10,7 +10,7 @@ use super::container::{
     build_container_env_pure, clear_container_pids_in, link_work_dir_to_container_dir,
     record_container_pid_to, WebsiteContainer,
 };
-use super::Runtime;
+use super::{AppProcess, Runtime};
 
 pub use super::tree::{detect_java_exe, is_pid_alive};
 
@@ -20,7 +20,7 @@ pub async fn spawn_project_process_pure(
     env_vars: HashMap<String, String>,
     release_dir: Option<&Path>,
     log_cb: Arc<dyn Fn(&str, &str, &str) + Send + Sync>,
-) -> Result<(u32, tokio::process::Child, PathBuf, String), String> {
+) -> Result<(u32, AppProcess, PathBuf, String), String> {
     if p.start_cmd.trim().is_empty() {
         return Err("No start command configured for this project".to_string());
     }
@@ -154,15 +154,37 @@ pub async fn spawn_project_process_pure(
         cmd.raw_arg(&final_cmd);
     }
 
+    // Through the log relay (see relay.rs) the app survives a panel restart with its output still
+    // captured; without it the app's output is piped straight into this process.
     #[cfg(unix)]
-    let mut cmd = tokio::process::Command::new("sh");
+    let relay_socket = super::relay::socket_path(&container.run_dir);
+    #[cfg(not(unix))]
+    let relay_socket: Option<PathBuf> = None;
+
     #[cfg(unix)]
-    cmd.args(["-c", &final_cmd]);
+    let mut cmd = match &relay_socket {
+        Some(socket) => {
+            let mut c = tokio::process::Command::new(super::relay::self_exe());
+            c.arg(super::relay::FLAG).arg(socket).args(["--", "sh", "-c", &final_cmd]);
+            c
+        }
+        None => {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", &final_cmd]);
+            c
+        }
+    };
 
     cmd.current_dir(&work_dir);
     cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    if relay_socket.is_some() {
+        // The relay owns the app's pipes; nothing ties it to this process.
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+    } else {
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+    }
     cmd.kill_on_drop(false);
 
     let limits_procs = match crate::runtime::limits::prepare(&format!("app-{}", p.id), p.cpu_limit, p.memory_limit_mb) {
@@ -277,37 +299,32 @@ pub async fn spawn_project_process_pure(
     clear_container_pids_in(container);
     record_container_pid_to(container, pid);
 
-    let run_dir = container.run_dir.clone();
+    let exit_slot: super::relay::ExitSlot = Arc::default();
+    #[cfg(unix)]
+    if let Some(ref socket) = relay_socket {
+        let attached = match super::relay::connect(socket, Duration::from_secs(5)).await {
+            Ok(stream) => super::relay::attach(stream, log_cb.clone(), pid_noter(&container.run_dir), exit_slot.clone()).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = attached {
+            // The relay leads the app's process group: take both down.
+            Runtime::kill_pid_tree(pid).await;
+            let _ = child.start_kill();
+            return Err(format!(
+                "Could not read the app's output through its log relay ({e}). Set WEBDEP_LOG_RELAY=0 in .env to start apps without it."
+            ));
+        }
+    }
+
     if let Some(stdout) = child.stdout.take() {
         let cb = log_cb.clone();
-        let run_dir_clone = run_dir.clone();
+        let note_pid = pid_noter(&container.run_dir);
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 cb("app", "info", &line);
-                if let Some(pos) = line.find("PID") {
-                    let rem = &line[pos + 3..];
-                    let num_str: String = rem
-                        .chars()
-                        .skip_while(|c| !c.is_ascii_digit())
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect();
-                    if let Ok(cpid) = num_str.parse::<u32>() {
-                        if cpid > 1 && cpid != std::process::id() {
-                            let pid_file = run_dir_clone.join("pids.txt");
-                            if let Ok(mut f) = tokio::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&pid_file)
-                                .await
-                            {
-                                use tokio::io::AsyncWriteExt;
-                                let _ = f.write_all(format!("{}\n", cpid).as_bytes()).await;
-                            }
-                        }
-                    }
-                }
+                note_pid(&line);
             }
         });
     }
@@ -354,7 +371,52 @@ pub async fn spawn_project_process_pure(
         }
     }
 
-    Ok((final_pid, child, work_dir, final_cmd))
+    Ok((final_pid, AppProcess::started(child, exit_slot), work_dir, final_cmd))
+}
+
+/// Records a child pid an app prints ("... PID 1234 ...") so stopping it finds that process too.
+fn pid_noter(run_dir: &Path) -> Arc<dyn Fn(&str) + Send + Sync> {
+    let pid_file = run_dir.join("pids.txt");
+    Arc::new(move |line: &str| {
+        let Some(pos) = line.find("PID") else { return };
+        let num_str: String = line[pos + 3..]
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(cpid) = num_str.parse::<u32>() {
+            if cpid > 1 && cpid != std::process::id() {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&pid_file) {
+                    let _ = writeln!(f, "{cpid}");
+                }
+            }
+        }
+    })
+}
+
+/// Reconnects to an app that kept running through a panel restart (its log relay is still
+/// listening). `None` when there is no relay to reach, so the caller starts the app again.
+pub async fn reattach_app(
+    container: &WebsiteContainer,
+    log_cb: super::relay::LogCb,
+) -> Option<AppProcess> {
+    #[cfg(unix)]
+    {
+        let socket = super::relay::socket_path(&container.run_dir)?;
+        if !socket.exists() {
+            return None;
+        }
+        let stream = super::relay::connect(&socket, Duration::from_millis(500)).await.ok()?;
+        let exit: super::relay::ExitSlot = Arc::default();
+        let relay_pid = super::relay::attach(stream, log_cb, pid_noter(&container.run_dir), exit.clone()).await.ok()?;
+        Some(AppProcess::reattached(relay_pid, exit))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (container, log_cb);
+        None
+    }
 }
 
 impl Runtime {
@@ -373,7 +435,7 @@ impl Runtime {
         let container = self.ensure_container(p).await;
         let logs_ref = self.logs.clone();
         let proj_id = p.id;
-        let log_cb: Arc<dyn Fn(&str, &str, &str) + Send + Sync> = Arc::new(move |ch, lvl, msg| {
+        let log_cb: super::relay::LogCb = Arc::new(move |ch, lvl, msg| {
             logs_ref.add(Some(proj_id), None, ch, lvl, msg);
         });
 
@@ -429,6 +491,26 @@ impl Runtime {
     }
 
 
+
+    /// After a panel restart: reconnects to the app if it kept running under its log relay, and
+    /// tracks it again as if this panel had started it. `false` means it has to be started.
+    pub async fn reattach_project(&self, p: &Project) -> bool {
+        let proj_lock = self.get_project_lock(p.id);
+        let _guard = proj_lock.lock().await;
+        let container = self.ensure_container(p).await;
+        let logs_ref = self.logs.clone();
+        let proj_id = p.id;
+        let log_cb: Arc<dyn Fn(&str, &str, &str) + Send + Sync> = Arc::new(move |ch, lvl, msg| {
+            logs_ref.add(Some(proj_id), None, ch, lvl, msg);
+        });
+        let Some(app) = reattach_app(&container, log_cb).await else {
+            return false;
+        };
+        if let Ok(mut map) = self.processes.lock() {
+            map.insert(p.id, app);
+        }
+        true
+    }
 
     pub(crate) async fn mark_project_stopped(&self, project_id: i64) {
         let _ = sqlx::query(
