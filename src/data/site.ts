@@ -32,7 +32,7 @@ export const FEATURES: Feature[] = [
   {
     icon: Boxes,
     title: "Websites & services",
-    text: "Node, Python, Go, Rust, Java, PHP and static sites, plus 24/7 workers and bots.",
+    text: "Node, Python, Go, Rust, Java, PHP and static sites, plus always-on backend services and workers.",
   },
   {
     icon: Database,
