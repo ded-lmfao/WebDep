@@ -416,7 +416,7 @@ mod tests {
     use super::*;
 
     fn user_with(grants: Grants) -> User {
-        let mut u = User::from_db(7, "lead".into(), 0, "[]".into(), "[]".into(), 0, 0);
+        let mut u = User::from_db(7, "lead".into(), false, false, 0);
         u.grants = grants;
         u
     }
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn candidate_search_hides_emails_from_delegates() {
-        let mut u = User::from_db(9, "priya".into(), 0, "[]".into(), "[]".into(), 0, 0);
+        let mut u = User::from_db(9, "priya".into(), false, false, 0);
         u.display_name = "Priya Nair".into();
         u.email = "priya@acme.io".into();
         assert_eq!(candidate_match(&u, "nair", false), Some(None), "name match, email hidden");

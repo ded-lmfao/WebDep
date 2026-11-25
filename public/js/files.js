@@ -7,7 +7,7 @@ import { DEVICONS, icon } from './icons.js';
 import { state, escapeHtml, showConfirmDialog, showPromptDialog, getFilesEntityContext } from './state.js';
 import { api, toast } from './api.js';
 
-// Re-export editor submodule so imports from './files.js' remain 100% compatible
+// Re-export the submodule through this module
 export * from './files_editor.js';
 
 import { filesCloseEditor, filesOpen } from './files_editor.js';

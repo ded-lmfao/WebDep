@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::grants::{parse_legacy_permissions, parse_legacy_projects, Grants};
+use super::grants::Grants;
 
 fn default_presence() -> String {
     "offline".to_string()
@@ -11,11 +11,6 @@ pub struct User {
     pub id: i64,
     pub username: String,
     pub disabled: bool,
-    pub permissions: Vec<String>,
-    #[serde(rename = "allowedProjects")]
-    pub allowed_projects: Vec<i64>,
-    #[serde(rename = "allProjects")]
-    pub all_projects: bool,
     #[serde(rename = "isMainAdmin")]
     pub is_main_admin: bool,
     #[serde(rename = "totpEnabled")]
@@ -46,38 +41,18 @@ fn default_role() -> String {
 }
 
 /// Column list every user query selects, in the order `from_pg_row` reads.
-pub const USER_COLUMNS: &str = "id, username, disabled, permissions, allowed_projects, COALESCE(totp_enabled, FALSE), created_at,      COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), COALESCE(must_change_password, FALSE), last_login_at";
+pub const USER_COLUMNS: &str = "id, username, disabled, COALESCE(totp_enabled, FALSE), created_at, COALESCE(email, ''), COALESCE(display_name, ''), COALESCE(role, 'user'), COALESCE(must_change_password, FALSE), last_login_at";
 
 impl User {
-    pub fn from_db(
-        id: i64,
-        username: String,
-        disabled_int: i64,
-        perms_json: String,
-        proj_json: String,
-        totp_enabled_int: i64,
-        created_at: i64,
-    ) -> Self {
+    pub fn from_db(id: i64, username: String, disabled: bool, totp_enabled: bool, created_at: i64) -> Self {
         let is_main_admin = Self::is_main_admin_identity(id, &username);
-        let disabled = !is_main_admin && disabled_int != 0;
-
-        // Legacy columns are kept only for display in the current user editor.
-        let (permissions, all_projects, allowed_projects) = if is_main_admin {
-            (vec!["*".to_string()], true, Vec::new())
-        } else {
-            let (all, ids) = parse_legacy_projects(&proj_json);
-            (parse_legacy_permissions(&perms_json), all, ids)
-        };
 
         Self {
             id,
             username,
-            disabled,
-            permissions,
-            allowed_projects,
-            all_projects,
+            disabled: !is_main_admin && disabled,
             is_main_admin,
-            totp_enabled: totp_enabled_int != 0,
+            totp_enabled,
             presence: default_presence(),
             created_at,
             email: String::new(),
@@ -92,26 +67,22 @@ impl User {
 
     pub fn from_pg_row(r: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
-        let disabled_bool: bool = r.try_get::<Option<bool>, _>(2)?.unwrap_or(false);
-        let totp_bool: bool = r.try_get::<Option<bool>, _>(5)?.unwrap_or(false);
         let mut u = Self::from_db(
             r.try_get(0)?,
             r.try_get(1)?,
-            if disabled_bool { 1 } else { 0 },
-            r.try_get::<Option<String>, _>(3)?.unwrap_or_else(|| "[\"*\"]".into()),
-            r.try_get::<Option<String>, _>(4)?.unwrap_or_else(|| "[\"*\"]".into()),
-            if totp_bool { 1 } else { 0 },
-            r.try_get(6)?,
+            r.try_get::<Option<bool>, _>(2)?.unwrap_or(false),
+            r.try_get::<Option<bool>, _>(3)?.unwrap_or(false),
+            r.try_get(4)?,
         );
-        u.email = r.try_get(7)?;
-        u.display_name = r.try_get(8)?;
-        let role: String = r.try_get(9)?;
+        u.email = r.try_get(5)?;
+        u.display_name = r.try_get(6)?;
+        let role: String = r.try_get(7)?;
         if !u.is_main_admin {
             u.is_admin = role == "admin";
             u.role = role;
         }
-        u.must_change_password = !u.is_main_admin && r.try_get::<bool, _>(10)?;
-        u.last_login_at = r.try_get(11)?;
+        u.must_change_password = !u.is_main_admin && r.try_get::<bool, _>(8)?;
+        u.last_login_at = r.try_get(9)?;
         Ok(u)
     }
 
@@ -156,24 +127,14 @@ impl User {
 mod tests {
     use super::User;
 
-    fn sample_user(id: i64, username: &str, perms_json: &str, proj_json: &str) -> User {
-        let perms = crate::auth::grants::parse_legacy_permissions(perms_json);
-        let (all, ids) = crate::auth::grants::parse_legacy_projects(proj_json);
-        User::from_db(
-            id,
-            username.to_string(),
-            0,
-            perms_json.to_string(),
-            proj_json.to_string(),
-            0,
-            1_700_000_000,
-        )
-        .with_grants(crate::auth::grants::Grants::from_legacy(&perms, all, &ids))
+    fn sample_user(id: i64, username: &str, powers: &[&str], projects: &[i64]) -> User {
+        User::from_db(id, username.to_string(), false, false, 1_700_000_000)
+            .with_grants(crate::auth::grants::Grants::fixture(powers, Some(projects)))
     }
 
     #[test]
     fn test_main_admin_has_all_powers_and_projects() {
-        let admin = sample_user(1, "admin", "[]", "[]");
+        let admin = sample_user(1, "admin", &[], &[]);
         assert!(admin.is_main_admin);
         assert!(admin.has_power("settings_manage"));
         assert!(admin.has_any_power(&["databases", "databases_manage"]));
@@ -182,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_granular_powers_and_project_scoping() {
-        let dev = sample_user(2, "dev", r#"["deploy","files","services_manage"]"#, r#"[10, 20]"#);
+        let dev = sample_user(2, "dev", &["deploy", "files", "services_manage"], &[10, 20]);
         assert!(!dev.is_main_admin);
         assert!(dev.has_power("deploy"));
         assert!(dev.has_power("files"));
@@ -200,7 +161,7 @@ mod tests {
 
     #[test]
     fn test_users_without_loaded_grants_have_no_access() {
-        let u = User::from_db(5, "viewer".into(), 0, r#"["*"]"#.into(), r#"["*"]"#.into(), 0, 0);
+        let u = User::from_db(5, "viewer".into(), false, false, 0);
         assert!(!u.has_power("deploy"));
         assert!(!u.can_access_project(1));
     }

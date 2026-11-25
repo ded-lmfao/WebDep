@@ -44,18 +44,13 @@ const LABELS = {
   create_websites: 'Create websites',
   create_services: 'Create services',
   create_databases: 'Create databases',
-  settings_manage: 'Platform settings (earlier)',
-  system_manage: 'System and updates (earlier)',
-  audit: 'Panel audit log (earlier)',
-  monitor: 'Monitoring (earlier)',
-  nodes_manage: 'Nodes (earlier)',
 };
 
 export function powerLabel(power, kind = '') {
   if (power === 'env' && (kind === 'database' || kind === 'all-databases')) return 'See connection details';
   if (power === 'services_manage' && kind === 'all-projects') return 'Edit service settings';
   if (power === 'projects_manage' && kind === 'all-projects') return 'Edit website settings';
-  return LABELS[power] || `${String(power).replace(/_/g, ' ')} (earlier)`;
+  return LABELS[power] || String(power).replace(/_/g, ' ');
 }
 
 export function isAdmin() {
@@ -133,8 +128,7 @@ export function hasAnyPower(powers, scope) {
 /** Whether the user may create apps of `kind` (`website`, `service`, `database`). */
 export function canCreate(kind) {
   const create = { website: 'create_websites', service: 'create_services', database: 'create_databases' }[kind];
-  const earlier = { website: 'projects_manage', service: 'services_manage', database: 'databases_manage' }[kind];
-  return hasPanelPower(create) || hasPanelPower(earlier);
+  return hasPanelPower(create);
 }
 
 export function databaseScope(db) {

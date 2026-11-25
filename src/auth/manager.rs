@@ -365,8 +365,8 @@ impl Auth {
         } else if let Ok(hashed) = hash_password(&env_pass) {
             let now = Self::now_millis() as i64;
             let _ = sqlx::query(
-                "INSERT INTO users(id, username, password_hash, disabled, permissions, allowed_projects, created_at)
-                 VALUES(1, $1, $2, FALSE, '[\"*\"]', '[\"*\"]', $3)
+                "INSERT INTO users(id, username, password_hash, disabled, created_at)
+                 VALUES(1, $1, $2, FALSE, $3)
                  ON CONFLICT(id) DO NOTHING",
             )
             .bind(&env_user)
@@ -453,7 +453,7 @@ impl Auth {
         .flatten()?;
 
         let user = User::from_pg_row(&row).ok()?;
-        let hash: String = row.try_get(12).ok()?;
+        let hash: String = row.try_get("password_hash").ok()?;
         Some((user, hash))
     }
 

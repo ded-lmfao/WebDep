@@ -14,30 +14,14 @@ pub fn now() -> i64 {
         .as_millis() as i64
 }
 
-/// Opens (or auto-bootstraps) the control-plane PostgreSQL database, runs SQL migrations,
-/// automatically imports `data/webdep.sqlite` on first PostgreSQL boot if present, and
-/// runs startup hygiene.
+/// Opens (or auto-bootstraps) the control-plane PostgreSQL database, runs SQL migrations
+/// and startup hygiene.
 pub async fn open_db(
     data_dir: &Path,
 ) -> Result<(DbPool, Option<ControlPgHandle>), Box<dyn std::error::Error + Send + Sync>> {
     tokio::fs::create_dir_all(data_dir).await?;
 
     let (pool, handle) = pg_control::ensure_control_pg_pool(data_dir).await?;
-
-    let sqlite_path = data_dir.join("webdep.sqlite");
-    // Booting with an empty control DB after a failed import would look like data loss and
-    // invite a fresh admin signup, which then blocks the auto-import forever. Stop instead.
-    // The SQLite file is opened read-only and the import is one transaction, so retrying is safe.
-    if let Err(e) = crate::sqlite_import::import_sqlite_if_needed(&pool, &sqlite_path).await {
-        return Err(format!(
-            "Importing the previous WebDep database ({}) into PostgreSQL failed: {}. \
-             Nothing was changed; the SQLite file is untouched. Fix the cause and restart, \
-             or retry manually with `webdep --import-sqlite`.",
-            sqlite_path.display(),
-            e
-        )
-        .into());
-    }
 
     seed_github_token(&pool).await;
     ensure_project_deploy_dirs(&pool).await;
@@ -241,17 +225,10 @@ pub async fn allocate_global_unique_port(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
 
     #[tokio::test]
     async fn test_pg_schema_and_settings_seeded() {
         let pool = crate::pg_control::test_db::isolated_pool().await;
-
-        let version: String = sqlx::query_scalar("SELECT value FROM _meta WHERE key = 'schema_version'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(version, "4");
 
         let min_free: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'min_free_mb'")
             .fetch_one(&pool)
@@ -293,105 +270,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sqlite_import_migrates_legacy_db_and_resets_sequences() {
-        let temp_dir = std::env::temp_dir().join(format!("webdep-import-test-{}", now()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let sqlite_path = temp_dir.join("webdep.sqlite");
-
-        {
-            let legacy = Connection::open(&sqlite_path).unwrap();
-            legacy
-                .execute_batch(
-                    "
-                    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                    CREATE TABLE users (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        username TEXT NOT NULL UNIQUE,
-                        password_hash TEXT NOT NULL,
-                        disabled INTEGER NOT NULL DEFAULT 0,
-                        permissions TEXT NOT NULL DEFAULT '[\"*\"]',
-                        allowed_projects TEXT NOT NULL DEFAULT '[\"*\"]',
-                        totp_secret TEXT,
-                        totp_pending_secret TEXT,
-                        totp_enabled INTEGER NOT NULL DEFAULT 0,
-                        totp_backup_codes TEXT NOT NULL DEFAULT '[]',
-                        created_at INTEGER NOT NULL
-                    );
-                    CREATE TABLE sessions (
-                        id TEXT PRIMARY KEY,
-                        user_id INTEGER NOT NULL,
-                        expires_at INTEGER NOT NULL,
-                        csrf_token TEXT NOT NULL
-                    );
-                    CREATE TABLE projects (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT NOT NULL,
-                        slug TEXT NOT NULL UNIQUE,
-                        repo_url TEXT NOT NULL,
-                        branch TEXT NOT NULL DEFAULT 'main',
-                        project_type TEXT NOT NULL DEFAULT 'node',
-                        deploy_method TEXT NOT NULL DEFAULT 'managed',
-                        deploy_dir TEXT NOT NULL,
-                        port INTEGER,
-                        install_cmd TEXT DEFAULT '',
-                        build_cmd TEXT DEFAULT '',
-                        start_cmd TEXT DEFAULT '',
-                        health_url TEXT DEFAULT '',
-                        health_timeout_s INTEGER NOT NULL DEFAULT 30,
-                        stability_s INTEGER NOT NULL DEFAULT 5,
-                        auto_deploy INTEGER NOT NULL DEFAULT 0,
-                        webhook_secret TEXT,
-                        current_release_id INTEGER,
-                        deployed_sha TEXT,
-                        last_poll_at INTEGER,
-                        app_status TEXT NOT NULL DEFAULT 'stopped',
-                        app_pid INTEGER,
-                        app_started_at INTEGER,
-                        domains TEXT NOT NULL DEFAULT '[]',
-                        ssl_email TEXT DEFAULT '',
-                        project_kind TEXT NOT NULL DEFAULT 'web',
-                        access_mode TEXT NOT NULL DEFAULT 'local',
-                        allowed_ips TEXT NOT NULL DEFAULT '',
-                        created_at INTEGER NOT NULL,
-                        updated_at INTEGER NOT NULL
-                    );
-                    INSERT INTO settings(key, value) VALUES('panel_name', 'LegacyVPS');
-                    INSERT INTO users(id, username, password_hash, created_at) VALUES(5, 'owner', 'hash123', 1000);
-                    INSERT INTO sessions(id, user_id, expires_at, csrf_token) VALUES('sid-old', 5, 9999999999, 'csrf-old');
-                    INSERT INTO projects(id, name, slug, repo_url, deploy_dir, created_at, updated_at)
-                    VALUES(7, 'MyApp', 'myapp', 'https://example.com/app.git', '/tmp/myapp', 1000, 1000);
-                    ",
-                )
-                .unwrap();
-        }
-
-        let pool = crate::pg_control::test_db::isolated_pool().await;
-        let report = crate::sqlite_import::import_sqlite_if_needed(&pool, &sqlite_path)
-            .await
-            .unwrap();
-        assert!(report.imported);
-        assert_eq!(report.users, 1);
-        assert_eq!(report.projects, 1);
-        assert_eq!(report.sessions, 1);
-
-        let next_uid: i64 = sqlx::query_scalar(
-            "INSERT INTO users(username, password_hash, created_at) VALUES('second', 'h2', 2000) RETURNING id",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(next_uid > 5, "expected sequence > 5, got {}", next_uid);
-
-        let report2 = crate::sqlite_import::import_sqlite_if_needed(&pool, &sqlite_path)
-            .await
-            .unwrap();
-        assert!(!report2.imported);
-
-        pool.close().await;
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[tokio::test]
     async fn test_zero_config_control_pg_lifecycle() {
         let temp_dir = std::env::temp_dir().join(format!("webdep-ctrlpg-{}", now()));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -404,12 +282,6 @@ mod tests {
             .await
             .expect("zero-config local control-pg should initialize and boot");
         let handle = handle.expect("expected ControlPgHandle");
-
-        let version: String = sqlx::query_scalar("SELECT value FROM _meta WHERE key = 'schema_version'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(version, "4");
         pool.close().await;
 
         let (pool2, handle2) = crate::pg_control::ensure_local_pg_with_port(&temp_dir, Some(test_port))

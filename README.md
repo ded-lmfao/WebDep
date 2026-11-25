@@ -9,7 +9,7 @@
 
 **WebDep** is a self-contained hosting, deployment, and multi-server fleet orchestrator compiled into a **single static binary** with embedded frontend assets (`rust-embed`). It combines an async control plane (**Web-Core**), lightweight worker agents (**Web-Node**), Git deployment pipelines, automated Caddy HTTPS, live SSE telemetry, an AES-256-GCM encrypted `.env` vault, managed PostgreSQL clusters, and direct node-to-node live app shifting—without Docker or external orchestration clutter.
 
-On first boot, **Web-Core** automatically initializes a zero-config control PostgreSQL cluster (`data/control-pg/` on port `5431`, or the next free port below it; or your external `DATABASE_URL`). Upgrading from WebDep 2.x? The old `data/webdep.sqlite` is imported once, automatically — see [Upgrading from 2.x](#upgrading-from-2x-sqlite--postgresql). **Web-Node** workers require **zero PostgreSQL**—they connect outbound to Web-Core over WebSocket and store only their local manifest in `data/node-state.json`.
+On first boot, **Web-Core** automatically initializes a zero-config control PostgreSQL cluster (`data/control-pg/` on port `5431`, or the next free port below it; or your external `DATABASE_URL`). **Web-Node** workers require **zero PostgreSQL**—they connect outbound to Web-Core over WebSocket and store only their local manifest in `data/node-state.json`.
 
 ---
 
@@ -150,7 +150,7 @@ sudo ./start.sh --service --core
 #### Upgrading Your Fleet Later
 
 - **From the panel:** Go to **Nodes** and click **`Update Fleet`** to upgrade connected remote Web-Nodes first, then Web-Core.
-- **From SSH:** Run `./start.sh --update` (legacy single `webdep.service` installs are automatically migrated to `webdep-core` + `webdep-node`).
+- **From SSH:** Run `./start.sh --update`.
 
 ---
 
@@ -305,21 +305,7 @@ Do not copy these folders while PostgreSQL is running; use panel backups or stop
 
 ### Upgrading and rolling back
 
-WebDep backs up its control database before every upgrade that changes it. See [docs/UPGRADING.md](docs/UPGRADING.md) for what each release changes, how the backup works, and how to roll back.
-
-### Upgrading from 2.x (SQLite → PostgreSQL)
-
-On the first 3.x start, Web-Core imports `data/webdep.sqlite` into PostgreSQL in a single transaction (the SQLite file is opened read-only). If the import fails, WebDep stops without changing anything; fix the cause and restart, or retry with `webdep --import-sqlite`. It never imports twice.
-
-To confirm the import and retire the old file, compare row counts on the server (from the install folder):
-
-```bash
-C=data/control-pg/conn.json
-PGPASSWORD=$(python3 -c "import json;print(json.load(open('$C'))['password'])") psql -h 127.0.0.1   -p $(python3 -c "import json;print(json.load(open('$C'))['port'])") -U webdep_core -d webdep_core   -c "SELECT (SELECT count(*) FROM users) users, (SELECT count(*) FROM projects) projects, (SELECT count(*) FROM databases) dbs, (SELECT count(*) FROM deployments) deployments;"
-python3 -c "import sqlite3; c=sqlite3.connect('file:data/webdep.sqlite?mode=ro', uri=True); print({t: c.execute(f'select count(*) from {t}').fetchone()[0] for t in ['users','projects','databases','deployments']})"
-```
-
-When PostgreSQL shows at least the SQLite numbers, move `data/webdep.sqlite*` out of `data/`, restart and check the panel, then delete the old files.
+WebDep backs up its control database before every upgrade that changes it. See [docs/UPGRADING.md](docs/UPGRADING.md) for how the backup works and how to roll back, and [docs/GUIDE.md](docs/GUIDE.md) for how accounts, limits and backups behave.
 
 ### Running as a Non-Root User (Ubuntu)
 

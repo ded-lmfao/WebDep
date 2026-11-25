@@ -18,7 +18,6 @@ mod monitor_net;
 mod pg_control;
 mod projects;
 mod runtime;
-mod sqlite_import;
 mod static_assets;
 mod updater;
 mod vault;
@@ -138,22 +137,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config::from_env();
     let cli = parse_cli_options().map_err(|e| format!("CLI error: {e}"))?;
 
-    if std::env::args().nth(1).as_deref() == Some("--import-sqlite") {
-        let sqlite_path = std::env::args()
-            .nth(2)
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| config.data_dir.join("webdep.sqlite"));
-        let overwrite = std::env::args().any(|a| a == "--overwrite");
-        let (db, handle) = open_db(&config.data_dir).await?;
-        let report =
-            crate::sqlite_import::import_sqlite_into_postgres(&db, &sqlite_path, overwrite).await?;
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        if let Some(h) = handle {
-            h.stop().await;
-        }
-        return Ok(());
-    }
-
     // Pure Web-Node worker mode: zero PostgreSQL dependency, stores state in data/node-state.json
     if cli.node_mode {
         info!("Starting WebDep in Web-Node worker mode");
@@ -203,19 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     auth_mgr.force_secure_cookies = config.force_secure_cookies;
     let auth = Arc::new(auth_mgr);
     auth.ensure_admin().await;
-    match crate::auth::grants::migrate_legacy_once(&db).await {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("Converted legacy permissions of {} user(s) into access grants", n),
-        // Fail closed but keep serving: non-admin users get no access until the next
-        // successful boot retries the conversion; the main admin is unaffected.
-        Err(e) => tracing::error!("Failed to convert legacy permissions into access grants (will retry next start): {e}"),
-    }
     crate::auth::policy::reload(&db).await;
-    match crate::auth::grants::grant_legacy_delete_once(&db).await {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("Carried the app delete right over to {n} access grant(s)"),
-        Err(e) => tracing::error!("Could not carry over the app delete right (will retry next start): {e}"),
-    }
     auth.start_revocation_listener();
     let projects = Arc::new(Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(Logs::new(db.clone()));

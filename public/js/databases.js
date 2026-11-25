@@ -18,7 +18,7 @@ import { api, toast } from './api.js';
 import { renderPipelineStages } from './deployments.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
 
-// Re-export database modals submodule for 100% backward compatibility
+// Re-export the submodule through this module
 export * from './databases_modal.js';
 export { DB_PIPELINE_STAGES };
 

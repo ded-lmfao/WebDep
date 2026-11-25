@@ -42,11 +42,19 @@ pub async fn reload(db: &DbPool) {
 
 /// Whether the policy requires two-factor authentication for this user.
 pub fn two_factor_required_for(is_admin: bool) -> bool {
-    match REQUIRE_2FA.load(Ordering::Relaxed) {
+    match current() {
         EVERYONE => true,
         ADMINS => is_admin,
         _ => false,
     }
+}
+
+fn current() -> u8 {
+    #[cfg(test)]
+    if let Some(forced) = TEST_OVERRIDE.get() {
+        return forced;
+    }
+    REQUIRE_2FA.load(Ordering::Relaxed)
 }
 
 /// Whether this user must set up two-factor authentication before using the panel.
@@ -55,8 +63,14 @@ pub fn needs_two_factor_setup(user: &super::User) -> bool {
 }
 
 #[cfg(test)]
+thread_local! {
+    static TEST_OVERRIDE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+}
+
+/// Forces the policy for the calling test only: tests run in parallel on their own threads.
+#[cfg(test)]
 pub fn set_for_test(raw: &str) {
-    REQUIRE_2FA.store(parse_require_2fa(raw), Ordering::Relaxed);
+    TEST_OVERRIDE.set(Some(parse_require_2fa(raw)));
 }
 
 #[cfg(test)]

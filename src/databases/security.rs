@@ -95,7 +95,7 @@ const TCP_ONLY_SETTING: &str = "unix_socket_directories = ''";
 /// WebDep connects to every PostgreSQL it runs over TCP (127.0.0.1), so turn off the Unix socket.
 /// Its default folder (e.g. /var/run/postgresql) belongs to the `postgres` user, and a server
 /// started as any other user dies with "could not create lock file ... Permission denied".
-/// Idempotent; run before each start so clusters created by older versions get it too.
+/// Idempotent; run before each start.
 pub async fn ensure_tcp_only_pg_conf(pgdata_dir: &Path) {
     let conf_path = pgdata_dir.join("postgresql.conf");
     let Ok(existing) = tokio::fs::read_to_string(&conf_path).await else {

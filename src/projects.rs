@@ -263,6 +263,7 @@ impl Projects {
         Ok(())
     }
 
+    /// The variable list as shown in the panel: secret values are masked and never leave here.
     pub async fn get_env_vars(&self, project_id: i64) -> Result<Vec<EnvVarView>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT key, value_enc, is_secret FROM project_env WHERE project_id = $1 ORDER BY key ASC",
@@ -276,18 +277,12 @@ impl Projects {
             let key: String = r.try_get(0)?;
             let val_enc: String = r.try_get(1)?;
             let is_secret: bool = r.try_get(2)?;
-            let decrypted = self.vault.decrypt(&val_enc).unwrap_or_default();
             let value = if is_secret {
                 "********".to_string()
             } else {
-                decrypted.clone()
+                self.vault.decrypt(&val_enc).unwrap_or_default()
             };
-            res.push(EnvVarView {
-                key,
-                value,
-                real_value: decrypted,
-                is_secret,
-            });
+            res.push(EnvVarView { key, value, is_secret });
         }
         Ok(res)
     }

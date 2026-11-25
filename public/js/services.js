@@ -9,7 +9,7 @@ import { loadProjects } from './websites.js';
 import { openWebsiteWorkspace } from './workspace.js';
 import { consumePendingViewStagger, staggerElements } from './motion_ui.js';
 
-// Re-export modal submodule so consumers have full backward compatibility
+// Re-export the submodule through this module
 export * from './services_modal.js';
 
 export async function loadServicesView() {

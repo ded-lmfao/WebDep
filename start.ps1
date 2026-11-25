@@ -47,7 +47,6 @@ Stop-Process -Name "webdep*" -Force -ErrorAction SilentlyContinue
 Get-NetTCPConnection -LocalPort 4600 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
 
 Write-Host "[*] Starting WebDep server on $url" -ForegroundColor Green
-Write-Host "[*] SQLite Database: data\webdep.sqlite" -ForegroundColor Cyan
 Write-Host "[*] Admin credentials are stored in .env (ADMIN_USERNAME / ADMIN_PASSWORD)." -ForegroundColor Yellow
 Write-Host "    (On first boot, a random password is generated in .env and logged once.)" -ForegroundColor Gray
 Write-Host ""

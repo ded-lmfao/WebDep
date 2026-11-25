@@ -369,7 +369,7 @@ pub(crate) async fn audit_handler(
         .await?;
         (user, Some(db))
     } else {
-        // Per-app activity: the app's `activity` power (or legacy `audit`); the panel-wide
+        // Per-app activity: the app's `activity` power (or `audit`); the panel-wide
         // feed still needs panel-level `audit`.
         let powers: &[&str] = if q.project_id.is_some() { &["activity", "audit"] } else { &["audit"] };
         (verify_any_power(&state, &headers, powers, q.project_id).await?, None)

@@ -7,7 +7,7 @@ use super::Runtime;
 impl Runtime {
 
     /// Background task to continuously supervise long-running processes (services, bots, servers)
-    /// and immediately mark them stopped in SQLite and log warnings when they exit or crash.
+    /// and immediately mark them stopped in the database and log warnings when they exit or crash.
     /// When `projects` is given, apps that exit on their own
     /// (crash, OOM kill, `kill -9`) are restarted with backoff: up to `CRASH_RESTART_LIMIT` times per
     /// `CRASH_RESTART_WINDOW`, then left stopped. User stops remove the process from the map first,

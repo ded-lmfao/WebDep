@@ -116,8 +116,6 @@ pub fn default_placement_version() -> i64 { 1 }
 pub struct EnvVarView {
     pub key: String,
     pub value: String,
-    #[serde(default)]
-    pub real_value: String,
     pub is_secret: bool,
 }
 

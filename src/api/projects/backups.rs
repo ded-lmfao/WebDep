@@ -43,7 +43,7 @@ pub(crate) struct BackupItem {
     pub created_by: String,
     #[serde(rename = "completedAt")]
     pub completed_at: i64,
-    /// `archive` (single .tar.gz) or `legacy` (folder copy from earlier versions).
+    /// `archive` (single .tar.gz) or `folder` (the copy kept on Web-Core).
     pub format: String,
 }
 
@@ -122,7 +122,7 @@ pub(crate) async fn list_backups_handler(
                 locked: r.get(14),
                 created_by: r.get(15),
                 completed_at: r.get(16),
-                format: if archive_path.is_empty() { "legacy" } else { "archive" }.to_string(),
+                format: if archive_path.is_empty() { "folder" } else { "archive" }.to_string(),
             }
         })
         .collect();
@@ -190,7 +190,7 @@ pub(crate) async fn create_backup_handler(
     let source_node_id = p.node_id.or(state.cluster.default_local_node_id().await);
 
     // Apps on this server are backed up as one archive, built in the background. (A request for
-    // an off-node copy keeps the earlier synchronous flow, which returns the finished copy.)
+    // an off-node copy runs synchronously and returns the finished folder copy.)
     if !payload.off_node {
         return create_archive_backup(&state, &actor, &p, note, kind, &payload.ignore, remote_nid).await;
     }
@@ -981,7 +981,7 @@ impl BackupRow {
 }
 
 /// Starts restoring a backup in place and returns at once; progress is reported by
-/// `GET /api/projects/:id/backups/restore-status`. Works for archive and earlier folder backups,
+/// `GET /api/projects/:id/backups/restore-status`. Works for archive and folder backups,
 /// for apps on this server and on other VPSes.
 async fn start_restore(
     state: &AppState,
@@ -1250,6 +1250,8 @@ pub(crate) async fn download_backup_handler(
     AxPath((id, backup_id)): AxPath<(i64, i64)>,
 ) -> Result<Response, (StatusCode, String)> {
     let actor = verify_power(&state, &headers, "backups", Some(id)).await?;
+    // The archive holds the app's environment variables, secrets included.
+    verify_power(&state, &headers, "env", Some(id)).await?;
     let row = sqlx::query("SELECT archive_path, status FROM backups WHERE id = $1 AND project_id = $2")
         .bind(backup_id)
         .bind(id)

@@ -1147,7 +1147,6 @@ fn append_dir_to_zip(
 pub fn pack_project_shift_to_zip(
     deploy_dir: &Path,
     container_dir: Option<&Path>,
-    legacy_app_data_dir: Option<&Path>,
     dest_zip: &Path,
 ) -> Result<(u64, u64), String> {
     let mut writer = ZipArchiveWriter::create(dest_zip)?;
@@ -1206,7 +1205,6 @@ pub fn pack_project_shift_to_zip(
         }
     }
 
-    let mut packed_container_db = false;
     if let Some(cdir) = container_dir {
         if cdir.is_dir() {
             writer.write_dir("__webdep_container__", 0o755, 0)?;
@@ -1217,32 +1215,6 @@ pub fn pack_project_shift_to_zip(
                 cdir,
                 &["tmp", "run", "cache", "container.json", ".git"],
             )?;
-            if cdir.join("db").is_dir() {
-                packed_container_db = fs::read_dir(cdir.join("db"))
-                    .map(|mut rd| rd.next().is_some())
-                    .unwrap_or(false);
-            }
-        }
-    }
-
-    if !packed_container_db {
-        if let Some(ldir) = legacy_app_data_dir {
-            if ldir.is_dir() {
-                let has_entries = fs::read_dir(ldir)
-                    .map(|mut rd| rd.next().is_some())
-                    .unwrap_or(false);
-                if has_entries {
-                    writer.write_dir("__webdep_container__", 0o755, 0)?;
-                    writer.write_dir("__webdep_container__/db", 0o755, 0)?;
-                    append_dir_to_zip(
-                        &mut writer,
-                        ldir,
-                        "__webdep_container__/db",
-                        ldir,
-                        &[".git"],
-                    )?;
-                }
-            }
         }
     }
 
@@ -1751,7 +1723,7 @@ mod tests {
         fs::write(src_container.join("tmp/scratch.tmp"), b"skip-tmp").unwrap();
 
         let (zip_bytes, raw_bytes) =
-            pack_project_shift_to_zip(&src_deploy, Some(&src_container), None, &zip_path).unwrap();
+            pack_project_shift_to_zip(&src_deploy, Some(&src_container), &zip_path).unwrap();
         assert!(zip_bytes > 0);
         assert!(raw_bytes > 40);
 

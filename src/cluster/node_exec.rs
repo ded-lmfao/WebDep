@@ -1706,14 +1706,12 @@ pub async fn execute_rpc(
             let deploy_dir = resolve_source_deploy_dir(&exec.data_dir, &p);
             let safe_slug = sanitize_project_folder(&p.slug, p.id);
             let container_dir = exec.data_dir.join("containers").join(&safe_slug);
-            let legacy_app_data_dir = exec.data_dir.join("app-data").join(&safe_slug);
             let zip_pack = tmp_zip.clone();
 
             let pack_res = tokio::task::spawn_blocking(move || {
                 pack_project_shift_to_zip(
                     &deploy_dir,
                     Some(&container_dir),
-                    Some(&legacy_app_data_dir),
                     &zip_pack,
                 )
             })
@@ -2805,27 +2803,6 @@ fn install_shift_unpacked_tree(
         let _ = std::fs::remove_dir_all(&container_stage);
     }
 
-    // Legacy compatibility: older archives may carry containers/<slug> under unpacked root
-    let legacy_container_stage = unpacked_dir.join("containers").join(&safe_slug);
-    if legacy_container_stage.is_dir() {
-        let target_container_dir = data_dir.join("containers").join(&safe_slug);
-        std::fs::create_dir_all(&target_container_dir)
-            .map_err(|e| format!("Failed creating legacy container dir: {e}"))?;
-        for entry in std::fs::read_dir(&legacy_container_stage)
-            .map_err(|e| format!("Failed listing legacy container dir: {e}"))?
-            .flatten()
-        {
-            let dst = target_container_dir.join(entry.file_name());
-            replace_path_from_stage(&entry.path(), &dst)?;
-        }
-        let _ = std::fs::remove_dir_all(&legacy_container_stage);
-        if let Ok(mut rem) = std::fs::read_dir(unpacked_dir.join("containers")) {
-            if rem.next().is_none() {
-                let _ = std::fs::remove_dir(unpacked_dir.join("containers"));
-            }
-        }
-    }
-
     std::fs::create_dir_all(dest_dir)
         .map_err(|e| format!("Failed creating target deploy_dir '{}': {e}", dest_dir.display()))?;
     for entry in std::fs::read_dir(unpacked_dir)
@@ -3509,7 +3486,6 @@ mod tests {
         pack_project_shift_to_zip(
             &src_site,
             Some(&src_data.join("containers/my-app")),
-            None,
             &zip_path,
         )
         .unwrap();

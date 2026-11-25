@@ -40,7 +40,7 @@ import {
 
 export { hasPower, hasAnyPower };
 
-// Re-export passkeys & QR code generation modules for 100% backward compatibility
+// Re-export the submodule through this module
 export * from './auth_passkeys.js';
 export * from './qrcode.js';
 

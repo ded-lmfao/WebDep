@@ -2,11 +2,11 @@
 
 ## Supported Versions
 
-Security fixes are released for the latest `2.x` release line:
+Security fixes are released for the latest `3.x` release line:
 
 | Version | Supported |
 | :--- | :--- |
-| `2.x` (latest on `main`) | Yes |
+| `3.x` (latest on `main`) | Yes |
 | `< 2.0` | No |
 
 ---
@@ -48,6 +48,6 @@ status updates as the fix is verified and prepared for release.
   still share host OS boundaries and are intended for trusted workloads unless
   additionally sandboxed by the host administrator.
 - **Secrets at Rest**: Environment variables, Git PATs, and TOTP secrets are
-  encrypted with AES-256-GCM before storage in SQLite.
+  encrypted with AES-256-GCM before storage in PostgreSQL.
 - **Database Access Modes**: PostgreSQL clusters default to host-managed local,
   IP/CIDR allowlist, or public firewall policies.

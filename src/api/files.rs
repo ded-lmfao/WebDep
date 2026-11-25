@@ -744,13 +744,9 @@ mod tests {
     use super::{ensure_file_env_access, touches_dotenv_file};
     use crate::auth::User;
 
-    fn make_user(perms: &str) -> User {
-        let grants = crate::auth::grants::Grants::from_legacy(
-            &crate::auth::grants::parse_legacy_permissions(perms),
-            true,
-            &[],
-        );
-        User::from_db(2, "dev".into(), 0, perms.into(), "[\"*\"]".into(), 0, 1_700_000_000).with_grants(grants)
+    fn make_user(powers: &[&str]) -> User {
+        User::from_db(2, "dev".into(), false, false, 1_700_000_000)
+            .with_grants(crate::auth::grants::Grants::fixture(powers, None))
     }
 
     #[test]
@@ -760,12 +756,12 @@ mod tests {
         assert!(touches_dotenv_file("sub\\.ENV"));
         assert!(!touches_dotenv_file("src/config.env.example"));
 
-        let file_only = make_user(r#"["files","files_write"]"#);
+        let file_only = make_user(&["files","files_write"]);
         assert!(ensure_file_env_access(&file_only, &["src/main.rs"]).is_ok());
         assert!(ensure_file_env_access(&file_only, &[".env"]).is_err());
         assert!(ensure_file_env_access(&file_only, &["config/.env.local"]).is_err());
 
-        let with_env = make_user(r#"["files_write","env"]"#);
+        let with_env = make_user(&["files_write","env"]);
         assert!(ensure_file_env_access(&with_env, &[".env"]).is_ok());
     }
 }

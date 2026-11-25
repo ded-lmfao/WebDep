@@ -22,7 +22,6 @@ taskkill /F /IM webdep.exe >nul 2>&1
 taskkill /F /IM webdep.exe.old >nul 2>&1
 
 echo [*] Starting WebDep on http://127.0.0.1:4600 ...
-echo [*] SQLite Database: data\webdep.sqlite
 echo [*] Admin credentials are stored in .env (ADMIN_USERNAME / ADMIN_PASSWORD).
 echo [*] On first boot, a random password is generated in .env and logged once.
 echo.

@@ -907,8 +907,6 @@ pub(crate) async fn tests_state_helper() -> AppState {
     let vault = Arc::new(crate::vault::Vault::new(&base).unwrap());
     let auth = Arc::new(crate::auth::Auth::new(db.clone(), 3600));
     auth.ensure_admin().await;
-    crate::auth::grants::migrate_legacy_once(&db).await.unwrap();
-    crate::auth::grants::grant_legacy_delete_once(&db).await.unwrap();
     let projects = Arc::new(crate::projects::Projects::new(db.clone(), vault.clone()));
     let logs = Arc::new(crate::logs::Logs::new(db.clone()));
     let monitor = Arc::new(crate::monitor::Monitor::new());

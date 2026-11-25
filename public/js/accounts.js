@@ -768,8 +768,8 @@ function renderEditor() {
   // Older setups may hold an every-app grant: keep showing it so it can be edited or removed.
   if (isAdmin()) {
     [
-      { scope: 'project', id: 'all', name: 'All websites and services (earlier setup)', kind: 'all-projects' },
-      { scope: 'database', id: 'all', name: 'All databases (earlier setup)', kind: 'all-databases' },
+      { scope: 'project', id: 'all', name: 'All websites and services', kind: 'all-projects' },
+      { scope: 'database', id: 'all', name: 'All databases', kind: 'all-databases' },
     ].forEach((a) => { if (existingPowers(user, a) !== null) editor.apps.unshift(a); });
   }
   editor.rows = editor.apps.filter((a) => existingPowers(user, a) !== null);
@@ -800,14 +800,10 @@ function renderEditor() {
       <span><strong>Make admin</strong><small>Full access to every website, service, database, and setting. Admins can't make or remove other admins; only the main admin can.</small></span>
     </label>`) : '';
 
-  const legacyPanel = panelHeld.filter((p) => !PANEL_ACCOUNT_POWERS.includes(p) && p !== '*');
-  const legacyHtml = legacyPanel.length ? `<div class="acct-editor-heading" style="margin-top:12px">Permissions from an earlier version</div>
-    <p class="acct-editor-note">Kept from before the upgrade so nothing was lost. Untick one to remove it for good.</p>
-    <div class="acct-power-grid">${legacyPanel.map((p) => `<label class="acct-check ${isAdmin() ? '' : 'is-locked'}"><input type="checkbox" data-legacy-power value="${escapeHtml(p)}" checked ${isAdmin() ? '' : 'disabled'}> ${escapeHtml(powerLabel(p))}</label>`).join('')}</div>` : '';
   const panel = section('Admin panel permissions', `<div class="acct-power-grid">${PANEL_ACCOUNT_POWERS.map((p) => {
     const ok = panelAllowed.includes(p);
     return `<label class="acct-check ${ok ? '' : 'is-locked'}"><input type="checkbox" data-panel-power value="${p}" ${panelHeld.includes(p) ? 'checked' : ''} ${ok ? '' : 'disabled'}> ${escapeHtml(powerLabel(p))}</label>`;
-  }).join('')}</div>${legacyHtml}`, 'Account tools and which kinds of app this user can create (they own what they create). Nodes, VPS modules, and platform settings stay admin only.');
+  }).join('')}</div>`, 'Account tools and which kinds of app this user can create (they own what they create). Nodes, VPS modules, and platform settings stay admin only.');
 
   const apps = section('App access', `
       <div class="acct-search">
@@ -1041,8 +1037,7 @@ byId('user-editor-save')?.addEventListener('click', async () => {
       const targetAdmin = role ? role === 'admin' : Boolean(user.isAdmin || user.isMainAdmin);
       if (!targetAdmin && !byId('ue-access-wrap')?.hidden) {
         const before = user.access?.panel || [];
-        const legacyKept = Array.from(document.querySelectorAll('[data-legacy-power]:checked')).map((c) => c.value);
-        const next = [...panelPowers, ...legacyKept];
+        const next = panelPowers;
         if (!sameSet(before.filter((p) => p !== '*'), next)) body.panelPowers = next;
       }
       if (Object.keys(body).length) {

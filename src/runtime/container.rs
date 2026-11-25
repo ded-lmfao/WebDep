@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -79,11 +78,6 @@ pub fn ensure_container_in_data_dir(data_dir: &Path, p: &Project, port: u16) -> 
     let _ = std::fs::create_dir_all(&home_dir);
     let _ = std::fs::create_dir_all(&cache_dir);
     let _ = std::fs::create_dir_all(&run_dir);
-
-    let legacy_app_data = data_dir.join("app-data").join(&safe_slug);
-    if legacy_app_data.is_dir() {
-        copy_dir_files_if_missing(&legacy_app_data, &db_dir);
-    }
 
     let container = WebsiteContainer {
         container_id: format!("webdep-ctr-{}-{}", p.id, safe_slug),
@@ -247,7 +241,6 @@ pub fn cleanup_project_files_dirs_in_data_dir_checked(
     }
     for s in &slug_variants {
         dirs_to_remove.push(data_dir.join("containers").join(s));
-        dirs_to_remove.push(data_dir.join("app-data").join(s));
         dirs_to_remove.push(data_dir.join("sites").join(s));
         dirs_to_remove.push(data_dir.join("services").join(s));
     }
@@ -339,38 +332,21 @@ pub fn link_work_dir_to_db_dir(work_dir: &Path, target_db_dir: &Path) {
     }
 }
 
-/// Default `AUTH_ENCRYPTION_KEY` for an app that does not set its own.
-///
-/// It used to be SHA-256("webdep-container-auth-key-{id}-{slug}-{port}"), which anyone who knows
-/// those three values can recompute. New apps now get a random key stored (mode 600) in their data
-/// directory. Apps that already have data keep the legacy derived key so nothing they encrypted
-/// becomes unreadable.
-fn app_auth_encryption_key(p: &Project, port: u16, container: &WebsiteContainer) -> String {
-    let is_hex64 = |k: &str| k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit());
+/// Default `AUTH_ENCRYPTION_KEY` for an app that does not set its own: random, and kept
+/// (mode 600) in the app's data directory so it survives restarts.
+fn app_auth_encryption_key(container: &WebsiteContainer) -> String {
     let key_file = container.db_dir.join(".webdep-auth-key");
     if let Ok(existing) = std::fs::read_to_string(&key_file) {
         let k = existing.trim();
-        if is_hex64(k) {
+        if k.len() == 64 && k.chars().all(|c| c.is_ascii_hexdigit()) {
             return k.to_string();
         }
-    }
-    let legacy = {
-        let mut hasher = Sha256::new();
-        hasher.update(format!("webdep-container-auth-key-{}-{}-{}", p.id, p.slug, port).as_bytes());
-        format!("{:x}", hasher.finalize())
-    };
-    let has_existing_data = std::fs::read_dir(&container.db_dir)
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false);
-    if has_existing_data {
-        return legacy;
     }
     let mut bytes = [0u8; 32];
     rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
     let fresh = hex::encode(bytes);
-    if std::fs::create_dir_all(&container.db_dir).is_err() || std::fs::write(&key_file, &fresh).is_err() {
-        // Without a persisted key a random one would change on every start: keep the stable legacy key.
-        return legacy;
+    if let Err(e) = std::fs::create_dir_all(&container.db_dir).and_then(|_| std::fs::write(&key_file, &fresh)) {
+        tracing::error!("Could not save the app's encryption key to {}: {e}", key_file.display());
     }
     #[cfg(unix)]
     {
@@ -443,7 +419,7 @@ pub fn build_container_env_pure(
         None => true,
     };
     if needs_auth_key {
-        final_env.insert("AUTH_ENCRYPTION_KEY".to_string(), app_auth_encryption_key(p, port, container));
+        final_env.insert("AUTH_ENCRYPTION_KEY".to_string(), app_auth_encryption_key(container));
     }
 
     let mut dotenv_body = format!(

@@ -924,8 +924,7 @@ fn compute_overview_bytes_sync(
         let panel_mem_pct = ((panel_mem as f64 / total_vps_mem as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 
         let panel_exe_size = cached_exe().map(crate::monitor::get_path_disk_size).unwrap_or(0);
-        let panel_db_size = crate::monitor::get_path_disk_size(&cwd.join("data").join("control-pg"))
-            .saturating_add(crate::monitor::get_path_disk_size(&cwd.join("data").join("webdep.sqlite")));
+        let panel_db_size = crate::monitor::get_path_disk_size(&cwd.join("data").join("control-pg"));
         let panel_disk = panel_exe_size.saturating_add(panel_db_size);
         let panel_disk_pct = ((panel_disk as f64 / total_vps_disk as f64 * 100.0) as f32 * 10.0).round() / 10.0;
 

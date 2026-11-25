@@ -219,7 +219,7 @@ if [[ "$BUILD_FROM_SOURCE" != "1" ]] && command -v git >/dev/null 2>&1 && [[ -d 
     fi
 fi
 # An existing binary is reused only if it matches the checked-out code's version. Otherwise a re-run
-# of the installer after `git pull` would keep an older binary (e.g. 2.x after updating to 3.x),
+# of the installer after `git pull` would keep an older binary,
 # which does not understand newer flags such as --pair-local and would just start serving in the foreground.
 NEED_BINARY=0
 if [[ ! -f "target/release/webdep" ]]; then
@@ -396,12 +396,6 @@ if [[ "$INSTALL_SERVICE" == "1" ]]; then
     if [[ "$HAS_PRIVS" != "1" ]]; then
         echo "[!] Installing systemd services requires root privileges or 'sudo'."
         exit 1
-    fi
-
-    # Disable legacy single-unit webdep.service if upgrading
-    if systemctl is-active --quiet webdep 2>/dev/null || systemctl is-enabled --quiet webdep 2>/dev/null; then
-        $SUDO systemctl stop webdep 2>/dev/null || true
-        $SUDO systemctl disable webdep 2>/dev/null || true
     fi
 
     if [[ "$ROLE_MODE" == "core" ]]; then

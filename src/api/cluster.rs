@@ -1401,8 +1401,8 @@ mod tests {
         let admin_csrf = admin_sess.csrf_token;
 
         let dev_id: i64 = sqlx::query_scalar(
-            "INSERT INTO users(username, password_hash, permissions, allowed_projects, created_at)
-             VALUES('cluster_dev', 'hash', '[]', '[]', 1700000000) RETURNING id",
+            "INSERT INTO users(username, password_hash, created_at)
+             VALUES('cluster_dev', 'hash', 1700000000) RETURNING id",
         )
         .fetch_one(&state.db)
         .await
@@ -1612,14 +1612,14 @@ mod tests {
 
         // Create restricted file-only user (no "env" power) to verify Core RBAC before remote proxy
         let file_user_id: i64 = sqlx::query_scalar(
-            "INSERT INTO users(username, password_hash, permissions, allowed_projects, created_at)
-             VALUES('remote_file_user', 'hash', '[\"files\",\"files_write\"]', '[\"*\"]', 1700000000)
+            "INSERT INTO users(username, password_hash, created_at)
+             VALUES('remote_file_user', 'hash', 1700000000)
              RETURNING id",
         )
         .fetch_one(&state.db)
         .await
         .unwrap();
-        crate::auth::grants::replace_from_legacy_json(&state.db, file_user_id, r#"["files","files_write"]"#, r#"["*"]"#, None)
+        crate::auth::grants::set_fixture(&state.db, file_user_id, &["files", "files_write"], None)
             .await
             .unwrap();
         let file_sess = state.auth.create_session(file_user_id).await.unwrap();
@@ -2052,8 +2052,8 @@ mod tests {
         let admin_csrf = admin_sess.csrf_token;
 
         let dev_id: i64 = sqlx::query_scalar(
-            "INSERT INTO users(username, password_hash, permissions, allowed_projects, created_at)
-             VALUES('mod_viewer', 'hash', '[]', '[]', 1700000000) RETURNING id",
+            "INSERT INTO users(username, password_hash, created_at)
+             VALUES('mod_viewer', 'hash', 1700000000) RETURNING id",
         )
         .fetch_one(&state.db)
         .await

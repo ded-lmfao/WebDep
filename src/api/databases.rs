@@ -204,7 +204,7 @@ pub(crate) async fn create_database_handler(
     Json(payload): Json<crate::databases::CreateDatabaseInput>,
 ) -> Result<Json<DatabaseResponse>, (StatusCode, String)> {
     let user = require_current_user(&state, &headers).await?;
-    if user.disabled || !user.has_any_power(&["create_databases", "databases_manage"]) {
+    if user.disabled || !user.has_power("create_databases") {
         return Err((
             StatusCode::FORBIDDEN,
             "You don't have permission to create databases. Ask an admin for \"Create databases\".".to_string(),

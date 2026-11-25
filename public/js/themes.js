@@ -1,6 +1,6 @@
 /**
  * WebDep Predefined Platform Theme Manager (15 Curated Presets)
- * Instant client-side application + localStorage caching + SQLite platform default sync.
+ * Instant client-side application + localStorage caching + platform default sync.
  */
 
 import { state, escapeHtml } from './state.js';
@@ -90,7 +90,7 @@ export async function syncThemeFromServer() {
 function canSaveGlobalSettings() {
   if (!state.user) return false;
   if (state.user.isAdmin || state.user.isMainAdmin) return true;
-  const perms = state.user.permissions || [];
+  const perms = state.user.access?.panel || [];
   return perms.includes('*') || perms.includes('settings_manage');
 }
 

@@ -159,14 +159,14 @@ pub(crate) struct NewAccount<'a> {
     pub must_change_password: bool,
 }
 
-/// Inserts a user row. Legacy permission columns are left empty: access lives in grants.
+/// Inserts a user row. Access lives in grants.
 pub(crate) async fn insert_account(
     conn: &mut sqlx::PgConnection,
     acc: &NewAccount<'_>,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
-        "INSERT INTO users(username, password_hash, disabled, permissions, allowed_projects, created_at, email, display_name, role, must_change_password)
-         VALUES($1, $2, FALSE, '[]', '[]', $3, $4, $5, $6, $7) RETURNING id",
+        "INSERT INTO users(username, password_hash, disabled, created_at, email, display_name, role, must_change_password)
+         VALUES($1, $2, FALSE, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(acc.username)
     .bind(acc.password_hash)
@@ -391,13 +391,7 @@ pub(crate) async fn update_user_handler(
     if let Some(powers) = payload.panel_powers.as_ref().filter(|_| !target.is_admin) {
         let current = &target.grants.panel;
         let desired: std::collections::BTreeSet<&String> = powers.iter().collect();
-        // New powers must be account powers. Powers from earlier versions can only be removed.
-        if let Some(p) = desired
-            .iter()
-            .find(|p| !PANEL_ACCOUNT_POWERS.contains(&p.as_str()) && !current.contains(**p))
-        {
-            return Err(bad(format!("Unknown panel permission '{p}'.")));
-        }
+        validate_panel_powers(powers)?;
         let account: Vec<String> = PANEL_ACCOUNT_POWERS.iter().map(|p| p.to_string()).collect();
         let touched_account: Vec<String> = account
             .iter()
@@ -405,12 +399,6 @@ pub(crate) async fn update_user_handler(
             .cloned()
             .collect();
         ensure_can_grant(&actor, SCOPE_GLOBAL, None, &touched_account)?;
-        let removing_legacy = current
-            .iter()
-            .any(|p| !PANEL_ACCOUNT_POWERS.contains(&p.as_str()) && !desired.contains(p));
-        if removing_legacy && !actor.is_admin {
-            return Err(forbidden("Only an admin can remove a user's earlier permissions."));
-        }
         let next: Vec<String> = desired.into_iter().cloned().collect();
         if next.is_empty() {
             grants::remove(&state.db, id, SCOPE_GLOBAL, None).await.map_err(db_error)?;

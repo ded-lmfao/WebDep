@@ -381,8 +381,8 @@ pub fn remove_project_archives(data_dir: &Path, project_id: i64) {
     let _ = std::fs::remove_dir_all(archive_dir(data_dir, project_id));
 }
 
-/// Where a restore reads the backup from: a single archive, or the folder copy that earlier
-/// versions made (`<dir>/files` and `<dir>/backup.env`).
+/// Where a restore reads the backup from: a single archive, or a folder
+/// copies (`<dir>/files` and `<dir>/backup.env`).
 #[derive(Clone)]
 pub enum RestoreSource {
     Archive { path: PathBuf, sha256: String, files: u64 },
@@ -418,7 +418,7 @@ fn read_env_only(src: &RestoreSource, work: &Path, backup_id: i64) -> Result<Opt
     }
 }
 
-/// Copies an earlier-format folder backup into staging and checks that every file arrived.
+/// Copies a folder backup into staging and checks that every file arrived.
 pub fn stage_dir(backup_dir: &Path, work: &Path, backup_id: i64) -> Result<Staged, String> {
     let files_dir = backup_dir.join("files");
     let new_root = work.join(STAGE_DIR).join(format!("new-{backup_id}"));
@@ -435,7 +435,7 @@ pub fn stage_dir(backup_dir: &Path, work: &Path, backup_id: i64) -> Result<Stage
 
 /// Restores an app's files from a backup: replaces them, never merges. The backup is proven good
 /// and staged before `stop_app` runs; the swap rolls back if it fails. An environment-only
-/// backup (or an old folder backup with no files) only returns its environment variables.
+/// backup (or a folder backup with no files) only returns its environment variables.
 pub async fn restore_files<F, Fut>(
     src: RestoreSource,
     env_only: bool,
@@ -802,12 +802,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_older_folder_backup_replaces_files_and_one_without_files_changes_nothing() {
-        let dir = scratch("legacy");
+    async fn a_folder_backup_replaces_files_and_one_without_files_changes_nothing() {
+        let dir = scratch("folder");
         let work = dir.join("w");
         let root = work.join("current");
         tree(&root, &[("a.txt", "live edit"), ("extra.txt", "added later")]);
-        // The folder layout earlier versions wrote: <backup>/files/... and <backup>/backup.env
+        // The folder layout: <backup>/files/... and <backup>/backup.env
         let backup = work.join("backups/backup-1");
         tree(&backup, &[("files/a.txt", "from backup"), ("files/sub/b.txt", "kept"), ("backup.env", "OLD=1\n")]);
 

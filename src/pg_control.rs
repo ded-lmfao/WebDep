@@ -29,13 +29,11 @@ fn build_migrator() -> sqlx::migrate::Migrator {
     use std::borrow::Cow;
 
     Migrator {
-        // One idempotent script holds the whole schema. Databases that ran the earlier migrations
-        // 1 to 18 keep those rows (tolerated as unknown below) and find nothing left to change.
         migrations: Cow::Owned(vec![Migration::new(
-            20,
-            Cow::Borrowed("baseline"),
+                1,
+            Cow::Borrowed("schema"),
             MigrationType::Simple,
-            lf(include_str!("../migrations/0020_baseline.sql")),
+            lf(include_str!("../migrations/0001_schema.sql")),
             false,
         )]),
         // A database already migrated by a newer WebDep keeps working when an older build is
@@ -549,33 +547,6 @@ mod upgrade_backup_tests {
     }
 
     #[tokio::test]
-    async fn a_database_that_ran_the_earlier_migrations_upgrades_cleanly() {
-        let pool = test_db::isolated_pool().await;
-        // Make it look like a production database from before the baseline: versions 1 to 18
-        // recorded, the baseline not yet run.
-        for v in 1..=18i64 {
-            sqlx::query(
-                "INSERT INTO _sqlx_migrations(version, description, success, checksum, execution_time) VALUES($1, 'old', TRUE, $2, 0)",
-            )
-            .bind(v)
-            .bind(vec![0u8; 48])
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20").execute(&pool).await.unwrap();
-        assert_eq!(applied_migration_version(&pool).await, Some(18));
-        run_migrations(&pool).await.expect("old versions are tolerated and the baseline changes nothing");
-        let applied: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success ORDER BY version")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-        assert_eq!(applied, (1..=18).chain([20]).collect::<Vec<i64>>());
-        // And it is safe to start again.
-        run_migrations(&pool).await.expect("running the baseline again changes nothing");
-    }
-
-    #[tokio::test]
     async fn a_new_database_has_the_whole_schema() {
         let pool = test_db::isolated_pool().await;
         for (table, column) in [
@@ -609,7 +580,7 @@ mod upgrade_backup_tests {
         assert_eq!(pending_upgrade_from(Some(7), 7), None, "already current");
         assert_eq!(pending_upgrade_from(Some(9), 7), None, "newer database, older build");
         assert_eq!(pending_upgrade_from(Some(5), 7), Some(5));
-        assert!(latest_migration_version() >= 7);
+        assert!(latest_migration_version() >= 1);
     }
 
     #[test]

@@ -182,7 +182,7 @@ pub(crate) async fn create_project_handler(
     let actor = require_current_user(&state, &headers).await?;
     let kind = if is_service { "service" } else { "website" };
     if actor.disabled
-        || !actor.has_any_power(&[crate::auth::grants::create_power(kind), manage_power_for_kind(&p.project_kind)])
+        || !actor.has_power(crate::auth::grants::create_power(kind))
     {
         return Err((
             StatusCode::FORBIDDEN,

@@ -162,7 +162,7 @@ impl Config {
             Self::sync_dotenv_admin(None, Some(&generated));
             map.insert("ADMIN_PASSWORD".to_string(), generated.clone());
             warn!(
-                "Replaced empty or legacy default ADMIN_PASSWORD in {} -> new bootstrap password: {}",
+                "Replaced empty or default ADMIN_PASSWORD in {} -> new bootstrap password: {}",
                 path.display(),
                 generated
             );

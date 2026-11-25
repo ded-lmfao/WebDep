@@ -1,6 +1,6 @@
 /**
  * WebDep Platform Settings, Monitoring & Self-Updater Subsystem
- * Server monitoring, security overview, SQLite system settings, audit logs, and self-updater pipeline.
+ * Server monitoring, security overview, system settings, audit logs, and self-updater pipeline.
  */
 
 import {

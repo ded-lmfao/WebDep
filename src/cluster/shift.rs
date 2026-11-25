@@ -477,13 +477,11 @@ pub async fn start_project_shift(
         let src_dir = resolve_source_deploy_dir(local_data_dir, &proj);
         let safe_slug = sanitize_project_folder(&proj.slug, proj.id);
         let container_dir = local_data_dir.join("containers").join(&safe_slug);
-        let legacy_app_data_dir = local_data_dir.join("app-data").join(&safe_slug);
         let zip_c = tmp_zip.clone();
         let pack = tokio::task::spawn_blocking(move || {
             pack_project_shift_to_zip(
                 &src_dir,
                 Some(&container_dir),
-                Some(&legacy_app_data_dir),
                 &zip_c,
             )
         })
@@ -1510,13 +1508,13 @@ mod tests {
 
         // 1. Cross-node RBAC: user without project assignment is forbidden; assigning the project with deploy allows shift
         let dev_id: i64 = sqlx::query_scalar(
-            "INSERT INTO users(username, password_hash, permissions, allowed_projects, created_at)
-             VALUES('shift_dev', 'hash', '[\"deploy\",\"projects_manage\"]', '[]', 1700000000) RETURNING id",
+            "INSERT INTO users(username, password_hash, created_at)
+             VALUES('shift_dev', 'hash', 1700000000) RETURNING id",
         )
         .fetch_one(&state.db)
         .await
         .unwrap();
-        crate::auth::grants::replace_from_legacy_json(&state.db, dev_id, r#"["deploy","projects_manage"]"#, "[]", None)
+        crate::auth::grants::set_fixture(&state.db, dev_id, &["deploy", "projects_manage"], Some(&[]))
             .await
             .unwrap();
         let dev_user = state.auth.get_user_by_id(dev_id).await.unwrap();
@@ -1526,13 +1524,7 @@ mod tests {
         assert_eq!(rbac_err.0, StatusCode::FORBIDDEN);
 
         // Even with project access and deploy/manage powers, only admins may move apps
-        crate::auth::grants::replace_from_legacy_json(
-            &state.db,
-            dev_id,
-            r#"["deploy","projects_manage"]"#,
-            &format!("[{}]", proj.id),
-            None,
-        )
+        crate::auth::grants::set_fixture(&state.db, dev_id, &["deploy", "projects_manage"], Some(&[proj.id]))
         .await
         .unwrap();
         let dev_user_scoped = state.auth.get_user_by_id(dev_id).await.unwrap();

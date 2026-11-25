@@ -1142,7 +1142,7 @@ mod tests {
         std::fs::write(app.join("live.txt"), "live").unwrap();
         std::fs::write(app.join("extra.txt"), "added later").unwrap();
 
-        // A backup made by an earlier version: a folder with files/ and backup.env.
+        // A folder backup: files/ and backup.env.
         let old = deploy.join("backups/backup-1");
         std::fs::create_dir_all(old.join("files")).unwrap();
         std::fs::write(old.join("files/live.txt"), "from the old backup").unwrap();
@@ -1172,7 +1172,7 @@ mod tests {
         let done = restore_and_wait(&router, id, old_id, admin_s).await;
         assert_eq!(done["state"], "done", "{done}");
         assert_eq!(std::fs::read_to_string(app.join("live.txt")).unwrap(), "from the old backup");
-        assert!(!app.join("extra.txt").exists(), "older backups now replace files instead of merging");
+        assert!(!app.join("extra.txt").exists(), "folder backups replace files instead of merging");
         assert!(state.projects.get_env_map(id).await.contains_key("OLD"));
 
         // An environment-only backup restores the variables and leaves every file alone.
