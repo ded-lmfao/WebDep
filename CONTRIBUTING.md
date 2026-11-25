@@ -37,7 +37,7 @@ cargo run --locked
 ```
 
 The control plane defaults to `http://0.0.0.0:4600` (configurable via `.env`;
-see [README.md](README.md#configuration)).
+see [README.md](README.md#%EF%B8%8F-configuration)).
 
 ---
 

@@ -451,6 +451,23 @@
   color: #abb2bf;
 }
 
+/* The highlighter builds these class names at run time (shj-syn-<token>), so they look unused to a
+   text search. Colour and style only: a heavier weight could shift text away from the cursor. */
+.shj-syn-kwd     { color: #c678dd; }
+.shj-syn-func    { color: #61afef; }
+.shj-syn-str     { color: #98c379; }
+.shj-syn-class   { color: #e5c07b; }
+.shj-syn-type    { color: #56b6c2; }
+.shj-syn-cmnt    { color: #7f8ba3; font-style: italic; }
+.shj-syn-num     { color: #d19a66; }
+.shj-syn-bool    { color: #e5c07b; }
+.shj-syn-oper    { color: #56b6c2; }
+.shj-syn-var     { color: #e06c75; }
+.shj-syn-section { color: #61afef; }
+.shj-syn-insert  { color: #98c379; }
+.shj-syn-deleted { color: #e06c75; }
+.shj-syn-err     { color: #f87171; text-decoration: underline; }
+
 .file-editor-footer {
   display: flex;
   justify-content: space-between;

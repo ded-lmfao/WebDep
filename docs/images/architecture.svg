@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" width="1200" height="560" role="img" aria-labelledby="t d">
+  <title id="t">How WebDep connects your servers</title>
+  <desc id="d">Your browser reaches Web-Core on VPS 1. Visitors reach Caddy on each server, which forwards to apps and databases. A Web-Node on every server connects to Web-Core over WebSocket, and servers talk to each other over a WireGuard mesh.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1120"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d4ed8"/>
+      <stop offset="1" stop-color="#0e7490"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#1e293b" stroke-width="1" opacity=".45"/>
+    </pattern>
+    <path id="p-browser" d="M185 84V200"/>
+    <path id="p-v1" d="M545 62C470 62 445 100 445 200"/>
+    <path id="p-v2" d="M705 62C900 62 1015 90 1015 200"/>
+    <path id="p-ws1" d="M130 330V280"/>
+    <path id="p-ws2" d="M755 330V317Q755 305 743 305H262Q250 305 250 293V280"/>
+    <path id="p-mesh" d="M185 410V481Q185 495 199 495H741Q755 495 755 481V410"/>
+    <path id="p-c1" d="M445 280V330"/>
+    <path id="p-c2" d="M1015 280V330"/>
+    <path id="p-n1" d="M300 370H340"/>
+    <path id="p-n2" d="M860 370H910"/>
+  </defs>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .title { fill: #f1f5f9; font-size: 17px; font-weight: 600; }
+    .sub { fill: #94a3b8; font-size: 13px; }
+    .zone { fill: #111c33; fill-opacity: .55; stroke: #334155; stroke-width: 1.5; }
+    .zone-name { fill: #7dd3fc; font-size: 13px; font-weight: 700; letter-spacing: 2px; }
+    .box { fill: #16213a; stroke: #3b4d70; stroke-width: 1.5; }
+    .pill { fill: #1e293b; stroke: #475569; stroke-width: 1.5; }
+    .wire { fill: none; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 6 8; animation: flow 1.4s linear infinite; }
+    .web { stroke: #38bdf8; }
+    .ctl { stroke: #a78bfa; }
+    .mesh { stroke: #34d399; animation-duration: 2.2s; }
+    .local { stroke: #64748b; }
+    .label { font-size: 12.5px; font-weight: 600; }
+    .live { fill: #34d399; animation: pulse 2s ease-in-out infinite; }
+    .halo { fill: none; stroke: #38bdf8; stroke-width: 2; animation: halo 3s ease-out infinite; }
+    @keyframes flow { to { stroke-dashoffset: -28; } }
+    @keyframes pulse { 50% { opacity: .35; } }
+    @keyframes halo { 0% { opacity: .7; stroke-width: 2; } 80%, 100% { opacity: 0; stroke-width: 12; } }
+    @media (prefers-reduced-motion: reduce) { .wire, .live, .halo { animation: none; } .packet { display: none; } }
+  </style>
+
+  <rect width="1200" height="560" rx="18" fill="url(#bg)"/>
+  <rect width="1200" height="560" rx="18" fill="url(#grid)"/>
+
+  <rect class="zone" x="40" y="150" width="540" height="300" rx="16"/>
+  <rect class="zone" x="620" y="150" width="540" height="300" rx="16"/>
+  <text class="zone-name" x="560" y="176" text-anchor="end">VPS 1</text>
+  <text class="zone-name" x="640" y="176">VPS 2 AND MORE</text>
+
+  <use href="#p-browser" class="wire web"/>
+  <use href="#p-v1" class="wire web"/>
+  <use href="#p-v2" class="wire web"/>
+  <use href="#p-ws1" class="wire ctl"/>
+  <use href="#p-ws2" class="wire ctl"/>
+  <use href="#p-mesh" class="wire mesh"/>
+  <use href="#p-c1" class="wire local"/>
+  <use href="#p-c2" class="wire local"/>
+  <use href="#p-n1" class="wire local"/>
+  <use href="#p-n2" class="wire local"/>
+
+  <g class="packet">
+    <circle r="4.5" fill="#7dd3fc"><animateMotion dur="2s" repeatCount="indefinite"><mpath href="#p-browser"/></animateMotion></circle>
+    <circle r="4.5" fill="#7dd3fc"><animateMotion dur="2.4s" repeatCount="indefinite"><mpath href="#p-v1"/></animateMotion></circle>
+    <circle r="4.5" fill="#7dd3fc"><animateMotion dur="3s" begin=".6s" repeatCount="indefinite"><mpath href="#p-v2"/></animateMotion></circle>
+    <circle r="4.5" fill="#c4b5fd"><animateMotion dur="1.6s" repeatCount="indefinite"><mpath href="#p-ws1"/></animateMotion></circle>
+    <circle r="4.5" fill="#c4b5fd"><animateMotion dur="3.6s" repeatCount="indefinite"><mpath href="#p-ws2"/></animateMotion></circle>
+    <circle r="5" fill="#6ee7b7"><animateMotion dur="4s" repeatCount="indefinite"><mpath href="#p-mesh"/></animateMotion></circle>
+    <circle r="5" fill="#6ee7b7"><animateMotion dur="4s" begin="2s" repeatCount="indefinite" keyPoints="1;0" keyTimes="0;1" calcMode="linear"><mpath href="#p-mesh"/></animateMotion></circle>
+  </g>
+
+  <!-- people -->
+  <rect class="pill" x="110" y="40" width="150" height="44" rx="22"/>
+  <text class="title" x="185" y="68" text-anchor="middle">Your browser</text>
+  <rect class="pill" x="545" y="40" width="160" height="44" rx="22"/>
+  <text class="title" x="625" y="68" text-anchor="middle">Visitors</text>
+  <text class="label" x="198" y="122" fill="#7dd3fc">HTTPS :4600</text>
+  <text class="label" x="625" y="112" fill="#7dd3fc" text-anchor="middle">:80 / :443</text>
+
+  <!-- VPS 1 -->
+  <rect class="halo" x="70" y="200" width="230" height="80" rx="12"/>
+  <rect x="70" y="200" width="230" height="80" rx="12" fill="url(#core)" stroke="#60a5fa" stroke-width="1.5"/>
+  <text class="title" x="185" y="236" text-anchor="middle">Web-Core</text>
+  <text class="sub" x="185" y="258" text-anchor="middle" style="fill:#dbeafe">panel + control database</text>
+  <rect class="box" x="340" y="200" width="210" height="80" rx="12"/>
+  <text class="title" x="445" y="236" text-anchor="middle">Caddy</text>
+  <text class="sub" x="445" y="258" text-anchor="middle">automatic HTTPS</text>
+  <rect class="box" x="70" y="330" width="230" height="80" rx="12"/>
+  <text class="title" x="185" y="366" text-anchor="middle">Web-Node</text>
+  <text class="sub" x="185" y="388" text-anchor="middle">builds and runs</text>
+  <rect class="box" x="340" y="330" width="210" height="80" rx="12"/>
+  <text class="title" x="445" y="366" text-anchor="middle">Apps + databases</text>
+  <text class="sub" x="445" y="388" text-anchor="middle">native processes</text>
+
+  <!-- VPS 2 -->
+  <rect class="box" x="910" y="200" width="210" height="80" rx="12"/>
+  <text class="title" x="1015" y="236" text-anchor="middle">Caddy</text>
+  <text class="sub" x="1015" y="258" text-anchor="middle">automatic HTTPS</text>
+  <rect class="box" x="650" y="330" width="210" height="80" rx="12"/>
+  <text class="title" x="755" y="366" text-anchor="middle">Web-Node</text>
+  <text class="sub" x="755" y="388" text-anchor="middle">no database needed</text>
+  <rect class="box" x="910" y="330" width="210" height="80" rx="12"/>
+  <text class="title" x="1015" y="366" text-anchor="middle">Apps + databases</text>
+  <text class="sub" x="1015" y="388" text-anchor="middle">native processes</text>
+
+  <circle class="live" cx="86" cy="216" r="4.5"/>
+  <circle class="live" cx="86" cy="346" r="4.5"/>
+  <circle class="live" cx="666" cy="346" r="4.5"/>
+
+  <text class="label" x="600" y="297" fill="#c4b5fd" text-anchor="middle">WebSocket</text>
+  <text class="label" x="470" y="524" fill="#6ee7b7" text-anchor="middle">WireGuard mesh and direct app transfer</text>
+</svg>

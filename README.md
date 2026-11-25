@@ -1,124 +1,226 @@
-# WebDep
+<div align="center">
 
-**A modern, self-hosted multi-VPS deployment platform and process orchestrator written in Rust.**  
-*Turn one or more Linux or Windows servers into your own private PaaS with zero container overhead.*
+<img src="docs/images/banner.svg" alt="WebDep: your own private PaaS, on your own servers" width="100%">
+
+<br>
+
+Deploy websites, bots, services and PostgreSQL databases across one VPS or many, from a single Rust binary.
+
+[![Latest release](https://img.shields.io/github/v/release/ded-lmfao/WebDep?style=for-the-badge&label=release&color=2563eb)](https://github.com/ded-lmfao/WebDep/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/ded-lmfao/WebDep/release.yml?branch=main&style=for-the-badge&label=build)](https://github.com/ded-lmfao/WebDep/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge)](LICENSE)
+
+![Rust](https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM64-FCC624?style=flat-square&logo=linux&logoColor=black)
+![Windows](https://img.shields.io/badge/Windows-x86__64-0078D4?style=flat-square)
+![No Docker](https://img.shields.io/badge/Docker-not%20required-64748b?style=flat-square)
+
+[**Quick start**](#-quick-start) ·
+[**Features**](#-features) ·
+[**Multi-VPS**](#%EF%B8%8F-multi-vps-setup) ·
+[**Configuration**](#%EF%B8%8F-configuration) ·
+[**Guide**](docs/GUIDE.md) ·
+[**Upgrading**](docs/UPGRADING.md)
+
+<br>
+
+<img src="docs/images/overview.png" alt="WebDep server overview with live network, CPU, memory and disk usage and a table of running websites, services and databases" width="900">
+
+</div>
 
 ---
 
-## Overview
+## 🚀 Quick start
 
-**WebDep** is a self-contained hosting, deployment, and multi-server fleet orchestrator compiled into a **single static binary** with embedded frontend assets (`rust-embed`). It combines an async control plane (**Web-Core**), lightweight worker agents (**Web-Node**), Git deployment pipelines, automated Caddy HTTPS, live SSE telemetry, an AES-256-GCM encrypted `.env` vault, managed PostgreSQL clusters, and direct node-to-node live app shifting—without Docker or external orchestration clutter.
-
-On first boot, **Web-Core** automatically initializes a zero-config control PostgreSQL cluster (`data/control-pg/` on port `5431`, or the next free port below it; or your external `DATABASE_URL`). **Web-Node** workers require **zero PostgreSQL**—they connect outbound to Web-Core over WebSocket and store only their local manifest in `data/node-state.json`.
-
----
-
-## Understanding `Web-Core` vs `Web-Node`
-
-Every WebDep server runs one of two roles using the **same binary**:
-
-| Component | What it is | Needs PostgreSQL? | Where you run it |
-| :--- | :--- | :--- | :--- |
-| **Web-Core** (`--core`) | **The Control Plane & Dashboard.** Serves the web UI (`:4600`), stores users/RBAC/projects/deployments, holds `.env` Vault secrets & off-node snapshots, and dispatches work. | Yes (auto-started on port `5431`) | **Only on VPS 1** (your main server) |
-| **Web-Node** (`--node`) | **A Worker Agent.** Connects outbound to Web-Core, builds & supervises apps locally, configures Caddy, streams logs/files, and receives direct P2P `.tar.gz` app shifts. | **No** | Automatically paired on VPS 1 + installed on **VPS 2, 3, ...** |
-
-### Quick Answer: *"Do I need to run `--node` on VPS 1?"*
-**No — not manually.**
-- When you install on **VPS 1** with `sudo ./start.sh --service` (or run `webdep` with no flags), **both `Web-Core` and `Web-Node` start automatically on VPS 1**. That gives you the dashboard **and** lets VPS 1 host websites, services, and databases right away.
-- You only run `--node --join ...` on **VPS 2, VPS 3, ...** so extra servers join your dashboard without running duplicate control panels.
-- **When would you use `--core` alone?** Only if you want VPS 1 to act as a **dashboard-only control server** hosting zero user apps (for example, in a 3+ VPS fleet), or when testing separate worker processes locally on one machine.
-
----
-
-## Setup Guides
-
-### Quick Install — One Line (Linux VPS)
-
-SSH into your server and paste **one** line. No coding needed: it installs git/curl, downloads WebDep into `/opt/webdep`, sets up the 24/7 system service, and opens the firewall ports.
-
-**Both — dashboard + host websites on this VPS** *(recommended for a single VPS)*
+SSH into a Linux server and paste **one line**. It installs git and curl, downloads WebDep into `/opt/webdep`, sets up a 24/7 system service and opens the firewall ports.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- both
 ```
 
-**Core — dashboard only**
+Then:
+
+1. Open `http://YOUR_SERVER_IP:4600`.
+2. Sign in with `ADMIN_USERNAME` and `ADMIN_PASSWORD` from `/opt/webdep/.env`. The first password is also logged once: `sudo journalctl -u webdep-core | grep -i password`.
+3. Change the password and turn on two-factor authentication in **My Account**.
+
+> [!IMPORTANT]
+> A new panel serves plain HTTP. For your first sign-in, use an SSH tunnel from your own computer, `ssh -N -L 4600:127.0.0.1:4600 root@YOUR_SERVER_IP`, and open `http://localhost:4600`. Set up a domain with HTTPS for everyday use.
+
+> [!WARNING]
+> **Running v3.0.12 or older? Do not update it in place.** The database layout changed and the panel will not start afterwards. Install fresh instead. See [Upgrading](#-upgrading-and-backups).
+
+<details>
+<summary><b>Other install options</b>: dashboard only, extra server, interactive menu, Windows, manual</summary>
+
+<br>
+
+**Core: dashboard only, hosts no apps**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- core
 ```
 
-**Node — extra VPS joining your dashboard** *(copy the ready-made line from the panel: **Nodes → + Add Node**)*
+**Node: an extra server joining your dashboard.** Copy the ready-made line from **Admin Panel › Nodes › + Add Node**.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- node --join http://<VPS1_IP>:4600 --token <WDJOIN_TOKEN>
 ```
 
-Not sure which one? Run it without a role and pick from a menu (1 Both · 2 Core · 3 Node · 4 Update · 5 Status · 6 Uninstall). It asks for the install folder and, for a Node, the dashboard URL and token:
+**Interactive menu** (Both, Core, Node, Update, Status, Uninstall)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash
 ```
 
-**Windows (PowerShell, no admin needed):** same menu, installs to `%LOCALAPPDATA%\WebDep`, starts automatically at logon:
+**Windows (PowerShell, no admin needed).** Same menu. Installs to `%LOCALAPPDATA%\WebDep` and starts at logon.
 
 ```powershell
 irm https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.ps1 | iex
 ```
 
-Direct, without the menu: `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.ps1))) both` (or `core`, or `node -Join http://<VPS1_IP>:4600 -Token <TOKEN>`). Until a release includes the Windows download, it installs Rust + Visual C++ Build Tools and compiles (10–20 min, first time only). `both`/`core` also need PostgreSQL, which it installs via `winget` if missing.
+Without the menu:
 
-Then open `http://YOUR_SERVER_IP:4600`. Your first login (`ADMIN_USERNAME` / `ADMIN_PASSWORD`) is in `/opt/webdep/.env` and is logged once on first start (`sudo journalctl -u webdep-core | grep -i password`).
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.ps1))) both
+```
 
-| Option | Meaning |
-|--------|---------|
-| `--dir /path` | Install somewhere other than `/opt/webdep` (e.g. `--dir /root/webdep`) |
-| `--branch <name>` | Install a different Git branch (default `main`) |
-| `--name`, `--region`, `--public-ip` | Node display name, region label, public IP |
-| `--uninstall` | Stop and remove the WebDep services (your files stay in the install folder) |
+Replace `both` with `core`, or with `node -Join http://<VPS1_IP>:4600 -Token <TOKEN>`. If no Windows download is available, the installer adds Rust and the Visual C++ Build Tools and compiles (10 to 20 minutes, first time only). `both` and `core` also need PostgreSQL, installed through `winget` if missing.
 
-**Update later:** run the same line again. Your `data/` and `.env` are kept.
-
----
-
-### 1. Single-VPS Setup (Linux) — Manual
+**Manual, from a checkout (Linux)**
 
 ```bash
 git clone https://github.com/ded-lmfao/WebDep.git webdep
 cd webdep
-
-# Install & run Web-Core + local Web-Node 24/7 via systemd
 sudo ./start.sh --service
 ```
 
-Open `http://YOUR_SERVER_IP:4600` in your browser. Your initial `ADMIN_USERNAME` and `ADMIN_PASSWORD` are written to `.env` (and logged once on first startup).
+| Installer option | Meaning |
+| :--- | :--- |
+| `--dir /path` | Install somewhere other than `/opt/webdep` |
+| `--branch <name>` | Install a different Git branch (default `main`) |
+| `--name`, `--region`, `--public-ip` | Node display name, region label, public IP |
+| `--uninstall` | Stop and remove the services. Your files stay in the install folder |
+
+</details>
 
 ---
 
-### 2. Multi-VPS Setup (2+ Servers: Control VPS + Worker VPS)
+## ✨ Features
 
-#### Step 1 — Install on **VPS 1** (Control Plane + Node 1)
+<table>
+<tr>
+<td width="50%" valign="top">
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- both
-```
+### 🌐 Deploy anything
+- Websites, background services and bots
+- Git pipeline with 7 live stages and health checks
+- Keeps the newest 5 releases, with rollback
+- Automatic HTTPS through Caddy, plus maintenance mode
 
-This installs `webdep-core.service` + `webdep-node.service`, configures UFW and WireGuard (`wireguard-tools`), and opens ports `80`, `443`, `4600` TCP, and `51820` UDP.
+</td>
+<td width="50%" valign="top">
 
-#### Step 2 — Generate the Complete VPS 2 Command in the Panel
+### 🖥️ One panel, many servers
+- Add a VPS with one copied command
+- WireGuard mesh between servers
+- Move apps between servers, rolled back on failure
+- Update the whole fleet from the panel
 
-1. Open `http://<VPS1_IP>:4600` and sign in as **Main Admin**.
-2. In the left sidebar, open **Nodes** → click **`+ Add Node`**.
-3. Fill in:
-   - **VPS / Node Name** (e.g. `VPS-2`)
-   - **Region** (e.g. `mumbai-IND`)
-   - **Target VPS 2 Public IP** (`--public-ip`, e.g. `203.0.113.50`)
-   - **Panel Reachable URL**: auto-detected by the panel with 1-click chips (`Public IP`, `LAN IP`, `Current Browser`). Pick the URL that VPS 2 can reach.
-4. Click **`Generate Join Command`** and copy the generated one-line **Fresh Linux VPS 2** command.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
-#### Step 3 — Join **VPS 2** (One Copy & Paste)
+### 🐘 Managed PostgreSQL
+- Isolated native database clusters on any server
+- SCRAM-SHA-256 sign-in and network access rules
+- One-click `DATABASE_URL` linking
+- Backups without downtime
 
-Paste the generated command directly on VPS 2 (it installs WebDep, sets up the service, enrolls, and connects automatically):
+</td>
+<td width="50%" valign="top">
+
+### 🔐 Secure by design
+- Passkeys, TOTP two-factor authentication, sessions
+- Per-app permissions and a full audit log
+- AES-256-GCM vault; secrets stay masked until you reveal them, and each reveal is recorded
+- Linux process isolation for apps and builds
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 📂 Work in the browser
+- Live logs and build output
+- File explorer with a syntax-highlighted editor
+- Environment editor: single, multiple or raw `.env`
+- Works on phones and tablets
+
+</td>
+<td width="50%" valign="top">
+
+### 📊 Stay in control
+- Live CPU, memory, disk and network usage
+- CPU, memory, disk and backup limits per app
+- Port ranges and multiple public IPs per server
+- Webhook alerts to Discord, Slack or any JSON endpoint
+
+</td>
+</tr>
+</table>
+
+<div align="center">
+
+| Deployment pipeline | Built-in file editor |
+| :---: | :---: |
+| <img src="docs/images/workspace.png" alt="Website workspace with CPU, memory, network and disk usage, pipeline stages and deployment records" width="440"> | <img src="docs/images/files.png" alt="Browser file editor showing a syntax-highlighted server.js" width="440"> |
+| **Encrypted environment variables** | **Managed PostgreSQL** |
+| <img src="docs/images/environment.png" alt="Environment variables list with public values shown and secret values masked" width="440"> | <img src="docs/images/databases.png" alt="Two running PostgreSQL databases with connection command, port and access mode" width="440"> |
+
+</div>
+
+### Supported runtimes
+
+| Runtime | Example install | Example start | Good for |
+| :--- | :--- | :--- | :--- |
+| **Node.js** | `npm ci` / `pnpm install` | `npm start` / `node server.js` | Next.js, Express, Fastify, bots |
+| **Python** | `pip install -r requirements.txt` | `python -m uvicorn main:app --port {{PORT}}` | FastAPI, Flask, Django, workers |
+| **Go** | `go build -o app .` | `./app` | Gin, Echo, Fiber, daemons |
+| **Rust** | `cargo build --release` | `./target/release/server` | Axum, Actix-web |
+| **Java** | Pre-built JAR / Gradle | `java -jar Lavalink.jar` | Lavalink, Spring Boot |
+| **Static / SPA** | `npm run build` | Static build output | React, Vite, Vue, Svelte, Astro |
+
+> [!TIP]
+> The start command must name a file that exists in your project. Python services are pre-filled with `main.py`; change it if your entry file has another name.
+
+---
+
+## 🧭 How it works
+
+One binary, two roles.
+
+| Role | What it does | PostgreSQL | Where it runs |
+| :--- | :--- | :---: | :--- |
+| **Web-Core** (`--core`) | Dashboard and control plane: users, permissions, projects, secrets, backups, job dispatch | Yes, set up automatically | Your main server only |
+| **Web-Node** (`--node`) | Worker: builds and runs apps, configures Caddy, streams logs and files | No | Main server and every extra server |
+
+<p align="center">
+  <img src="docs/images/architecture.svg" alt="Your browser reaches Web-Core on VPS 1. Visitors reach Caddy on each server, which forwards to apps and databases. Every Web-Node connects to Web-Core over WebSocket, and servers talk over a WireGuard mesh." width="100%">
+</p>
+
+**Do I need to run `--node` on the first server?** No. Installing with `both` starts Web-Core and a local Web-Node together, so that server can host apps right away. Use `--join` only on extra servers. Use `core` alone if the first server should host nothing.
+
+---
+
+## 🛰️ Multi-VPS setup
+
+1. **Install the first server** with the [quick start](#-quick-start) line.
+2. In the panel, open **Admin Panel › Nodes › + Add Node**.
+3. Enter a **name**, **region** and the new server's **public IP**. Pick a **panel URL** that the new server can reach.
+4. Click **Generate Join Command** and paste the result on the new server:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- \
@@ -126,285 +228,283 @@ curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | 
   --name "VPS-2" --region "mumbai-IND" --public-ip "<VPS2_IP>"
 ```
 
-What this does automatically:
-- Enrolls VPS 2 once (`data/node-state.json`) and consumes the single-use join token.
-- Installs and enables **`webdep-node.service`** so VPS 2 reconnects automatically across reboots.
-- Configures WireGuard P2P mesh keys and peer IPs (`10.200.0.x`).
+The new server enrols with a single-use token, installs `webdep-node.service`, joins the WireGuard mesh (`10.200.0.x`) and appears **Online** under **Nodes**.
 
-Refresh **Nodes** in your browser — both **VPS 1** and **VPS 2** appear **Online** with live CPU, RAM, disk, mesh IP, and P2P port status.
+> [!NOTE]
+> If your provider has an external firewall (AWS, Oracle, Hetzner, DigitalOcean and others), open:
+> - **VPS 1:** TCP `80`, `443`, `4600`; UDP `51820`; your node transfer port (`WEBDEP_NODE_P2P_PORT`)
+> - **VPS 2 and more:** TCP `80`, `443` for public traffic; UDP `51820`; node transfer TCP between servers
 
-> **Cloud Firewall Reminder:** If your VPS provider uses an external security group (Hetzner, AWS, DigitalOcean, Oracle, etc.), allow:
-> - **VPS 1:** TCP `80`, `443`, `4600` (inbound), UDP `51820` (WireGuard), and your node P2P port (`WEBDEP_NODE_P2P_PORT` / mesh)
-> - **VPS 2+:** TCP `80`, `443` (if serving public traffic), UDP `51820` (WireGuard), and node P2P TCP between VPSes
+<details>
+<summary><b>Moving apps between servers</b></summary>
 
-#### Step 4 — Dashboard-Only Core *(Optional, for Dedicated Control Plane)*
+<br>
 
-If you want VPS 1 to run **only Web-Core** without hosting apps on VPS 1:
+Use **Move Node** on a website or service, or **Admin Panel › Move Apps** (admins only).
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ded-lmfao/WebDep/main/install.sh | sudo bash -s -- core
-# or, inside an existing checkout:
-sudo ./start.sh --service --core
-```
+1. **Preflight:** the target allocates a free port and checks it is ready.
+2. **Transfer:** the source packs the app into a hardened `.tar.gz` (skipping `node_modules`, `.git` and symlinks, rejecting path traversal) and sends it directly to the target.
+3. **Warm start:** the target boots the app with its secrets, repoints linked database settings to the mesh address and health-checks it before traffic switches. A failure rolls the target back and leaves the source untouched.
+4. **DNS cutover:** with domains attached, the target serves HTTP first and shows the DNS change to make. It then enables HTTPS and retires the old copy.
 
-#### Upgrading Your Fleet Later
+A **database** is copied with `pg_dump` and `pg_restore` over the mesh while it keeps running. Its linked app is stopped during the copy and receives the new connection settings. The target needs the **PostgreSQL** module (**VPS Modules**). If anything fails, the database stays where it is.
 
-- **From the panel:** Go to **Nodes** and click **`Update Fleet`** to upgrade connected remote Web-Nodes first, then Web-Core.
-- **From SSH:** Run `./start.sh --update`.
+</details>
 
----
+<details>
+<summary><b>Practise with three processes on one Windows PC</b></summary>
 
-### 3. Local Multi-Node Practice on Windows (Single PC)
+<br>
 
-Want to test **Web-Core + 2 separate Web-Node workers** on one Windows computer before deploying to VPSes? Give each process its own folder and `.env` so `PORT` and `DATA_DIR` stay isolated.
-
-First build once:
+Build once from the repository folder, and remember where the program is:
 
 ```powershell
 cargo build --locked
+$webdep = "$PWD\target\debug\webdep.exe"
 ```
 
-1. **PowerShell Window 1 — Start `Web-Core` (panel only, `http://127.0.0.1:4600`):**
-   ```powershell
-   mkdir C:\tmp\webdep-core -Force | Out-Null; cd C:\tmp\webdep-core; Set-Content .env "ADMIN_USERNAME=admin`nADMIN_PASSWORD=AdminPass123`nHOST=127.0.0.1`nPORT=4600`nDATA_DIR=C:\tmp\webdep-core\data"; C:\Users\User\Documents\codes\Web-Dep\target\debug\webdep.exe --core
-   ```
-   Open `http://127.0.0.1:4600` → login (`admin` / `AdminPass123`) → **Nodes → `+ Add Node`** → click **`Use 127.0.0.1 (Local)`** for Target IP, select the **`Current Browser`** URL chip if needed, and generate **Token 1**.
+**Window 1, Web-Core.** Each process needs its own folder and `.env`.
 
-2. **PowerShell Window 2 — Enroll & start `VPS-1`:** *(paste Token 1 into line 1)*
-   ```powershell
-   $TOKEN1 = "PASTE_TOKEN_1_HERE"
-   mkdir C:\tmp\webdep-node1 -Force | Out-Null; cd C:\tmp\webdep-node1; Set-Content .env "DATA_DIR=C:\tmp\webdep-node1\data`nPORT=4691"; $env:WEBDEP_NODE_P2P_BIND="127.0.0.1"; $env:WEBDEP_NODE_P2P_PORT="0"; C:\Users\User\Documents\codes\Web-Dep\target\debug\webdep.exe --node --join http://127.0.0.1:4600 --token $TOKEN1 --name "VPS-1" --region "mumbai-IND" --public-ip 127.0.0.1
-   ```
+```powershell
+mkdir C:\tmp\webdep-core -Force | Out-Null; cd C:\tmp\webdep-core
+Set-Content .env "HOST=127.0.0.1`nPORT=4600`nDATA_DIR=C:\tmp\webdep-core\data"
+& $webdep --core
+```
 
-3. **PowerShell Window 3 — Enroll & start `VPS-2`:** *(generate Token 2 in `+ Add Node` and paste into line 1)*
-   ```powershell
-   $TOKEN2 = "PASTE_TOKEN_2_HERE"
-   mkdir C:\tmp\webdep-node2 -Force | Out-Null; cd C:\tmp\webdep-node2; Set-Content .env "DATA_DIR=C:\tmp\webdep-node2\data`nPORT=4692"; $env:WEBDEP_NODE_P2P_BIND="127.0.0.1"; $env:WEBDEP_NODE_P2P_PORT="0"; C:\Users\User\Documents\codes\Web-Dep\target\debug\webdep.exe --node --join http://127.0.0.1:4600 --token $TOKEN2 --name "VPS-2" --region "eu-central" --public-ip 127.0.0.1
-   ```
+The generated admin password is saved in that `.env`. Sign in at `http://127.0.0.1:4600`, then create a join token under **Nodes › + Add Node** using **Use 127.0.0.1 (Local)**.
 
-4. **Restarting an already-enrolled worker later** *(no token needed once `node-state.json` exists)*:
-   ```powershell
-   cd C:\tmp\webdep-node1; $env:WEBDEP_NODE_P2P_BIND="127.0.0.1"; $env:WEBDEP_NODE_P2P_PORT="0"; C:\Users\User\Documents\codes\Web-Dep\target\debug\webdep.exe --node
-   ```
+**Window 2, first worker.** Set `$webdep` again and paste your token:
+
+```powershell
+mkdir C:\tmp\webdep-node1 -Force | Out-Null; cd C:\tmp\webdep-node1
+Set-Content .env "DATA_DIR=C:\tmp\webdep-node1\data`nPORT=4691"
+$env:WEBDEP_NODE_P2P_BIND="127.0.0.1"
+& $webdep --node --join http://127.0.0.1:4600 --token "PASTE_TOKEN_HERE" --name "VPS-1" --public-ip 127.0.0.1
+```
+
+**Window 3, second worker:** repeat with folder `webdep-node2`, port `4692`, name `VPS-2` and a new token.
+
+To restart an enrolled worker later, run `& $webdep --node` from its folder.
+
+</details>
 
 ---
 
-## Multi-Node Architecture & Capabilities
+## 🧰 Using the panel
 
-```text
-                       Inbound Internet Traffic
-                                  │
-                                  ▼
-                    ┌───────────────────────────┐
-                    │       Caddy Proxy         │  (Port 80 / 443)
-                    │  (Auto HTTPS / Let's Enc) │
-                    └─────────────┬─────────────┘
-                                  │
-        ┌─────────────────────────┴─────────────────────────┐
-        │ (panel.domain.com)                                │ (*.yourdomain.com)
-        ▼                                                   ▼
-┌────────────────────────────────────┐            ┌───────────────────────────────┐
-│        Web-Core Control Plane      │            │     Web-Node Worker Fleet     │
-│      (Axum + Tokio + PostgreSQL)   │◄═══ WS ═══►│  VPS 1 (local)  │  VPS 2..N   │
-│                                    │  RPC/Logs  │  • Processes    │  • Caddy    │
-│ • Passkey, TOTP 2FA & Access RBAC  │            │  • Git Builds   │  • Backups  │
-│ • AES-256-GCM Vault & Off-Node DR  │            └────────▲──────────────▲───────┘
-│ • Shift Orchestrator & Fleet Ops   │                     │  Direct P2P  │
-└────────────────────────────────────┘                     └──────────────┘
-                                                      (.tar.gz + WireGuard Mesh)
-```
-
-### Live App Shifting (`Move Node`) & 2-Stage Caddy TLS
-Move a website or backend service from one VPS to another directly from its workspace toolbar (**`Move Node`**) or evacuate an entire server from **Nodes**:
-1. **Preflight & Free Port Allocation**: Target node allocates an unused local port and validates host readiness.
-2. **Direct P2P Streaming Transfer**: Source packs active files (`current`, `releases`, `app`, `containers`, `backups`) into a hardened `.tar.gz` stream (skipping `node_modules`/`.git`/symlinks and rejecting path traversal) and pushes directly to the Target node's token-authenticated P2P HTTP receiver.
-3. **Warm-Start & Health Probe**: Target boots the app with decrypted `.env` secrets (rewriting linked `DATABASE_URL` / `PGHOST` to the database node's mesh IP automatically) and verifies health before switching live traffic. Any failure rolls back Target cleanly while leaving Source untouched.
-4. **2-Stage Caddy + DNS Update Card**: If domains are attached, Target binds HTTP first and presents a **DNS Update Card** (`A` record old IP → new IP with live DNS verification and manual *Complete Cutover Now*), then upgrades Target to automatic Let's Encrypt HTTPS, stops Source, cleans Source's Caddy config, and increments `placement_version` in PostgreSQL to prevent split-brain on reconnect.
-
-### Off-Node Backups & Cross-Node Disaster Recovery
-- Under a workload's **Releases** tab, use **Save Off-Node on Web-Core** to pull a verified `.tar.gz` snapshot to Web-Core (`data/offnode-backups/project-<id>/`).
-- Restore any off-node snapshot onto **any healthy Web-Node** using **Restore to Node**, automatically reallocating a free port, restoring `.env` Vault secrets, and rewriting linked PostgreSQL mesh routes.
-
----
-
-## Panel Sections & Workspace Structure
-
-### Sidebar Navigation
-
-| Section | Purpose |
+| Sidebar | What you do there |
 | :--- | :--- |
-| **Overview** | Real-time fleet telemetry (network throughput, host CPU/RAM/disk, active workloads, node filter). |
-| **Websites** | Multi-framework web apps placed on any node with auto-allocated ports, custom domains, Caddy HTTPS, and maintenance mode. |
-| **Services** | 24/7 background daemons (Lavalink/Java, Python workers, Node bots, Go/Rust binaries) with live PID tracking and log streaming. |
-| **Databases** | Isolated native PostgreSQL clusters on any node with SCRAM-SHA-256 auth, local/mesh/CIDR/public rules, and 1-click `DATABASE_URL` linking. |
-| **My Account** | Every user's own profile (name, email), password, passkeys, TOTP 2FA, sessions, and a read-only list of the apps they can access. |
-| **Admin Panel** | A separate sidebar (with **Back to Panel**) for **Users**, **Requests**, **Nodes**, **VPS Modules**, **IP Addresses**, **Move Apps**, **App Configs**, **Platform Settings**, and **Audit**. Each page shows only to admins or to users holding the matching permission. |
+| **Overview** | Live usage and every running workload, filtered by server |
+| **Websites** | Web apps with ports, domains, HTTPS and maintenance mode |
+| **Services** | Always-on processes: bots, workers, Lavalink, Go and Rust binaries |
+| **Databases** | PostgreSQL clusters and their access rules |
+| **My Account** | Profile, password, passkeys, 2FA, sessions and your app access |
+| **Admin Panel** | Users, Requests, Nodes, VPS Modules, IP Addresses, Move Apps, App Configs, Platform Settings, Audit |
 
-#### Accounts & Permissions
-- **Sign-up requests**: people create an account request from the sign-in page; it waits in **Admin Panel › Requests** and an account exists only after approval. Admins can also create accounts directly (with a temporary password the user must change). Self-registration can be switched off in **Platform Settings › Accounts**.
-- **Roles**: the **Main Admin** (from `.env`) can make other users **Admin** (full access). Everyone else starts with no access.
-- **Per-app permissions**: every website, service, and database has a **Permissions** tab. Pick people and tick exactly what they can do there (logs, files, deploy, start/stop, backups, env, domains, settings, activity, connection details, and so on).
-- **Creating apps**: the panel permissions *Create websites*, *Create services*, and *Create databases* let a user add apps of that kind. They own what they create (every permission on it, including delete).
-- **Delegation**: **Manage access** on an app, and the panel permissions *View users*, *Create accounts*, *Edit or disable users*, and *Approve or reject requests*, let trusted users help. Nobody can give a permission they don't hold, and every change is written to the audit log.
-- **Account security** (**Platform Settings › Accounts**): limit sign-up requests to certain email domains, require 2FA for admins or everyone, create one-time password reset links, and see or end any user's sessions. The sign-up form has a built-in bot check.
-- **Nodes** (topology, `+ Add Node`, drain/evacuate, `Update Fleet`), **VPS Modules** (runtime installs), and **Platform Settings** (GitHub tokens, Core/Fleet updates, cache/restart, themes) live in the Admin Panel.
+Each website and service has these tabs:
 
-#### Ports, IPs, and limits (Admin Panel › IP Addresses)
-- **Port ranges per node**: new apps take the lowest free port in the node's range. Ports stay private (only Caddy and the mesh reach them) until made public, and the firewall follows automatically. If a node has no free port, the app isn't created and the panel says so.
-- **Several IPs per VPS**: add the VPS's public IPs and choose one per website or service; Caddy then serves its domains on that IP only.
-- **Resource limits** (set at creation, changed by admins in **App Configs**): CPU, memory, disk, and number of backups; empty or 0 means no limit. CPU and memory use cgroups v2 on Linux (WebDep as root) and Job Objects on Windows; limits are checked shortly after an app starts or restarts and then every 2 minutes: a disk limit stops the app when it grows past it, and an app that reaches its memory or CPU limit keeps running but is slowed down; either way the people who can see the app get a pop-up explaining it; the backup limit caps how many backups an app holds. Each website or service also keeps its newest 50 audit entries.
-- **Move Apps** moves a website, service or database to another node (admins only). A database is copied with `pg_dump`/`pg_restore` over the mesh while it keeps running; its linked app is stopped for the copy and gets the new connection settings. The target node needs the **PostgreSQL** module (VPS Modules). If anything fails the database stays where it is.
+| Tab | Contents |
+| :--- | :--- |
+| **Overview** | Deployment pipeline, address and status |
+| **Commits** | Branch and commit history |
+| **Logs** | Live output and build logs |
+| **Files** | Browse, upload, download and edit, limited to the app's folder |
+| **Environment** | Encrypted variables and linked databases |
+| **Releases** | The newest five releases, with rollback |
+| **Backups** | Create, restore, download, lock and delete |
+| **Activity** | Audit trail and moves |
+| **Permissions** | Who can use the app, and what they can do |
 
-#### Backups and restore (the **Backups** tab of every website, service and database)
-- **Create backup** saves every file in the app's Files folder plus its environment variables as one archive, built in the background, with its size, file count, creator, status and checksum. Optionally leave out names such as `cache` or `*.log`. A backup limit per app (App Configs) caps how many it can hold.
-- **Restore** replaces the app's files with the backup (nothing is merged), stops and restarts the app, restores the environment variables, and keeps the replaced files for 24 hours so it can be undone. It checks the checksum first and swaps folders with rollback, so a bad backup or a failure never leaves the app half restored. You confirm by typing the app's name.
-- **Download**, **lock** (a locked backup can't be deleted) and **delete** are on each row. Apps on other VPSes are backed up and restored on that VPS.
-- **Databases** are backed up as a PostgreSQL dump while they keep running (no downtime). **Restore** replaces everything in the database inside a single transaction: if anything fails, the database is left exactly as it was. The database must be running. Databases on other VPSes are not supported yet.
-- Backups are always manual. Releases are a separate list (the newest 5 are kept).
+<details>
+<summary><b>Accounts and permissions</b></summary>
 
-#### Maintenance
-- The control database is backed up automatically once a day (seven kept) and before upgrades; files are in `data/backups/control-db/`.
-- The Audit page searches and exports to CSV; panel-wide history is kept 365 days.
-- Optional webhook notifications (set the `notify_webhook_url` setting) for new account requests, a VPS going offline or back online, low free ports, and apps stopped for going over their disk limit.
+<br>
 
-The panel is fully responsive: on phones and tablets the sidebar becomes a drawer with a bottom tab bar, and data tables turn into compact cards.
+- **Sign-up requests:** people ask for an account on the sign-in page, and it exists only after approval in **Admin Panel › Requests**. Admins can also create accounts with a temporary password. Self-registration can be turned off.
+- **Roles:** the **Main Admin** (from `.env`) can make other users **Admin**. Everyone else starts with no access.
+- **Per-app permissions:** choose people and exactly what each may do: logs, files, deploy, start and stop, backups, environment, domains, settings, activity, connection details.
+- **Creating apps:** *Create websites*, *Create services* and *Create databases* are separate permissions. Creators own what they create, including deleting it.
+- **Delegation:** trusted users can manage access, view users, create or edit accounts and approve requests. Nobody can grant a permission they don't hold, and every change is audited.
+- **Account security:** restrict request email domains, require 2FA for admins or everyone, issue one-time reset links, and see or end sessions. The sign-up form has a bot check.
 
-### Website & Service Workspace Tabs
-Opening any website or service exposes its workspace toolbar (**Start / Stop / Restart**, **Deploy**, **Move Node**) and tab bar:
-- **Overview** — Live 7-stage deployment pipeline (`Pending -> Fetching -> Pulling -> Installing -> Building -> Deploying -> Health Checking`), URL/domain routing, and status.
-- **Commits** — Branch and commit history for Git-connected workloads.
-- **Logs** — Real-time stdout/stderr and build log streaming over SSE/WebSocket.
-- **Files** — In-browser remote file explorer, upload/download, and syntax-highlighted editor scoped strictly to the project root.
-- **Environment** — AES-256-GCM encrypted `.env` Vault secrets and linked database bindings.
-- **Releases** — The newest five releases and rollback to any of them.
-- **Backups** — Manual backups you can restore, download, lock and delete (also on every database).
-- **Activity** — Workload audit trail and placement/shift events (visible with the app's *View activity* permission).
-- **Permissions** — Who can use this app and what they can do (admins, and users with *Manage access* on it).
+</details>
 
-### Isolating apps (Linux)
-Without isolation an app would run as the same server user as the panel, so code a user deploys could read the panel's data folder and other apps' files. It is **on by default** on a Linux server where the panel runs as root with util-linux installed (`unshare`, `setpriv`, `mount`); set `WEBDEP_ISOLATE_APPS=0` to turn it off. Every app and build is then started:
-- in its own **PID, mount, IPC and UTS namespaces** (`unshare`): it cannot see or signal other processes;
-- with the panel's data folder and working folder **covered by an empty tmpfs**, only the app's own folder bound back in, and a private `/tmp`: other apps and the panel's secrets do not exist for it;
-- as an **unprivileged user** (`setpriv --no-new-privs`, uid/gid `WEBDEP_APP_UID`/`WEBDEP_APP_GID`, default 65534) that cannot undo any of this.
-Managed **databases** are isolated too: the PostgreSQL engine runs in its own mount, IPC and UTS namespaces (no PID namespace, so `pg_ctl` and `postmaster.pid` keep working), sees only its own folder (the panel's data folder, its database and every other database are hidden) and runs as the system `postgres` user without extra privileges. It needs a `postgres` user on the server (installing PostgreSQL creates one).
-The app's folder is handed to that user on start. Runtimes must be installed where that user can run them (not under `/root`). CPU and memory limits (cgroups) apply on top. The network stays shared because the reverse proxy reaches apps on their ports. The App Configs page says whether isolation is active. Turn it on for a test app first: it has not been exercised on a real Linux server yet.
+<details>
+<summary><b>Ports, IP addresses and limits</b></summary>
 
-### Data Layout
+<br>
 
-Everything WebDep stores lives under `DATA_DIR` (default `./data` inside the install folder; the service log prints `Data directory: ...` on start):
+- **Port ranges:** new apps take the lowest free port in the server's range. Ports stay private (reached only by Caddy and the mesh) until made public, and the firewall follows. With no free port, the app is not created and the panel says why.
+- **Several IPs per server:** add the public IPs and pick one per website or service. Caddy then serves its domains on that IP only.
+- **Resource limits:** CPU, memory, disk and number of backups, set at creation and changed in **App Configs**. Empty or `0` means no limit. CPU and memory use cgroups v2 on Linux (WebDep running as root) and Job Objects on Windows. Limits are checked shortly after an app starts and then every 2 minutes. An app over its disk limit is stopped; one at its CPU or memory limit keeps running but slows down. People who can see the app are told why.
+
+</details>
+
+---
+
+## 💾 Upgrading and backups
+
+**Update from the panel** with **Admin Panel › Nodes › Update Fleet** (workers first, then Web-Core), or over SSH with `./start.sh --update`. Running the install line again also updates, keeping `data/` and `.env`.
+
+> [!WARNING]
+> **v3.0.12 and older cannot be updated to later releases.** Copy out anything you need, remove the old install, and install fresh.
+
+WebDep backs up its control database before any upgrade that changes it. [docs/UPGRADING.md](docs/UPGRADING.md) covers rollback.
+
+| What | How it works |
+| :--- | :--- |
+| **App backups** | All files and environment variables in one archive, with size, file count, creator, status and checksum. You can leave out names such as `cache` or `*.log`. |
+| **Restore** | Replaces the app's files (never merges), verifies the checksum, swaps folders with rollback and keeps the replaced files for 24 hours. You confirm by typing the app's name. |
+| **Database backups** | PostgreSQL dumps taken while running. Restore happens in one transaction, so a failure changes nothing. Not yet available for databases on other servers. |
+| **Control database** | Backed up daily (seven kept) and before upgrades, in `data/backups/control-db/`. |
+| **Copy on Web-Core** | Optionally keep a copy of another server's app backup, and restore it onto any healthy server. |
+
+App backups are manual, stay on the server that runs the app, and can be locked against deletion. The audit page searches and exports to CSV; panel history is kept for 365 days and each app keeps its newest 100 entries.
+
+> [!CAUTION]
+> Back up `data/master.key` **together with** `data/control-pg/`. Without the key, stored secrets cannot be decrypted. Do not copy these folders while PostgreSQL is running.
+
+---
+
+## 🛡️ App isolation (Linux)
+
+Without isolation, deployed code runs as the same user as the panel and could read its data. Isolation is **on by default** when the panel runs as root with util-linux (`unshare`, `setpriv`, `mount`) installed.
+
+- Each app and build gets its own **PID, mount, IPC and UTS namespaces**.
+- The panel's folders are **hidden behind an empty filesystem**; only the app's own folder and a private `/tmp` are visible.
+- Apps run as an **unprivileged user** (default uid and gid `65534`) with no way to gain privileges.
+- Managed **databases** run in their own mount, IPC and UTS namespaces as the `postgres` user, and see only their own folder.
+
+Install runtimes where that user can run them, not under `/root`. The network stays shared so the reverse proxy can reach apps. **App Configs** shows whether isolation is active. Set `WEBDEP_ISOLATE_APPS=0` to turn it off.
+
+> [!NOTE]
+> Isolation has had limited testing on real servers. Try it with a test app first.
+
+---
+
+## ⚙️ Configuration
+
+WebDep reads `.env` from its working folder, or normal environment variables.
+
+<details>
+<summary><b>Environment variables</b></summary>
+
+<br>
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `HOST` | `0.0.0.0` | Address the panel listens on |
+| `PORT` | `4600` | Panel and API port |
+| `DATA_DIR` | `./data` | Where WebDep stores everything |
+| `DATABASE_URL` | built-in PostgreSQL on `5431` | External database for Web-Core (nodes never read it) |
+| `ADMIN_USERNAME` | `admin` | Main admin username |
+| `ADMIN_PASSWORD` | generated on first start | Main admin password |
+| `ADMIN_RESET_2FA` | `false` | Set `true` temporarily to reset the main admin's 2FA |
+| `SESSION_TTL_S` | `604800` | Longest session, in seconds (7 days) |
+| `SESSION_IDLE_TIMEOUT_S` | `1800` | Sign out after inactivity (`0` disables) |
+| `FORCE_SECURE_COOKIES` | `false` | Always mark cookies `Secure` (automatic behind HTTPS) |
+| `PUBLIC_IP` | detected | Override the panel's public IP |
+| `WEBDEP_NODE_P2P_BIND` | `0.0.0.0` | Address for the node's transfer receiver |
+| `WEBDEP_NODE_P2P_PORT` | `0` (any free port) | Port for the node's transfer receiver |
+| `WEBDEP_SKIP_DB_BACKUP` | `false` | Set `1` to skip the pre-upgrade backup, only if you back up yourself |
+| `WEBDEP_MANAGE_FIREWALL` | `true` | Set `false` to stop WebDep editing UFW and iptables |
+| `WEBDEP_ISOLATE_APPS` | on | Set `0` to turn off [app isolation](#%EF%B8%8F-app-isolation-linux) |
+| `WEBDEP_APP_UID` / `WEBDEP_APP_GID` | `65534` | User and group for isolated apps |
+| `RUST_LOG` | `webdep=info` | Log level |
+
+</details>
+
+<details>
+<summary><b>Command-line flags</b></summary>
+
+<br>
+
+| Flag | Description |
+| :--- | :--- |
+| *(none)* | Start Web-Core with a paired local Web-Node |
+| `--core` | Web-Core only |
+| `--node` | Web-Node only |
+| `--join <URL>` | Enrol a node (with `--node` and `--token`) |
+| `--token <TOKEN>` | Single-use join token |
+| `--name <LABEL>` | Node name |
+| `--region <REGION>` | Node region |
+| `--public-ip <IP>` | Public IP or host name for the node |
+| `--wg-port <PORT>` | WireGuard UDP port (default `51820`) |
+| `--enroll-only` | Enrol, save the node settings and exit |
+| `--pair-local` | Pair the local node without starting the server |
+| `--version`, `-V` | Print the version and exit |
+
+</details>
+
+<details>
+<summary><b>Where data is stored</b></summary>
+
+<br>
+
+Everything lives under `DATA_DIR`.
 
 | Path | Contents |
 | :--- | :--- |
-| `control-pg/pgdata/` | Web-Core's own PostgreSQL database (users, projects, deployments, settings, nodes). `control-pg/conn.json` holds its port and credentials. |
-| `master.key` | Key for the encrypted `.env` vault. **Back it up together with `control-pg/`** — without it stored secrets cannot be decrypted. |
-| `databases/db-<id>/data/` | Each managed PostgreSQL database created in the panel. |
-| `containers/<app>/`, `sites/`, `services/` | App runtime data and deployed code. |
-| `caddy/`, `mesh/`, `keys/` | Reverse-proxy config and certificates, WireGuard mesh, deploy keys. |
+| `control-pg/` | The panel's database, with its port and credentials in `conn.json` |
+| `master.key` | Key for the encrypted variable vault |
+| `databases/db-<id>/` | Each managed database |
+| `containers/`, `sites/`, `services/` | App data and deployed code |
+| `backups/`, `offnode-backups/` | Backups |
+| `caddy/`, `mesh/`, `keys/` | Proxy configuration, WireGuard mesh, deploy keys |
+| `node-state.json` | A node's enrolment |
 
-Do not copy these folders while PostgreSQL is running; use panel backups or stop WebDep first.
+</details>
 
-### Upgrading and rolling back
+<details>
+<summary><b>Running as a non-root user (Ubuntu)</b></summary>
 
-WebDep backs up its control database before every upgrade that changes it. See [docs/UPGRADING.md](docs/UPGRADING.md) for how the backup works and how to roll back, and [docs/GUIDE.md](docs/GUIDE.md) for how accounts, limits and backups behave.
+<br>
 
-### Running as a Non-Root User (Ubuntu)
-
-If the service runs as a regular user (for example `ubuntu`), systemd-logind deletes that user's shared memory when their last SSH session ends (`RemoveIPC=yes`). The control PostgreSQL then refuses new connections (`could not open shared memory segment`) and WebDep fails on its next restart. Disable it once per server:
+Ubuntu removes a regular user's shared memory when their last SSH session ends. The control database then refuses connections (`could not open shared memory segment`). Disable this once per server:
 
 ```bash
 sudo sed -i 's/^#\?RemoveIPC=.*/RemoveIPC=no/' /etc/systemd/logind.conf && sudo systemctl restart systemd-logind
 ```
 
-If it already happened: `sudo systemctl stop webdep-core`, stop the stale server with `pg_ctl -D data/control-pg/pgdata -m fast stop` (as the service user), then start WebDep again. Services running as `root` are not affected.
+If it already happened: run `sudo systemctl stop webdep-core`, stop the stale database with `pg_ctl -D data/control-pg/pgdata -m fast stop` as the service user, then start WebDep again. Services running as `root` are not affected.
+
+</details>
 
 ---
 
-## CLI & Configuration Reference
-
-### CLI Flags
-
-| Flag | Description |
-| :--- | :--- |
-| *(none)* | Default mode on Core host: starts **Web-Core** and auto-pairs/runs a local **Web-Node**. |
-| `--core` | Run **Web-Core only** (panel + PostgreSQL, no local Web-Node agent). |
-| `--node` | Run **Web-Node worker only** (no PostgreSQL; loads `data/node-state.json`). |
-| `--join <URL>` | Enroll a Web-Node into Core (requires `--node`, `--token <WDJOIN_TOKEN>`). |
-| `--name <LABEL>` | Node label used during enrollment (or local pairing). |
-| `--region <REGION>` | Node region metadata (e.g. `mumbai-IND`, `eu-central`). |
-| `--public-ip <IP>` | Public IP/hostname advertised for DNS cutover cards and P2P fallback. |
-| `--wg-port <PORT>` | WireGuard UDP listen port (default `51820`). |
-| `--enroll-only` | Enroll, write `data/node-state.json`, and exit (used by `start.sh --service`). |
-| `--pair-local` | Pair the local Web-Node against Core PostgreSQL without starting the server. |
-| `--version` / `-V` | Print binary version and exit (used by fleet self-update checks). |
-
-### Environment Variables (`.env`)
-
-WebDep loads configuration from `.env` in the process's current working directory or environment variables:
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `HOST` | `0.0.0.0` | Network interface for Web-Core panel binding. |
-| `PORT` | `4600` | HTTP port for Web-Core panel and API. |
-| `DATA_DIR` | `./data` | Data root for `control-pg/`, `node-state.json`, `sites/`, `services/`, `offnode-backups/`, and vault key. |
-| `DATABASE_URL` | *(auto zero-config PG on `5431`)* | Optional external PostgreSQL connection URL for Web-Core (`--node` never reads this). |
-| `ADMIN_USERNAME` | `admin` | Main administrator login username. |
-| `ADMIN_PASSWORD` | *(auto-generated on 1st boot)* | Main administrator password (random 20-char secret generated at startup if empty/default). |
-| `ADMIN_RESET_2FA` | `false` | Set to `true` temporarily to reset Main Admin TOTP 2FA on startup. |
-| `SESSION_TTL_S` | `604800` | Absolute session lifetime in seconds (7 days default). |
-| `SESSION_IDLE_TIMEOUT_S` | `1800` | Idle inactivity session expiration in seconds (`0` disables). |
-| `FORCE_SECURE_COOKIES` | `false` | Unconditionally set `Secure` cookies (auto-enabled on `X-Forwarded-Proto: https`). |
-| `PUBLIC_IP` | *(auto-detected)* | Optional override for Core panel IP returned by `/api/cluster/panel-info`. |
-| `WEBDEP_NODE_P2P_BIND` | `0.0.0.0` | Bind address for Web-Node's direct P2P archive receiver. |
-| `WEBDEP_NODE_P2P_PORT` | `0` *(ephemeral)* | TCP port for Web-Node's direct P2P HTTP receiver (`0` picks a free port). |
-| `WEBDEP_SKIP_DB_BACKUP` | `false` | Set to `1` to skip the automatic control-database backup taken before an upgrade applies new migrations. Only if you back up yourself. |
-| `WEBDEP_MANAGE_FIREWALL` | `true` | Set to `false` to stop WebDep from editing UFW/iptables (panel, app, database and WireGuard mesh rules). Use it when the host firewall is managed elsewhere. |
-| `WEBDEP_ISOLATE_APPS` | on | Linux, panel running as root: apps and builds run isolated unless set to `0` (see *Isolating apps*). |
-| `WEBDEP_APP_UID` / `WEBDEP_APP_GID` | `65534` | The unprivileged user and group isolated apps run as. |
-| `RUST_LOG` | `webdep=info` | Tracing log filter (`debug`, `info`, `warn`, `error`). |
-
----
-
-## Supported Runtimes & Frameworks
-
-| Runtime | Example Install Command | Example Start Command | Use Cases |
-| :--- | :--- | :--- | :--- |
-| **Node.js** | `npm ci` / `pnpm install` | `npm start` / `node server.js` | Next.js, Express, Fastify, APIs, Node services |
-| **Python** | `pip install -r requirements.txt` | `python -m uvicorn main:app --port {{PORT}}` | FastAPI, Flask, Django, Python workers |
-| **Go** | `go build -o app .` | `./app` | Gin, Echo, Fiber, backend daemons |
-| **Rust** | `cargo build --release` | `./target/release/server` | Axum, Actix-web, high-throughput services |
-| **Java** | Pre-built JAR / Gradle | `java -jar Lavalink.jar` | Lavalink audio servers, Spring Boot |
-| **Static / SPA** | `npm run build` | Static build output | React, Vite, Vue, Svelte, Astro |
-
----
-
-## Automated Releases (CI/CD)
-
-Pushes to `main` run the Rust test suite, a frontend syntax check and the SonarCloud quality gate, then build static `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` binaries plus a Windows `x86_64` binary via [`.github/workflows/release.yml`](.github/workflows/release.yml) and publish SemVer releases (`vX.Y.Z`). A release is only cut when the quality gate passes:
-
-- **Default commit** → bumps **`patch`** (`v2.0.0` → `v2.0.1`)
-- **`[minor]` / `minor:`** in commit message → bumps **`minor`** (`v2.0.1` → `v2.1.0`)
-- **`[major]` / `major:` / `BREAKING CHANGE:` / `feat!:`** → bumps **`major`** (`v2.1.0` → `v3.0.0`)
-- **`docs:` / `[docs]` / `[skip release]` / `[skip ci]`** → skips cutting a release
-
----
-
-## Testing & Verification
+## 🧑‍💻 Development
 
 ```bash
-# Run all Rust unit and integration tests
-cargo test --locked
-
-# Lints (keep this clean; CI's SonarCloud gate blocks releases on new issues)
-cargo clippy --tests
-
-# Verify every frontend module's syntax (same check as CI)
-for f in public/app.js public/js/*.js; do node --check "$f"; done
+cargo test --locked      # unit and integration tests
+cargo clippy --tests     # lints
+for f in public/app.js public/js/*.js; do node --check "$f"; done   # frontend syntax
 ```
 
-PostgreSQL-backed tests start a throwaway cluster automatically when PostgreSQL binaries are installed, or use `WEBDEP_TEST_DATABASE_URL` if set.
+Database tests start a temporary cluster when PostgreSQL is installed, or use `WEBDEP_TEST_DATABASE_URL`. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+
+<details>
+<summary><b>How releases are made</b></summary>
+
+<br>
+
+Pushing to `main` runs the tests, a frontend syntax check and the SonarCloud quality gate. When they pass, [the release workflow](.github/workflows/release.yml) builds Linux (`x86_64`, `aarch64`) and Windows binaries and publishes a release.
+
+| Commit message contains | Version change |
+| :--- | :--- |
+| nothing special | patch |
+| `[minor]` or `minor:` | minor |
+| `[major]`, `major:`, `BREAKING CHANGE:` or `feat!:` | major |
+| `docs:`, `[docs]`, `[skip release]` or `[skip ci]` | no release |
+
+For an exact version, run the workflow manually and fill in **version**, or push a `vX.Y.Z` tag.
+
+</details>
 
 ---
 
-## License
+<div align="center">
 
-This project is licensed under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE).<br>
+If WebDep is useful to you, consider giving it a ⭐
+
+</div>
